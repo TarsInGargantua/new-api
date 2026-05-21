@@ -62,6 +62,21 @@ func TestResolveConfiguredDSNBuildsFromMySQLEnv(t *testing.T) {
 	}
 }
 
+func TestResolveConfiguredDSNUsesMySQLConnectionString(t *testing.T) {
+	clearDatabaseEnv(t)
+	t.Setenv("MYSQL_CONNECTION_STRING", "mysql://user:pass@mysql.zeabur.internal:3306/newapi")
+
+	got := resolveConfiguredDSN("SQL_DSN")
+	if !strings.HasPrefix(got, "user:pass@tcp(mysql.zeabur.internal:3306)/newapi?") {
+		t.Fatalf("unexpected converted dsn prefix: %q", got)
+	}
+	for _, want := range []string{"charset=utf8mb4", "parseTime=true", "loc=Local"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in dsn %q", want, got)
+		}
+	}
+}
+
 func TestResolveConfiguredDSNIgnoresUnsupportedDatabaseURL(t *testing.T) {
 	clearDatabaseEnv(t)
 	t.Setenv("DATABASE_URL", "redis://redis:6379")
