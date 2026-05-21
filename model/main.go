@@ -119,7 +119,7 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, error) {
 	defer func() {
 		initCol()
 	}()
-	dsn := os.Getenv(envName)
+	dsn := resolveConfiguredDSN(envName)
 	if dsn != "" {
 		if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
 			// Use PostgreSQL
@@ -149,14 +149,7 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, error) {
 		}
 		// Use MySQL
 		common.SysLog("using MySQL as database")
-		// check parseTime
-		if !strings.Contains(dsn, "parseTime") {
-			if strings.Contains(dsn, "?") {
-				dsn += "&parseTime=true"
-			} else {
-				dsn += "?parseTime=true"
-			}
-		}
+		dsn = ensureMySQLDSNDefaults(dsn)
 		if !isLog {
 			common.UsingMySQL = true
 		} else {
