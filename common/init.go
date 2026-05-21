@@ -81,6 +81,13 @@ func InitEnv() {
 	// Initialize variables from constants.go that were using environment variables
 	DebugEnabled = os.Getenv("DEBUG") == "true"
 	MemoryCacheEnabled = os.Getenv("MEMORY_CACHE_ENABLED") == "true"
+	AuditContentEnabled = GetEnvOrDefaultBool("AUDIT_CONTENT_ENABLED", false)
+	AuditContentMaxBytes = GetEnvOrDefault("AUDIT_CONTENT_MAX_BYTES", 64*1024)
+	if AuditContentMaxBytes < 0 {
+		AuditContentMaxBytes = 0
+	}
+	AuditContentCaptureResponse = GetEnvOrDefaultBool("AUDIT_CONTENT_CAPTURE_RESPONSE", true)
+	AuditContentRedactSecrets = GetEnvOrDefaultBool("AUDIT_CONTENT_REDACT_SECRETS", true)
 	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
 	NodeName = os.Getenv("NODE_NAME")
 	TLSInsecureSkipVerify = GetEnvOrDefaultBool("TLS_INSECURE_SKIP_VERIFY", false)

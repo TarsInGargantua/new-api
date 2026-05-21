@@ -113,6 +113,10 @@ var DebugEnabled bool
 var MemoryCacheEnabled bool
 
 var LogConsumeEnabled = true
+var AuditContentEnabled = false
+var AuditContentMaxBytes = 64 * 1024
+var AuditContentCaptureResponse = true
+var AuditContentRedactSecrets = true
 
 var TLSInsecureSkipVerify bool
 var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}
