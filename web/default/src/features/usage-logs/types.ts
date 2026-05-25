@@ -93,6 +93,7 @@ export interface ChannelAffinityInfo {
 }
 
 export interface LogOtherData {
+  message_capture?: MessageCaptureData
   admin_info?: {
     is_multi_key?: boolean
     multi_key_index?: number
@@ -191,6 +192,35 @@ export interface LogOtherData {
   subscription_total?: number
 }
 
+export interface MessageCaptureBody {
+  content_type?: string
+  body?: string
+  omitted_reason?: string
+  size?: number
+  captured_bytes?: number
+  truncated?: boolean
+  redacted?: boolean
+  status?: number
+}
+
+export interface MessageCaptureMessage {
+  role?: string
+  content?: string
+  reasoning?: string
+  source?: string
+}
+
+export interface MessageCaptureData {
+  conversation_id?: string
+  question?: string
+  model_reasoning?: string
+  answer?: string
+  messages?: MessageCaptureMessage[]
+  raw_request?: MessageCaptureBody
+  raw_response?: MessageCaptureBody
+  meta?: Record<string, unknown>
+}
+
 /**
  * Log statistics data
  */
@@ -269,6 +299,7 @@ export interface GetLogsParams {
   group?: string
   request_id?: string
   upstream_request_id?: string
+  conversation_id?: string
 }
 
 export interface GetLogsResponse {

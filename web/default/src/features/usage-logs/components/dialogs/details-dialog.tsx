@@ -29,8 +29,11 @@ import {
   ShieldCheck,
   UserCog,
   Info,
+  MessageSquareText,
 } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatLogQuota, formatTokens, formatUseTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -64,7 +67,8 @@ import {
   isPerCallBilling,
   isTimingLogType,
 } from '../../lib/utils'
-import type { LogOtherData } from '../../types'
+import { getAllLogsByConversationId, getUserLogsByConversationId } from '../../api'
+import type { LogOtherData, MessageCaptureData } from '../../types'
 
 function timingTextColorClass(
   variant: 'success' | 'warning' | 'danger'
@@ -127,6 +131,227 @@ function DetailSection(props: {
         {props.children}
       </div>
     </div>
+  )
+}
+
+function MessageCaptureSection(props: {
+  capture: MessageCaptureData
+}) {
+  const { t } = useTranslation()
+  const { capture } = props
+  const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
+  const rawRequest = capture.raw_request?.body || ''
+  const rawResponse = capture.raw_response?.body || ''
+  const displayedRawRequest =
+    rawRequest || capture.raw_request?.omitted_reason || '-'
+  const displayedRawResponse =
+    rawResponse || capture.raw_response?.omitted_reason || '-'
+  const hasRawRequest =
+    rawRequest !== '' ||
+    !!capture.raw_request?.omitted_reason ||
+    !!capture.raw_request?.content_type
+  const hasRawResponse =
+    rawResponse !== '' ||
+    !!capture.raw_response?.omitted_reason ||
+    !!capture.raw_response?.content_type
+  const hasMessages =
+    Array.isArray(capture.messages) && capture.messages.length > 0
+  const hasMeta = capture.meta && Object.keys(capture.meta).length > 0
+
+  return (
+    <DetailSection
+      icon={<MessageSquareText className='size-3.5' aria-hidden='true' />}
+      label={t('Message Capture')}
+    >
+      {capture.question && (
+        <DetailRow label={t('Question')} value={capture.question} />
+      )}
+      {capture.answer && <DetailRow label={t('Answer')} value={capture.answer} />}
+      {capture.model_reasoning && (
+        <DetailRow label={t('Reasoning')} value={capture.model_reasoning} />
+      )}
+
+      {hasMessages && (
+        <div className='space-y-2'>
+          {capture.messages?.map((message, index) => (
+            <div
+              key={index}
+              className='bg-background/60 rounded border p-2 text-xs'
+            >
+              <div className='text-muted-foreground mb-1 flex items-center justify-between gap-2'>
+                <span className='font-medium'>
+                  {message.role || t('Message')}
+                </span>
+                {message.source && <span>{message.source}</span>}
+              </div>
+              {message.reasoning && (
+                <p className='text-amber-700 dark:text-amber-300'>
+                  {message.reasoning}
+                </p>
+              )}
+              {message.content && <p className='mt-1'>{message.content}</p>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {hasRawRequest && (
+        <div className='space-y-1.5'>
+          <DetailRow
+            label={t('Raw Request')}
+            value={
+              capture.raw_request?.content_type ||
+              capture.raw_request?.omitted_reason ||
+              '-'
+            }
+          />
+          <div className='bg-background/60 relative rounded border p-2'>
+            <Button
+              variant='ghost'
+              size='sm'
+              className='absolute top-1.5 right-1.5 h-5 w-5 p-0'
+              onClick={() => copyToClipboard(displayedRawRequest)}
+              title={t('Copy to clipboard')}
+              aria-label={t('Copy to clipboard')}
+            >
+              {copiedText === displayedRawRequest ? (
+                <Check className='size-3 text-green-600' />
+              ) : (
+                <Copy className='size-3' />
+              )}
+            </Button>
+            <p className='pr-6 text-xs leading-relaxed break-all whitespace-pre-wrap'>
+              {displayedRawRequest}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {hasRawResponse && (
+        <div className='space-y-1.5'>
+          <DetailRow
+            label={t('Raw Response')}
+            value={
+              capture.raw_response?.content_type ||
+              capture.raw_response?.omitted_reason ||
+              '-'
+            }
+          />
+          <div className='bg-background/60 relative rounded border p-2'>
+            <Button
+              variant='ghost'
+              size='sm'
+              className='absolute top-1.5 right-1.5 h-5 w-5 p-0'
+              onClick={() => copyToClipboard(displayedRawResponse)}
+              title={t('Copy to clipboard')}
+              aria-label={t('Copy to clipboard')}
+            >
+              {copiedText === displayedRawResponse ? (
+                <Check className='size-3 text-green-600' />
+              ) : (
+                <Copy className='size-3' />
+              )}
+            </Button>
+            <p className='pr-6 text-xs leading-relaxed break-all whitespace-pre-wrap'>
+              {displayedRawResponse}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {hasMeta && (
+        <div className='space-y-1.5'>
+          <Label className='text-xs font-semibold'>{t('Metadata')}</Label>
+          <pre className='bg-background/60 max-h-48 overflow-auto rounded border p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap'>
+            {JSON.stringify(capture.meta, null, 2)}
+          </pre>
+        </div>
+      )}
+    </DetailSection>
+  )
+}
+
+function ConversationThreadSection(props: {
+  capture: MessageCaptureData
+  currentLog: UsageLog
+  isAdmin: boolean
+}) {
+  const { t } = useTranslation()
+  const { capture, currentLog, isAdmin } = props
+  const conversationId = capture.conversation_id?.trim()
+  const { data, isLoading } = useQuery({
+    queryKey: [
+      'usage-logs-conversation',
+      conversationId,
+      isAdmin,
+      currentLog.user_id,
+      currentLog.type,
+    ],
+    queryFn: async () => {
+      if (!conversationId) return null
+      const result = isAdmin
+        ? await getAllLogsByConversationId(conversationId, {
+            page_size: 100,
+          })
+        : await getUserLogsByConversationId(conversationId, {
+            page_size: 100,
+          })
+      if (!result.success) {
+        toast.error(result.message || t('Failed to load logs'))
+        return null
+      }
+      return result.data?.items ?? []
+    },
+    enabled: !!conversationId,
+  })
+
+  if (!conversationId) return null
+
+  const logs = Array.isArray(data)
+    ? [...data].sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
+    : []
+
+  return (
+    <DetailSection
+      icon={<Route className='size-3.5' aria-hidden='true' />}
+      label={t('Conversation Thread')}
+    >
+      <DetailRow label={t('Conversation ID')} value={conversationId} mono />
+      {isLoading && (
+        <div className='text-muted-foreground text-xs'>{t('Loading...')}</div>
+      )}
+      {!isLoading && logs.length > 0 && (
+        <div className='space-y-2'>
+          {logs.map((log) => {
+            const logOther = parseLogOther(log.other)
+            const logCapture = logOther?.message_capture
+            const summary = logCapture?.answer || log.content || '-'
+            return (
+              <div
+                key={`${log.id}-${log.created_at}`}
+                className='bg-background/60 rounded border p-2 text-xs'
+              >
+                <div className='text-muted-foreground mb-1 flex items-center justify-between gap-2'>
+                  <span>
+                    {new Date(log.created_at * 1000).toLocaleString()}
+                  </span>
+                  <span>{log.request_id || '-'}</span>
+                </div>
+                {logCapture?.question && (
+                  <p className='mb-1 font-medium'>{logCapture.question}</p>
+                )}
+                <p className='whitespace-pre-wrap break-words'>{summary}</p>
+              </div>
+            )
+          })}
+        </div>
+      )}
+      {!isLoading && logs.length === 0 && (
+        <div className='text-muted-foreground text-xs'>
+          {t('No data available')}
+        </div>
+      )}
+    </DetailSection>
   )
 }
 
@@ -411,6 +636,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const isTopup = props.log.type === 1
   const isManage = props.log.type === 3
   const isSubscription = other?.billing_source === 'subscription'
+  const messageCapture = other?.message_capture
   const isTieredBilling =
     isConsume &&
     !isViolation &&
@@ -1040,6 +1266,18 @@ export function DetailsDialog(props: DetailsDialogProps) {
                   </p>
                 </div>
               </div>
+            )}
+
+            {messageCapture && (
+              <MessageCaptureSection capture={messageCapture} />
+            )}
+
+            {messageCapture && (
+              <ConversationThreadSection
+                capture={messageCapture}
+                currentLog={props.log}
+                isAdmin={props.isAdmin}
+              />
             )}
           </div>
         </ScrollArea>
