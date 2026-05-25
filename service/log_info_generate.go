@@ -80,6 +80,7 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	appendParamOverrideInfo(relayInfo, other)
 	appendStreamStatus(relayInfo, other)
 	AppendContentAudit(ctx, other)
+	appendMessageCapture(ctx, relayInfo, other)
 	return other
 }
 

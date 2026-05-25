@@ -76,6 +76,18 @@ export const getUserLogs = (
   params: Omit<GetLogsParams, 'username' | 'channel'> = {}
 ) => fetchLogs('/api/log', params, false)
 
+export const getAllLogsByConversationId = (
+  conversationId: string,
+  params: Omit<GetLogsParams, 'conversation_id'> = {}
+) =>
+  fetchLogs('/api/log', { ...params, conversation_id: conversationId }, true)
+
+export const getUserLogsByConversationId = (
+  conversationId: string,
+  params: Omit<GetLogsParams, 'conversation_id' | 'username' | 'channel'> = {}
+) =>
+  fetchLogs('/api/log', { ...params, conversation_id: conversationId }, false)
+
 export const getLogStats = (params: GetLogStatsParams = {}) =>
   fetchLogStats('/api/log', params, true)
 

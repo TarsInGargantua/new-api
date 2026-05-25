@@ -207,6 +207,9 @@ export function buildApiParams(config: {
     ...(searchParams.upstreamRequestId
       ? { upstream_request_id: String(searchParams.upstreamRequestId) }
       : {}),
+    ...(searchParams.conversationId
+      ? { conversation_id: String(searchParams.conversationId) }
+      : {}),
     ...buildTimeRangeParams(searchParams, false),
   }
 
@@ -233,6 +236,9 @@ export function buildApiParams(config: {
           break
         case 'username':
           if (isAdmin) params.username = String(value)
+          break
+        case 'conversation_id':
+          params.conversation_id = String(value)
           break
       }
     })
