@@ -409,7 +409,14 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 }
 
 func RelayMidjourney(c *gin.Context) {
-	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatMjProxy, nil, nil)
+	service.StartAPIRequestLogCapture(c)
+	var relayInfo *relaycommon.RelayInfo
+	defer func() {
+		service.RecordAPIRequestLog(c, relayInfo, nil)
+	}()
+
+	var err error
+	relayInfo, err = relaycommon.GenRelayInfo(c, types.RelayFormatMjProxy, nil, nil)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -476,7 +483,14 @@ func RelayNotFound(c *gin.Context) {
 }
 
 func RelayTaskFetch(c *gin.Context) {
-	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
+	service.StartAPIRequestLogCapture(c)
+	var relayInfo *relaycommon.RelayInfo
+	defer func() {
+		service.RecordAPIRequestLog(c, relayInfo, nil)
+	}()
+
+	var err error
+	relayInfo, err = relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, &dto.TaskError{
 			Code:       "gen_relay_info_failed",
@@ -491,7 +505,14 @@ func RelayTaskFetch(c *gin.Context) {
 }
 
 func RelayTask(c *gin.Context) {
-	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
+	service.StartAPIRequestLogCapture(c)
+	var relayInfo *relaycommon.RelayInfo
+	defer func() {
+		service.RecordAPIRequestLog(c, relayInfo, nil)
+	}()
+
+	var err error
+	relayInfo, err = relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, &dto.TaskError{
 			Code:       "gen_relay_info_failed",
