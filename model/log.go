@@ -537,6 +537,16 @@ func GetUserDailyUsageStats(startTimestamp int64, endTimestamp int64, modelName 
 	return rows, err
 }
 
+func GetLogModelNames() ([]string, error) {
+	var models []string
+	err := LOG_DB.Model(&Log{}).
+		Where("model_name <> ''").
+		Distinct("model_name").
+		Order("model_name ASC").
+		Pluck("model_name", &models).Error
+	return models, err
+}
+
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
 	tx := LOG_DB.Table("logs").Select("sum(quota) quota")
 

@@ -164,6 +164,15 @@ func GetUserDailyUsageStats(c *gin.Context) {
 	common.ApiSuccess(c, stats)
 }
 
+func GetLogModelNames(c *gin.Context) {
+	models, err := model.GetLogModelNames()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, models)
+}
+
 func DeleteHistoryLogs(c *gin.Context) {
 	targetTimestamp, _ := strconv.ParseInt(c.Query("target_timestamp"), 10, 64)
 	if targetTimestamp == 0 {

@@ -54,6 +54,15 @@ const addUsageSummary = (usageByUserId, item) => {
   });
 };
 
+const buildModelOptions = (models) =>
+  Array.from(new Set((models || []).map((model) => String(model || '').trim())))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b))
+    .map((model) => ({
+      label: model,
+      value: model,
+    }));
+
 export const useUsersData = () => {
   const { t } = useTranslation();
   const [compactMode, setCompactMode] = useTableCompactMode('users');
@@ -376,22 +385,21 @@ export const useUsersData = () => {
   };
 
   const fetchEnabledModels = async () => {
-    try {
-      const res = await API.get('/api/channel/models_enabled');
-      const { success, message, data } = res.data;
-      if (success) {
-        setEnabledModelOptions(
-          (data || []).map((model) => ({
-            label: model,
-            value: model,
-          })),
-        );
-      } else {
-        showError(message);
+    const results = await Promise.allSettled([
+      API.get('/api/channel/models_enabled', { skipErrorHandler: true }),
+      API.get('/api/log/models', { skipErrorHandler: true }),
+    ]);
+    const models = [];
+
+    results.forEach((result) => {
+      if (result.status !== 'fulfilled') return;
+      const { success, data } = result.value.data || {};
+      if (success && Array.isArray(data)) {
+        models.push(...data);
       }
-    } catch (error) {
-      showError(error.message);
-    }
+    });
+
+    setEnabledModelOptions(buildModelOptions(models));
   };
 
   // Modal control functions

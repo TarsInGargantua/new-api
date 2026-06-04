@@ -12,7 +12,7 @@ func setupAPIRequestLogTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&APIRequestLog{}))
+	require.NoError(t, db.AutoMigrate(&APIRequestLog{}, &Log{}))
 
 	oldLogDB := LOG_DB
 	oldLogGroupCol := logGroupCol
@@ -23,6 +23,31 @@ func setupAPIRequestLogTestDB(t *testing.T) *gorm.DB {
 		logGroupCol = oldLogGroupCol
 	})
 	return db
+}
+
+func TestGetLogModelNames(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	require.NoError(t, LOG_DB.Create(&Log{
+		ModelName: "gpt-5.5",
+		Type:      LogTypeConsume,
+	}).Error)
+	require.NoError(t, LOG_DB.Create(&Log{
+		ModelName: "claude-opus-4-7",
+		Type:      LogTypeConsume,
+	}).Error)
+	require.NoError(t, LOG_DB.Create(&Log{
+		ModelName: "gpt-5.5",
+		Type:      LogTypeConsume,
+	}).Error)
+	require.NoError(t, LOG_DB.Create(&Log{
+		ModelName: "",
+		Type:      LogTypeConsume,
+	}).Error)
+
+	models, err := GetLogModelNames()
+	require.NoError(t, err)
+	require.Equal(t, []string{"claude-opus-4-7", "gpt-5.5"}, models)
 }
 
 func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {

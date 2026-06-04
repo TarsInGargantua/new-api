@@ -74,12 +74,36 @@ export async function getUserDailyUsageStats(params: {
 }
 
 export async function getEnabledModels() {
-  const res = await api.get<{
+  type ModelsResponse = {
     success: boolean
     message?: string
     data?: string[]
-  }>('/api/channel/models_enabled')
-  return res.data
+  }
+  const results = await Promise.allSettled([
+    api.get<ModelsResponse>('/api/channel/models_enabled'),
+    api.get<ModelsResponse>('/api/log/models'),
+  ])
+  const models = new Set<string>()
+  let message = ''
+
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue
+    const payload = result.value.data
+    if (!payload.success) {
+      message ||= payload.message || ''
+      continue
+    }
+    for (const model of payload.data || []) {
+      const normalized = String(model || '').trim()
+      if (normalized) models.add(normalized)
+    }
+  }
+
+  return {
+    success: models.size > 0 || results.some((r) => r.status === 'fulfilled'),
+    message,
+    data: Array.from(models).sort((a, b) => a.localeCompare(b)),
+  }
 }
 
 // Get uptime monitoring status for all services
