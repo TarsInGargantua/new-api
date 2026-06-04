@@ -26,6 +26,8 @@ import type {
   ManageUserAction,
   ManageUserQuotaPayload,
   ApiResponse,
+  UserUsageStats,
+  GetUserUsageStatsParams,
 } from './types'
 
 // ============================================================================
@@ -53,6 +55,42 @@ export async function searchUsers(
   const res = await api.get(
     `/api/user/search?keyword=${keyword}&group=${group}&p=${p}&page_size=${page_size}`
   )
+  return res.data
+}
+
+/**
+ * Fallback for deployed backends that already expose dashboard quota data.
+ * This endpoint does not support model filtering.
+ */
+export async function getUserQuotaUsageStats(params: {
+  start_timestamp?: number
+  end_timestamp?: number
+}): Promise<ApiResponse<UserUsageStats[]>> {
+  const res = await api.get('/api/data/users', { params })
+  return res.data
+}
+
+/**
+ * Get aggregated usage for specific users.
+ */
+export async function getUserUsageStats(
+  params: GetUserUsageStatsParams
+): Promise<ApiResponse<UserUsageStats[]>> {
+  const { user_ids, ...rest } = params
+  const res = await api.get('/api/log/user_usage', {
+    params: {
+      ...rest,
+      user_ids: user_ids.join(','),
+    },
+  })
+  return res.data
+}
+
+/**
+ * Get enabled model names for usage filtering.
+ */
+export async function getEnabledModels(): Promise<ApiResponse<string[]>> {
+  const res = await api.get('/api/channel/models_enabled')
   return res.data
 }
 

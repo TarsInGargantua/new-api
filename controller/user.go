@@ -248,6 +248,39 @@ func GetAllUsers(c *gin.Context) {
 	return
 }
 
+func parseQueryIntList(value string) []int {
+	items := strings.Split(value, ",")
+	seen := make(map[int]struct{}, len(items))
+	result := make([]int, 0, len(items))
+	for _, item := range items {
+		id, err := strconv.Atoi(strings.TrimSpace(item))
+		if err != nil || id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
+}
+
+func GetUserUsageStats(c *gin.Context) {
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	modelName := c.Query("model_name")
+	userIds := parseQueryIntList(c.Query("user_ids"))
+
+	stats, err := model.GetUserUsageStats(userIds, startTimestamp, endTimestamp, modelName)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	common.ApiSuccess(c, stats)
+}
+
 func SearchUsers(c *gin.Context) {
 	keyword := c.Query("keyword")
 	group := c.Query("group")
@@ -494,22 +527,24 @@ func generateDefaultSidebarConfig(userRole int) string {
 	if userRole == common.RoleAdminUser {
 		// 管理员可以访问管理员区域，但不能访问系统设置
 		defaultConfig["admin"] = map[string]interface{}{
-			"enabled":    true,
-			"channel":    true,
-			"models":     true,
-			"redemption": true,
-			"user":       true,
-			"setting":    false, // 管理员不能访问系统设置
+			"enabled":      true,
+			"channel":      true,
+			"models":       true,
+			"redemption":   true,
+			"user":         true,
+			"request_data": true,
+			"setting":      false, // 管理员不能访问系统设置
 		}
 	} else if userRole == common.RoleRootUser {
 		// 超级管理员可以访问所有功能
 		defaultConfig["admin"] = map[string]interface{}{
-			"enabled":    true,
-			"channel":    true,
-			"models":     true,
-			"redemption": true,
-			"user":       true,
-			"setting":    true,
+			"enabled":      true,
+			"channel":      true,
+			"models":       true,
+			"redemption":   true,
+			"user":         true,
+			"request_data": true,
+			"setting":      true,
 		}
 	}
 	// 普通用户不包含admin区域

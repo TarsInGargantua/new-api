@@ -61,6 +61,27 @@ export async function getUserQuotaDataByUsers(params: {
   return res.data
 }
 
+export async function getUserDailyUsageStats(params: {
+  start_timestamp?: number
+  end_timestamp?: number
+  model_name?: string
+}) {
+  const res = await api.get<{ success: boolean; data: QuotaDataItem[] }>(
+    '/api/log/user_daily_usage',
+    { params }
+  )
+  return res.data
+}
+
+export async function getEnabledModels() {
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: string[]
+  }>('/api/channel/models_enabled')
+  return res.data
+}
+
 // Get uptime monitoring status for all services
 export async function getUptimeStatus() {
   const res = await api.get<{ success: boolean; data: UptimeGroupResult[] }>(

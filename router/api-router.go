@@ -298,6 +298,8 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.DELETE("/", middleware.AdminAuth(), controller.DeleteHistoryLogs)
 		logRoute.GET("/stat", middleware.AdminAuth(), controller.GetLogsStat)
 		logRoute.GET("/self/stat", middleware.UserAuth(), controller.GetLogsSelfStat)
+		logRoute.GET("/user_usage", middleware.AdminAuth(), controller.GetUserUsageStats)
+		logRoute.GET("/user_daily_usage", middleware.AdminAuth(), controller.GetUserDailyUsageStats)
 		logRoute.GET("/channel_affinity_usage_cache", middleware.AdminAuth(), controller.GetChannelAffinityUsageCacheStats)
 		logRoute.GET("/search", middleware.AdminAuth(), controller.SearchAllLogs)
 		logRoute.GET("/self", middleware.UserAuth(), controller.GetUserLogs)
@@ -307,6 +309,13 @@ func SetApiRouter(router *gin.Engine) {
 		dataRoute.GET("/", middleware.AdminAuth(), controller.GetAllQuotaDates)
 		dataRoute.GET("/users", middleware.AdminAuth(), controller.GetQuotaDatesByUser)
 		dataRoute.GET("/self", middleware.UserAuth(), controller.GetUserQuotaDates)
+
+		requestLogRoute := apiRouter.Group("/request-log")
+		requestLogRoute.Use(middleware.AdminAuth())
+		{
+			requestLogRoute.GET("/", controller.GetAPIRequestLogs)
+			requestLogRoute.GET("/:id", controller.GetAPIRequestLog)
+		}
 
 		logRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
 		{

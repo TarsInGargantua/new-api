@@ -432,6 +432,23 @@ type Stat struct {
 	Tpm   int `json:"tpm"`
 }
 
+type UserUsageStat struct {
+	UserId    int    `json:"user_id" gorm:"column:user_id"`
+	Username  string `json:"username" gorm:"column:username"`
+	Quota     int64  `json:"quota" gorm:"column:quota"`
+	TokenUsed int64  `json:"token_used" gorm:"column:token_used"`
+	Count     int64  `json:"count" gorm:"column:count"`
+}
+
+type UserDailyUsageStat struct {
+	UserId    int    `json:"user_id" gorm:"column:user_id"`
+	Username  string `json:"username" gorm:"column:username"`
+	CreatedAt int64  `json:"created_at" gorm:"column:created_at"`
+	Quota     int64  `json:"quota" gorm:"column:quota"`
+	TokenUsed int64  `json:"token_used" gorm:"column:token_used"`
+	Count     int64  `json:"count" gorm:"column:count"`
+}
+
 func logContainsPattern(input string) (string, bool) {
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -461,6 +478,63 @@ func applyConversationIDFilter(tx *gorm.DB, conversationId string) *gorm.DB {
 	}
 	escaped := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(string(encoded))
 	return tx.Where(`logs.other LIKE ? ESCAPE '!'`, fmt.Sprintf(`%%"conversation_id":%s%%`, escaped))
+}
+
+func applyLogUsageFilters(tx *gorm.DB, startTimestamp int64, endTimestamp int64, modelName string) *gorm.DB {
+	tx = tx.Where("type = ?", LogTypeConsume)
+	if startTimestamp != 0 {
+		tx = tx.Where("created_at >= ?", startTimestamp)
+	}
+	if endTimestamp != 0 {
+		tx = tx.Where("created_at <= ?", endTimestamp)
+	}
+	if strings.TrimSpace(modelName) != "" {
+		tx = tx.Where("model_name = ?", strings.TrimSpace(modelName))
+	}
+	return tx
+}
+
+func logUsingMySQL() bool {
+	if LOG_DB == DB {
+		return common.UsingMySQL
+	}
+	return common.LogSqlType == common.DatabaseTypeMySQL
+}
+
+func logBucketExpr(bucketSize int64) string {
+	if bucketSize <= 0 {
+		bucketSize = 86400
+	}
+	if logUsingMySQL() {
+		return fmt.Sprintf("FLOOR(created_at / %d) * %d", bucketSize, bucketSize)
+	}
+	return fmt.Sprintf("(created_at / %d) * %d", bucketSize, bucketSize)
+}
+
+func GetUserUsageStats(userIds []int, startTimestamp int64, endTimestamp int64, modelName string) ([]UserUsageStat, error) {
+	if len(userIds) == 0 {
+		return []UserUsageStat{}, nil
+	}
+	var rows []UserUsageStat
+	query := LOG_DB.Table("logs").
+		Select("user_id, MAX(username) as username, COALESCE(SUM(quota), 0) as quota, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as token_used, COUNT(*) as count").
+		Where("user_id IN ?", userIds)
+	query = applyLogUsageFilters(query, startTimestamp, endTimestamp, modelName)
+	err := query.Group("user_id").Scan(&rows).Error
+	return rows, err
+}
+
+func GetUserDailyUsageStats(startTimestamp int64, endTimestamp int64, modelName string) ([]UserDailyUsageStat, error) {
+	var rows []UserDailyUsageStat
+	bucketExpr := logBucketExpr(86400)
+	query := LOG_DB.Table("logs").
+		Select(fmt.Sprintf("user_id, MAX(username) as username, %s as created_at, COALESCE(SUM(quota), 0) as quota, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as token_used, COUNT(*) as count", bucketExpr)).
+		Where("user_id > 0")
+	query = applyLogUsageFilters(query, startTimestamp, endTimestamp, modelName)
+	err := query.Group(fmt.Sprintf("user_id, %s", bucketExpr)).
+		Order(bucketExpr + " ASC").
+		Scan(&rows).Error
+	return rows, err
 }
 
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {

@@ -117,6 +117,9 @@ var AuditContentEnabled = false
 var AuditContentMaxBytes = 64 * 1024
 var AuditContentCaptureResponse = true
 var AuditContentRedactSecrets = true
+var APIRequestLogEnabled = false
+var APIRequestLogRedactSecrets = true
+var APIRequestLogCaptureResponse = true
 
 var TLSInsecureSkipVerify bool
 var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}

@@ -88,6 +88,9 @@ func InitEnv() {
 	}
 	AuditContentCaptureResponse = GetEnvOrDefaultBool("AUDIT_CONTENT_CAPTURE_RESPONSE", true)
 	AuditContentRedactSecrets = GetEnvOrDefaultBool("AUDIT_CONTENT_REDACT_SECRETS", true)
+	APIRequestLogEnabled = GetEnvOrDefaultBool("API_REQUEST_LOG_ENABLED", false)
+	APIRequestLogRedactSecrets = GetEnvOrDefaultBool("API_REQUEST_LOG_REDACT_SECRETS", true)
+	APIRequestLogCaptureResponse = GetEnvOrDefaultBool("API_REQUEST_LOG_CAPTURE_RESPONSE", true)
 	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
 	NodeName = os.Getenv("NODE_NAME")
 	TLSInsecureSkipVerify = GetEnvOrDefaultBool("TLS_INSECURE_SKIP_VERIFY", false)

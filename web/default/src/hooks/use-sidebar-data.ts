@@ -32,6 +32,7 @@ import {
   MessageSquare,
   CreditCard,
   ListTodo,
+  Database,
   Settings,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -144,6 +145,11 @@ export function useSidebarData(): SidebarData {
             title: t('Subscription Management'),
             url: '/subscriptions',
             icon: CreditCard,
+          },
+          {
+            title: t('Request Data'),
+            url: '/request-data',
+            icon: Database,
           },
           {
             title: t('System Settings'),

@@ -73,6 +73,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	var (
 		newAPIError *types.NewAPIError
+		relayInfo   *relaycommon.RelayInfo
 		ws          *websocket.Conn
 	)
 
@@ -86,6 +87,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		defer ws.Close()
 	} else {
 		service.StartContentAuditCapture(c)
+		service.StartAPIRequestLogCapture(c)
+		defer func() {
+			service.RecordAPIRequestLog(c, relayInfo, newAPIError)
+		}()
 	}
 
 	defer func() {
@@ -119,7 +124,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 
-	relayInfo, err := relaycommon.GenRelayInfo(c, relayFormat, request, ws)
+	relayInfo, err = relaycommon.GenRelayInfo(c, relayFormat, request, ws)
 	if err != nil {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 		return

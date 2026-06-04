@@ -33,13 +33,21 @@ import {
 import { useMediaQuery } from '@/hooks'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+import { dateToUnixTimestamp } from '@/lib/time'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { ComboboxInput } from '@/components/ui/combobox-input'
+import { CompactDateTimeRangePicker } from '@/components/compact-date-time-range-picker'
 import {
   DISABLED_ROW_DESKTOP,
   DISABLED_ROW_MOBILE,
   DataTablePage,
 } from '@/components/data-table'
-import { getUsers, searchUsers } from '../api'
+import {
+  getEnabledModels,
+  getUserUsageStats,
+  getUsers,
+  searchUsers,
+} from '../api'
 import {
   USER_STATUS,
   getUserStatusOptions,
@@ -53,8 +61,47 @@ import { useUsers } from './users-provider'
 
 const route = getRouteApi('/_authenticated/users/')
 
+type UserUsageFilters = {
+  start?: Date
+  end?: Date
+  modelName: string
+}
+
+type UsageSummary = {
+  quota: number
+  token_used: number
+  count: number
+}
+
 function isDisabledUserRow(user: User) {
   return isUserDeleted(user) || user.status === USER_STATUS.DISABLED
+}
+
+function getDateRangeDayCount(start?: Date, end?: Date) {
+  if (!start || !end) return null
+  const diff = end.getTime() - start.getTime()
+  if (!Number.isFinite(diff) || diff < 0) return 1
+  return Math.max(1, Math.ceil((diff + 1) / (24 * 60 * 60 * 1000)))
+}
+
+function addUsageSummary(
+  usageByUserId: Map<number, UsageSummary>,
+  userId: number | undefined,
+  quota: number | undefined,
+  tokenUsed: number | undefined,
+  count: number | undefined
+) {
+  if (!userId) return
+  const prev = usageByUserId.get(userId) || {
+    quota: 0,
+    token_used: 0,
+    count: 0,
+  }
+  usageByUserId.set(userId, {
+    quota: prev.quota + (Number(quota) || 0),
+    token_used: prev.token_used + (Number(tokenUsed) || 0),
+    count: prev.count + (Number(count) || 0),
+  })
 }
 
 export function UsersTable() {
@@ -65,6 +112,11 @@ export function UsersTable() {
   const [rowSelection, setRowSelection] = useState({})
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({})
+  const [usageFilters, setUsageFilters] = useState<UserUsageFilters>({
+    start: undefined,
+    end: undefined,
+    modelName: '',
+  })
 
   const {
     globalFilter,
@@ -86,6 +138,31 @@ export function UsersTable() {
     ],
   })
 
+  const { data: enabledModels } = useQuery({
+    queryKey: ['enabled-models'],
+    queryFn: getEnabledModels,
+    select: (res) => (res.success && Array.isArray(res.data) ? res.data : []),
+    staleTime: 5 * 60_000,
+  })
+
+  const modelOptions =
+    enabledModels?.map((model) => ({ label: model, value: model })) ?? []
+
+  const startTimestamp = usageFilters.start
+    ? dateToUnixTimestamp(usageFilters.start)
+    : undefined
+  const endTimestamp = usageFilters.end
+    ? dateToUnixTimestamp(usageFilters.end)
+    : undefined
+  const usageRangeDays = getDateRangeDayCount(
+    usageFilters.start,
+    usageFilters.end
+  )
+  const hasUsageFilters = Boolean(
+    usageFilters.start || usageFilters.end || usageFilters.modelName.trim()
+  )
+  const modelName = usageFilters.modelName.trim()
+
   // Fetch data with React Query
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [
@@ -93,6 +170,11 @@ export function UsersTable() {
       pagination.pageIndex + 1,
       pagination.pageSize,
       globalFilter,
+      startTimestamp,
+      endTimestamp,
+      modelName,
+      hasUsageFilters,
+      usageRangeDays,
       refreshTrigger,
     ],
     queryFn: async () => {
@@ -113,8 +195,45 @@ export function UsersTable() {
         return { items: [], total: 0 }
       }
 
+      const items = result.data?.items || []
+      const usageByUserId = new Map<number, UsageSummary>()
+      const userIds = items.map((user) => user.id).filter(Boolean)
+
+      if (hasUsageFilters && userIds.length > 0) {
+        const usageResult = await getUserUsageStats({
+          user_ids: userIds,
+          start_timestamp: startTimestamp,
+          end_timestamp: endTimestamp,
+          model_name: modelName || undefined,
+        })
+
+        if (usageResult.success) {
+          for (const item of usageResult.data || []) {
+            addUsageSummary(
+              usageByUserId,
+              item.user_id,
+              item.quota,
+              item.token_used,
+              item.count
+            )
+          }
+        }
+      }
+
       return {
-        items: result.data?.items || [],
+        items: items.map((user) => {
+          const usage = usageByUserId.get(user.id)
+          const usageQuota = usage?.quota ?? 0
+          return {
+            ...user,
+            usage_quota: usageQuota,
+            usage_token_used: usage?.token_used ?? 0,
+            usage_count: usage?.count ?? 0,
+            usage_daily_average_quota: usageRangeDays
+              ? usageQuota / usageRangeDays
+              : undefined,
+          }
+        }),
         total: result.data?.total || 0,
       }
     },
@@ -182,6 +301,42 @@ export function UsersTable() {
       skeletonKeyPrefix='users-skeleton'
       toolbarProps={{
         searchPlaceholder: t('Filter by username, name or email...'),
+        additionalSearch: (
+          <>
+            <CompactDateTimeRangePicker
+              start={usageFilters.start}
+              end={usageFilters.end}
+              onChange={(range) =>
+                setUsageFilters((prev) => ({
+                  ...prev,
+                  start: range.start,
+                  end: range.end,
+                }))
+              }
+              className='h-8 w-full sm:w-[260px] lg:w-[320px]'
+            />
+            <div className='w-full sm:w-[220px] lg:w-[260px]'>
+              <ComboboxInput
+                options={modelOptions}
+                value={usageFilters.modelName}
+                onValueChange={(value) =>
+                  setUsageFilters((prev) => ({ ...prev, modelName: value }))
+                }
+                placeholder={t('Filter by model')}
+                emptyText={t('No models found.')}
+                allowCustomValue
+                className='h-8'
+              />
+            </div>
+          </>
+        ),
+        hasAdditionalFilters: hasUsageFilters,
+        onReset: () =>
+          setUsageFilters({
+            start: undefined,
+            end: undefined,
+            modelName: '',
+          }),
         filters: [
           {
             columnId: 'status',

@@ -140,14 +140,14 @@ func buildRequestAudit(c *gin.Context) map[string]interface{} {
 	contentType := c.Request.Header.Get("Content-Type")
 	if !isAuditableContentType(contentType) {
 		return map[string]interface{}{
-			"content_type":    contentType,
+			"content_type":   contentType,
 			"omitted_reason": "non_text_content_type",
 		}
 	}
 	storage, err := common.GetBodyStorage(c)
 	if err != nil {
 		return map[string]interface{}{
-			"content_type":    contentType,
+			"content_type":   contentType,
 			"omitted_reason": "read_failed",
 			"error":          err.Error(),
 		}
@@ -155,7 +155,7 @@ func buildRequestAudit(c *gin.Context) map[string]interface{} {
 	body, err := storage.Bytes()
 	if err != nil {
 		return map[string]interface{}{
-			"content_type":    contentType,
+			"content_type":   contentType,
 			"omitted_reason": "read_failed",
 			"error":          err.Error(),
 		}
@@ -223,11 +223,15 @@ func limitAuditBytes(body []byte) []byte {
 }
 
 func auditBodyToString(body []byte, contentType string) (string, bool) {
+	return auditBodyToStringWithRedact(body, contentType, common.AuditContentRedactSecrets)
+}
+
+func auditBodyToStringWithRedact(body []byte, contentType string, redactSecrets bool) (string, bool) {
 	if len(body) == 0 {
 		return "", false
 	}
 	text := string(body)
-	if !common.AuditContentRedactSecrets {
+	if !redactSecrets {
 		return text, false
 	}
 
