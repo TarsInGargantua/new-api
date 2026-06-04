@@ -3824,6 +3824,27 @@
     "并确认自行承担部署": "confirm that I bear legal responsibility arising from deployment",
     "运营和收费行为产生的法律责任": "operation and charging behavior",
     "，": ", ",
-    "、": ", "
+    "、": ", ",
+    "Tokens": "Tokens",
+    "元数据": "Metadata",
+    "最后登录": "Last Login",
+    "加载中": "Loading",
+    "加载详情失败": "Failed to load details",
+    "加载请求数据失败": "Failed to load request data",
+    "响应内容": "Response Body",
+    "已脱敏": "Redacted",
+    "按模型筛选": "Filter by model",
+    "无内容": "No content",
+    "无用量": "No usage",
+    "日均": "Avg/day",
+    "未找到请求数据": "No request data found",
+    "未筛选": "Not filtered",
+    "正文大小": "Body Size",
+    "范围内用量": "Usage in Range",
+    "请求": "Request",
+    "请求内容": "Request Body",
+    "请求数": "Requests",
+    "请求数据": "Request Data",
+    "请求数据详情": "Request Data Detail"
   }
 }

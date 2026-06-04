@@ -4213,6 +4213,25 @@
     "并确认自行承担部署": "confirm that I bear legal responsibility arising from deployment",
     "运营和收费行为产生的法律责任": "operation and charging behavior",
     "，": ", ",
-    "、": ", "
+    "、": ", ",
+    "Tokens": "Token",
+    "元数据": "Siêu dữ liệu",
+    "最后登录": "Lần đăng nhập cuối",
+    "加载中": "Đang tải",
+    "加载详情失败": "Không tải được chi tiết",
+    "加载请求数据失败": "Không tải được dữ liệu yêu cầu",
+    "响应内容": "Nội dung phản hồi",
+    "已脱敏": "Đã che thông tin",
+    "按模型筛选": "Lọc theo mô hình",
+    "无内容": "Không có nội dung",
+    "无用量": "Không có sử dụng",
+    "日均": "TB/ngày",
+    "未找到请求数据": "Không tìm thấy dữ liệu yêu cầu",
+    "未筛选": "Chưa lọc",
+    "正文大小": "Kích thước nội dung",
+    "范围内用量": "Mức dùng trong khoảng",
+    "请求数": "Số yêu cầu",
+    "请求数据": "Dữ liệu yêu cầu",
+    "请求数据详情": "Chi tiết dữ liệu yêu cầu"
   }
 }

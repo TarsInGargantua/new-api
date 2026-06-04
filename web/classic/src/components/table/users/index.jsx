@@ -51,6 +51,7 @@ const UsersPage = () => {
     activePage,
     pageSize,
     groupOptions,
+    enabledModelOptions,
     loading,
     searching,
 
@@ -95,9 +96,9 @@ const UsersPage = () => {
               setFormApi={setFormApi}
               searchUsers={searchUsers}
               loadUsers={loadUsers}
-              activePage={activePage}
               pageSize={pageSize}
               groupOptions={groupOptions}
+              enabledModelOptions={enabledModelOptions}
               loading={loading}
               searching={searching}
               t={t}

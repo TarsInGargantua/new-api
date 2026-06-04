@@ -177,6 +177,69 @@ const renderQuotaUsage = (text, record, t) => {
   );
 };
 
+// Render filtered usage summary column
+const renderUsageInRange = (text, record, t) => {
+  const { Paragraph } = Typography;
+  if (!record.usage_has_filters) {
+    return (
+      <Tag color='white' shape='circle'>
+        {t('未筛选')}
+      </Tag>
+    );
+  }
+
+  const quota = Number(record.usage_quota) || 0;
+  const tokenUsed = Number(record.usage_token_used) || 0;
+  const count = Number(record.usage_count) || 0;
+  const hasDailyAverage = typeof record.usage_daily_average_quota === 'number';
+  const dailyAverage = hasDailyAverage
+    ? Number(record.usage_daily_average_quota) || 0
+    : null;
+
+  if (quota === 0 && tokenUsed === 0 && count === 0) {
+    return (
+      <Tag color='white' shape='circle'>
+        {t('无用量')}
+      </Tag>
+    );
+  }
+
+  const popoverContent = (
+    <div className='text-xs p-2'>
+      <Paragraph copyable={{ content: renderQuota(quota) }}>
+        {t('范围内用量')}: {renderQuota(quota)}
+      </Paragraph>
+      <Paragraph
+        copyable={{
+          content: dailyAverage === null ? '-' : renderQuota(dailyAverage),
+        }}
+      >
+        {t('日均')}: {dailyAverage === null ? '-' : renderQuota(dailyAverage)}
+      </Paragraph>
+      <Paragraph copyable={{ content: String(tokenUsed) }}>
+        {t('Tokens')}: {renderNumber(tokenUsed)}
+      </Paragraph>
+      <Paragraph copyable={{ content: String(count) }}>
+        {t('请求数')}: {renderNumber(count)}
+      </Paragraph>
+    </div>
+  );
+
+  return (
+    <Popover content={popoverContent} position='top'>
+      <Tag color='blue' shape='circle'>
+        <div className='flex flex-col items-end gap-0.5'>
+          <span className='text-xs leading-none'>{renderQuota(quota)}</span>
+          <span className='text-[10px] leading-none opacity-80'>
+            {t('日均')}:{' '}
+            {dailyAverage === null ? '-' : renderQuota(dailyAverage)}
+          </span>
+        </div>
+      </Tag>
+    </Popover>
+  );
+};
+
 /**
  * Render invite information
  */
@@ -337,6 +400,11 @@ export const getUsersColumns = ({
       title: t('剩余额度/总额度'),
       key: 'quota_usage',
       render: (text, record) => renderQuotaUsage(text, record, t),
+    },
+    {
+      title: t('范围内用量'),
+      key: 'usage_quota',
+      render: (text, record) => renderUsageInRange(text, record, t),
     },
     {
       title: t('分组'),

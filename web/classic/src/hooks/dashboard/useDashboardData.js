@@ -54,6 +54,7 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
 
   // ========== 数据状态 ==========
   const [quotaData, setQuotaData] = useState([]);
+  const [enabledModelOptions, setEnabledModelOptions] = useState([]);
   const [consumeQuota, setConsumeQuota] = useState(0);
   const [consumeTokens, setConsumeTokens] = useState(0);
   const [times, setTimes] = useState(0);
@@ -216,11 +217,17 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
   const loadUserQuotaData = useCallback(async () => {
     if (!isAdminUser) return [];
     try {
-      const { start_timestamp, end_timestamp } = inputs;
+      const { start_timestamp, end_timestamp, model_name } = inputs;
       const localStartTimestamp = Date.parse(start_timestamp) / 1000;
       const localEndTimestamp = Date.parse(end_timestamp) / 1000;
-      const url = `/api/data/users?start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`;
-      const res = await API.get(url);
+      const params = {
+        start_timestamp: localStartTimestamp,
+        end_timestamp: localEndTimestamp,
+      };
+      if (String(model_name || '').trim()) {
+        params.model_name = String(model_name).trim();
+      }
+      const res = await API.get('/api/log/user_daily_usage', { params });
       const { success, message, data } = res.data;
       if (success) {
         return data || [];
@@ -233,6 +240,24 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
       return [];
     }
   }, [inputs, isAdminUser]);
+
+  const loadEnabledModels = useCallback(async () => {
+    if (!isAdminUser) return;
+    try {
+      const res = await API.get('/api/channel/models_enabled');
+      const { success, data } = res.data;
+      if (success) {
+        setEnabledModelOptions(
+          (data || []).map((model) => ({
+            label: model,
+            value: model,
+          })),
+        );
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }, [isAdminUser]);
 
   const getUserData = useCallback(async () => {
     let res = await API.get(`/api/user/self`);
@@ -272,9 +297,10 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
   useEffect(() => {
     if (!initialized.current) {
       getUserData();
+      loadEnabledModels();
       initialized.current = true;
     }
-  }, [getUserData]);
+  }, [getUserData, loadEnabledModels]);
 
   return {
     // 基础状态
@@ -288,6 +314,7 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
 
     // 数据状态
     quotaData,
+    enabledModelOptions,
     consumeQuota,
     setConsumeQuota,
     consumeTokens,

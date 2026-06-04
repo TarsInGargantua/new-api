@@ -3679,6 +3679,27 @@
     "并确认自行承担部署": "confirm that I bear legal responsibility arising from deployment",
     "运营和收费行为产生的法律责任": "operation and charging behavior",
     "，": ", ",
-    "、": ", "
+    "、": ", ",
+    "Tokens": "Jetons",
+    "元数据": "Métadonnées",
+    "最后登录": "Dernière connexion",
+    "加载中": "Chargement",
+    "加载详情失败": "Échec du chargement des détails",
+    "加载请求数据失败": "Échec du chargement des données de requête",
+    "响应内容": "Contenu de la réponse",
+    "已脱敏": "Masqué",
+    "按模型筛选": "Filtrer par modèle",
+    "无内容": "Aucun contenu",
+    "无用量": "Aucune utilisation",
+    "日均": "Moy./jour",
+    "未找到请求数据": "Aucune donnée de requête trouvée",
+    "未筛选": "Non filtré",
+    "正文大小": "Taille du corps",
+    "范围内用量": "Utilisation dans la période",
+    "请求": "Requête",
+    "请求内容": "Contenu de la requête",
+    "请求数": "Requêtes",
+    "请求数据": "Données des requêtes",
+    "请求数据详情": "Détail des données de requête"
   }
 }

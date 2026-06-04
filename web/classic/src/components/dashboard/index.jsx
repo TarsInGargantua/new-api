@@ -170,6 +170,7 @@ const Dashboard = () => {
         inputs={dashboardData.inputs}
         dataExportDefaultTime={dashboardData.dataExportDefaultTime}
         timeOptions={dashboardData.timeOptions}
+        enabledModelOptions={dashboardData.enabledModelOptions}
         handleInputChange={dashboardData.handleInputChange}
         t={dashboardData.t}
       />

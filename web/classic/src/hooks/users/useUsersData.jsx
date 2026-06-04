@@ -23,6 +23,37 @@ import { API, showError, showSuccess } from '../../helpers';
 import { ITEMS_PER_PAGE } from '../../constants';
 import { useTableCompactMode } from '../common/useTableCompactMode';
 
+const toUnixTimestamp = (value) => {
+  if (!value) return undefined;
+  if (typeof value === 'number') {
+    return value > 10_000_000_000 ? Math.floor(value / 1000) : value;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? undefined : Math.floor(parsed / 1000);
+};
+
+const getDateRangeDayCount = (startTimestamp, endTimestamp) => {
+  if (!startTimestamp || !endTimestamp) return undefined;
+  const diffSeconds = endTimestamp - startTimestamp;
+  if (!Number.isFinite(diffSeconds) || diffSeconds < 0) return 1;
+  return Math.max(1, Math.ceil((diffSeconds + 1) / 86400));
+};
+
+const addUsageSummary = (usageByUserId, item) => {
+  const userId = item?.user_id;
+  if (!userId) return;
+  const prev = usageByUserId.get(userId) || {
+    quota: 0,
+    token_used: 0,
+    count: 0,
+  };
+  usageByUserId.set(userId, {
+    quota: prev.quota + (Number(item.quota) || 0),
+    token_used: prev.token_used + (Number(item.token_used) || 0),
+    count: prev.count + (Number(item.count) || 0),
+  });
+};
+
 export const useUsersData = () => {
   const { t } = useTranslation();
   const [compactMode, setCompactMode] = useTableCompactMode('users');
@@ -34,6 +65,7 @@ export const useUsersData = () => {
   const [pageSize, setPageSize] = useState(ITEMS_PER_PAGE);
   const [searching, setSearching] = useState(false);
   const [groupOptions, setGroupOptions] = useState([]);
+  const [enabledModelOptions, setEnabledModelOptions] = useState([]);
   const [userCount, setUserCount] = useState(0);
 
   // Modal states
@@ -47,6 +79,8 @@ export const useUsersData = () => {
   const formInitValues = {
     searchKeyword: '',
     searchGroup: '',
+    usageDateRange: [],
+    usageModelName: '',
   };
 
   // Form API reference
@@ -55,34 +89,111 @@ export const useUsersData = () => {
   // Get form values helper function
   const getFormValues = () => {
     const formValues = formApi ? formApi.getValues() : {};
+    const usageDateRange = Array.isArray(formValues.usageDateRange)
+      ? formValues.usageDateRange
+      : [];
     return {
       searchKeyword: formValues.searchKeyword || '',
       searchGroup: formValues.searchGroup || '',
+      usageDateRange,
+      usageModelName: formValues.usageModelName || '',
     };
   };
 
-  // Set user format with key field
-  const setUserFormat = (users) => {
-    for (let i = 0; i < users.length; i++) {
-      users[i].key = users[i].id;
+  const getUsageFilterParams = (values = getFormValues()) => {
+    const [start, end] = values.usageDateRange || [];
+    const startTimestamp = toUnixTimestamp(start);
+    const endTimestamp = toUnixTimestamp(end);
+    const modelName = String(values.usageModelName || '').trim();
+
+    return {
+      start_timestamp: startTimestamp,
+      end_timestamp: endTimestamp,
+      model_name: modelName,
+      hasFilters: Boolean(startTimestamp || endTimestamp || modelName),
+      dayCount: getDateRangeDayCount(startTimestamp, endTimestamp),
+    };
+  };
+
+  const loadUsageForUsers = async (pageUsers, usageParams) => {
+    const usageByUserId = new Map();
+    if (!usageParams.hasFilters || pageUsers.length === 0) {
+      return usageByUserId;
     }
-    setUsers(users);
+
+    const userIds = pageUsers.map((user) => user.id).filter(Boolean);
+    if (userIds.length === 0) return usageByUserId;
+
+    const params = {
+      user_ids: userIds.join(','),
+    };
+    if (usageParams.start_timestamp) {
+      params.start_timestamp = usageParams.start_timestamp;
+    }
+    if (usageParams.end_timestamp) {
+      params.end_timestamp = usageParams.end_timestamp;
+    }
+    if (usageParams.model_name) {
+      params.model_name = usageParams.model_name;
+    }
+
+    const res = await API.get('/api/log/user_usage', { params });
+    const { success, message, data } = res.data;
+    if (!success) {
+      showError(message);
+      return usageByUserId;
+    }
+
+    (data || []).forEach((item) => addUsageSummary(usageByUserId, item));
+    return usageByUserId;
+  };
+
+  // Set user format with key field and filtered usage summary
+  const setUserFormat = async (users) => {
+    const pageUsers = users.map((user) => ({
+      ...user,
+      key: user.id,
+    }));
+    const usageParams = getUsageFilterParams();
+    const usageByUserId = await loadUsageForUsers(pageUsers, usageParams);
+
+    setUsers(
+      pageUsers.map((user) => {
+        const usage = usageByUserId.get(user.id);
+        const usageQuota = usage?.quota || 0;
+        return {
+          ...user,
+          usage_has_filters: usageParams.hasFilters,
+          usage_quota: usageQuota,
+          usage_token_used: usage?.token_used || 0,
+          usage_count: usage?.count || 0,
+          usage_daily_average_quota: usageParams.dayCount
+            ? usageQuota / usageParams.dayCount
+            : undefined,
+        };
+      }),
+    );
   };
 
   // Load users data
   const loadUsers = async (startIdx, pageSize) => {
     setLoading(true);
-    const res = await API.get(`/api/user/?p=${startIdx}&page_size=${pageSize}`);
-    const { success, message, data } = res.data;
-    if (success) {
-      const newPageData = data.items;
-      setActivePage(data.page);
-      setUserCount(data.total);
-      setUserFormat(newPageData);
-    } else {
-      showError(message);
+    try {
+      const res = await API.get(
+        `/api/user/?p=${startIdx}&page_size=${pageSize}`,
+      );
+      const { success, message, data } = res.data;
+      if (success) {
+        const newPageData = data.items || [];
+        setActivePage(data.page);
+        setUserCount(data.total);
+        await setUserFormat(newPageData);
+      } else {
+        showError(message);
+      }
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   // Search users with keyword and group
@@ -105,19 +216,26 @@ export const useUsersData = () => {
       return;
     }
     setSearching(true);
-    const res = await API.get(
-      `/api/user/search?keyword=${searchKeyword}&group=${searchGroup}&p=${startIdx}&page_size=${pageSize}`,
-    );
-    const { success, message, data } = res.data;
-    if (success) {
-      const newPageData = data.items;
-      setActivePage(data.page);
-      setUserCount(data.total);
-      setUserFormat(newPageData);
-    } else {
-      showError(message);
+    try {
+      const params = new URLSearchParams({
+        keyword: searchKeyword,
+        group: searchGroup,
+        p: String(startIdx),
+        page_size: String(pageSize),
+      });
+      const res = await API.get(`/api/user/search?${params.toString()}`);
+      const { success, message, data } = res.data;
+      if (success) {
+        const newPageData = data.items || [];
+        setActivePage(data.page);
+        setUserCount(data.total);
+        await setUserFormat(newPageData);
+      } else {
+        showError(message);
+      }
+    } finally {
+      setSearching(false);
     }
-    setSearching(false);
   };
 
   // Manage user operations (promote, demote, enable, disable, delete)
@@ -204,11 +322,16 @@ export const useUsersData = () => {
     localStorage.setItem('page-size', size + '');
     setPageSize(size);
     setActivePage(1);
-    loadUsers(activePage, size)
-      .then()
-      .catch((reason) => {
-        showError(reason);
-      });
+    const { searchKeyword, searchGroup } = getFormValues();
+    try {
+      if (searchKeyword === '' && searchGroup === '') {
+        await loadUsers(1, size);
+      } else {
+        await searchUsers(1, size, searchKeyword, searchGroup);
+      }
+    } catch (reason) {
+      showError(reason);
+    }
   };
 
   // Handle table row styling for disabled/deleted users
@@ -252,6 +375,25 @@ export const useUsersData = () => {
     }
   };
 
+  const fetchEnabledModels = async () => {
+    try {
+      const res = await API.get('/api/channel/models_enabled');
+      const { success, message, data } = res.data;
+      if (success) {
+        setEnabledModelOptions(
+          (data || []).map((model) => ({
+            label: model,
+            value: model,
+          })),
+        );
+      } else {
+        showError(message);
+      }
+    } catch (error) {
+      showError(error.message);
+    }
+  };
+
   // Modal control functions
   const closeAddUser = () => {
     setShowAddUser(false);
@@ -272,6 +414,7 @@ export const useUsersData = () => {
         showError(reason);
       });
     fetchGroups().then();
+    fetchEnabledModels().then();
   }, []);
 
   return {
@@ -283,6 +426,7 @@ export const useUsersData = () => {
     userCount,
     searching,
     groupOptions,
+    enabledModelOptions,
 
     // Modal state
     showAddUser,
@@ -314,6 +458,7 @@ export const useUsersData = () => {
     closeAddUser,
     closeEditUser,
     getFormValues,
+    getUsageFilterParams,
 
     // Translation
     t,
