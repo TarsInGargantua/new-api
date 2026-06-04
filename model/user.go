@@ -294,6 +294,40 @@ func SearchUsers(keyword string, group string, startIdx int, num int) ([]*User, 
 	return users, total, nil
 }
 
+func GetUserIdsByFilters(keyword string, group string) ([]int, error) {
+	var ids []int
+	query := DB.Unscoped().Model(&User{})
+
+	keyword = strings.TrimSpace(keyword)
+	group = strings.TrimSpace(group)
+
+	if keyword != "" {
+		likeCondition := "username LIKE ? OR email LIKE ? OR display_name LIKE ?"
+		keywordInt, err := strconv.Atoi(keyword)
+		if err == nil {
+			likeCondition = "id = ? OR " + likeCondition
+			query = query.Where("("+likeCondition+")", keywordInt, "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
+		} else {
+			query = query.Where("("+likeCondition+")", "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
+		}
+	}
+	if group != "" {
+		query = query.Where(commonGroupCol+" = ?", group)
+	}
+
+	err := query.Pluck("id", &ids).Error
+	return ids, err
+}
+
+func GetUsersByIds(ids []int) ([]*User, error) {
+	if len(ids) == 0 {
+		return []*User{}, nil
+	}
+	var users []*User
+	err := DB.Unscoped().Omit("password").Where("id IN ?", ids).Find(&users).Error
+	return users, err
+}
+
 func GetUserById(id int, selectAll bool) (*User, error) {
 	if id == 0 {
 		return nil, errors.New("id 为空！")

@@ -3,6 +3,8 @@ package model
 import (
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
+
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -12,15 +14,21 @@ func setupAPIRequestLogTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&APIRequestLog{}, &Log{}))
+	require.NoError(t, db.AutoMigrate(&APIRequestLog{}, &Log{}, &Ability{}, &Channel{}, &Model{}, &User{}))
 
+	oldDB := DB
 	oldLogDB := LOG_DB
 	oldLogGroupCol := logGroupCol
+	oldCommonGroupCol := commonGroupCol
+	DB = db
 	LOG_DB = db
 	logGroupCol = "`group`"
+	commonGroupCol = "`group`"
 	t.Cleanup(func() {
+		DB = oldDB
 		LOG_DB = oldLogDB
 		logGroupCol = oldLogGroupCol
+		commonGroupCol = oldCommonGroupCol
 	})
 	return db
 }
@@ -44,10 +52,80 @@ func TestGetLogModelNames(t *testing.T) {
 		ModelName: "",
 		Type:      LogTypeConsume,
 	}).Error)
+	require.NoError(t, DB.Create(&Channel{
+		Models: "gpt-channel, claude-opus-4-7",
+		Status: common.ChannelStatusEnabled,
+	}).Error)
+	require.NoError(t, DB.Create(&Ability{
+		Group:     "default",
+		Model:     "gpt-ability",
+		ChannelId: 1,
+		Enabled:   true,
+	}).Error)
+	require.NoError(t, DB.Create(&Model{
+		ModelName: "gpt-meta",
+		Status:    common.ChannelStatusEnabled,
+	}).Error)
 
 	models, err := GetLogModelNames()
 	require.NoError(t, err)
-	require.Equal(t, []string{"claude-opus-4-7", "gpt-5.5"}, models)
+	require.Equal(t, []string{"claude-opus-4-7", "gpt-5.5", "gpt-ability", "gpt-channel", "gpt-meta"}, models)
+}
+
+func TestGetUserUsageStatsPage(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	require.NoError(t, DB.Create(&User{
+		Id:          2,
+		Username:    "alice",
+		DisplayName: "Alice",
+		Group:       "default",
+		Status:      common.UserStatusEnabled,
+		AffCode:     "alice-aff",
+	}).Error)
+	require.NoError(t, DB.Create(&User{
+		Id:          3,
+		Username:    "bob",
+		DisplayName: "Bob",
+		Group:       "vip",
+		Status:      common.UserStatusEnabled,
+		AffCode:     "bob-aff",
+	}).Error)
+	require.NoError(t, LOG_DB.Create(&Log{
+		UserId:           2,
+		Username:         "alice",
+		Type:             LogTypeConsume,
+		ModelName:        "gpt-5.5",
+		Quota:            10,
+		PromptTokens:     2,
+		CompletionTokens: 3,
+		CreatedAt:        100,
+	}).Error)
+	require.NoError(t, LOG_DB.Create(&Log{
+		UserId:           3,
+		Username:         "bob",
+		Type:             LogTypeConsume,
+		ModelName:        "claude-opus-4-7",
+		Quota:            20,
+		PromptTokens:     4,
+		CompletionTokens: 5,
+		CreatedAt:        100,
+	}).Error)
+
+	rows, total, err := GetUserUsageStatsPage(nil, false, 0, 0, "gpt-5.5", 0, 20)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total)
+	require.Len(t, rows, 1)
+	require.Equal(t, 2, rows[0].UserId)
+	require.Equal(t, int64(10), rows[0].Quota)
+	require.Equal(t, int64(5), rows[0].TokenUsed)
+
+	vipIds, err := GetUserIdsByFilters("", "vip")
+	require.NoError(t, err)
+	rows, total, err = GetUserUsageStatsPage(vipIds, true, 0, 0, "gpt-5.5", 0, 20)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), total)
+	require.Empty(t, rows)
 }
 
 func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {

@@ -28,6 +28,7 @@ import type {
   ApiResponse,
   UserUsageStats,
   GetUserUsageStatsParams,
+  GetUserUsageUsersParams,
 } from './types'
 
 // ============================================================================
@@ -87,12 +88,36 @@ export async function getUserUsageStats(
 }
 
 /**
+ * Get paginated users that have matching usage.
+ */
+export async function getUserUsageUsers(
+  params: GetUserUsageUsersParams
+): Promise<GetUsersResponse> {
+  const res = await api.get('/api/log/user_usage/users', { params })
+  return res.data
+}
+
+function modelNameFromItem(model: unknown) {
+  if (typeof model === 'string') return model
+  if (model && typeof model === 'object') {
+    const item = model as {
+      id?: unknown
+      model_name?: unknown
+      name?: unknown
+    }
+    return item.id || item.model_name || item.name || ''
+  }
+  return ''
+}
+
+/**
  * Get enabled model names for usage filtering.
  */
 export async function getEnabledModels(): Promise<ApiResponse<string[]>> {
   const results = await Promise.allSettled([
-    api.get<ApiResponse<string[]>>('/api/channel/models_enabled'),
-    api.get<ApiResponse<string[]>>('/api/log/models'),
+    api.get<ApiResponse<unknown[]>>('/api/channel/models_enabled'),
+    api.get<ApiResponse<unknown[]>>('/api/log/models'),
+    api.get<ApiResponse<unknown[]>>('/api/channel/models'),
   ])
   const models = new Set<string>()
   let message = ''
@@ -105,7 +130,7 @@ export async function getEnabledModels(): Promise<ApiResponse<string[]>> {
       continue
     }
     for (const model of payload.data || []) {
-      const normalized = String(model || '').trim()
+      const normalized = String(modelNameFromItem(model)).trim()
       if (normalized) models.add(normalized)
     }
   }

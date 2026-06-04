@@ -299,6 +299,7 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/stat", middleware.AdminAuth(), controller.GetLogsStat)
 		logRoute.GET("/self/stat", middleware.UserAuth(), controller.GetLogsSelfStat)
 		logRoute.GET("/user_usage", middleware.AdminAuth(), controller.GetUserUsageStats)
+		logRoute.GET("/user_usage/users", middleware.AdminAuth(), controller.GetUserUsageUsers)
 		logRoute.GET("/user_daily_usage", middleware.AdminAuth(), controller.GetUserDailyUsageStats)
 		logRoute.GET("/models", middleware.AdminAuth(), controller.GetLogModelNames)
 		logRoute.GET("/channel_affinity_usage_cache", middleware.AdminAuth(), controller.GetChannelAffinityUsageCacheStats)
@@ -314,6 +315,7 @@ func SetApiRouter(router *gin.Engine) {
 		requestLogRoute := apiRouter.Group("/request-log")
 		requestLogRoute.Use(middleware.AdminAuth())
 		{
+			requestLogRoute.GET("", controller.GetAPIRequestLogs)
 			requestLogRoute.GET("/", controller.GetAPIRequestLogs)
 			requestLogRoute.GET("/:id", controller.GetAPIRequestLog)
 		}

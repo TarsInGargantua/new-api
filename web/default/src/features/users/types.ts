@@ -115,6 +115,16 @@ export interface GetUserUsageStatsParams {
   model_name?: string
 }
 
+export interface GetUserUsageUsersParams {
+  p?: number
+  page_size?: number
+  keyword?: string
+  group?: string
+  start_timestamp?: number
+  end_timestamp?: number
+  model_name?: string
+}
+
 export interface UserFormData {
   username: string
   display_name: string

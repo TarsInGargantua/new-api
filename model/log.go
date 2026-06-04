@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -440,6 +441,15 @@ type UserUsageStat struct {
 	Count     int64  `json:"count" gorm:"column:count"`
 }
 
+type UserUsageUser struct {
+	User
+	UsageHasFilters        bool    `json:"usage_has_filters"`
+	UsageQuota             int64   `json:"usage_quota"`
+	UsageTokenUsed         int64   `json:"usage_token_used"`
+	UsageCount             int64   `json:"usage_count"`
+	UsageDailyAverageQuota float64 `json:"usage_daily_average_quota,omitempty"`
+}
+
 type UserDailyUsageStat struct {
 	UserId    int    `json:"user_id" gorm:"column:user_id"`
 	Username  string `json:"username" gorm:"column:username"`
@@ -524,6 +534,34 @@ func GetUserUsageStats(userIds []int, startTimestamp int64, endTimestamp int64, 
 	return rows, err
 }
 
+func GetUserUsageStatsPage(userIds []int, restrictUserIds bool, startTimestamp int64, endTimestamp int64, modelName string, startIdx int, num int) ([]UserUsageStat, int64, error) {
+	if restrictUserIds && len(userIds) == 0 {
+		return []UserUsageStat{}, 0, nil
+	}
+
+	base := LOG_DB.Table("logs").Where("user_id > 0")
+	if restrictUserIds {
+		base = base.Where("user_id IN ?", userIds)
+	}
+	base = applyLogUsageFilters(base, startTimestamp, endTimestamp, modelName)
+
+	var total int64
+	countQuery := LOG_DB.Table("(?) as usage_users", base.Select("user_id").Group("user_id"))
+	if err := countQuery.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var rows []UserUsageStat
+	err := base.Select("user_id, MAX(username) as username, COALESCE(SUM(quota), 0) as quota, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as token_used, COUNT(*) as count").
+		Group("user_id").
+		Order("quota DESC").
+		Order("user_id ASC").
+		Limit(num).
+		Offset(startIdx).
+		Scan(&rows).Error
+	return rows, total, err
+}
+
 func GetUserDailyUsageStats(startTimestamp int64, endTimestamp int64, modelName string) ([]UserDailyUsageStat, error) {
 	var rows []UserDailyUsageStat
 	bucketExpr := logBucketExpr(86400)
@@ -538,13 +576,66 @@ func GetUserDailyUsageStats(startTimestamp int64, endTimestamp int64, modelName 
 }
 
 func GetLogModelNames() ([]string, error) {
-	var models []string
-	err := LOG_DB.Model(&Log{}).
+	modelSet := make(map[string]struct{})
+	addModel := func(modelName string) {
+		modelName = strings.TrimSpace(modelName)
+		if modelName == "" {
+			return
+		}
+		modelSet[modelName] = struct{}{}
+	}
+
+	var firstErr error
+	rememberErr := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	var logModels []string
+	rememberErr(LOG_DB.Model(&Log{}).
 		Where("model_name <> ''").
 		Distinct("model_name").
-		Order("model_name ASC").
-		Pluck("model_name", &models).Error
-	return models, err
+		Pluck("model_name", &logModels).Error)
+	for _, modelName := range logModels {
+		addModel(modelName)
+	}
+
+	if DB != nil {
+		var abilityModels []string
+		rememberErr(DB.Model(&Ability{}).
+			Where("model <> ''").
+			Distinct("model").
+			Pluck("model", &abilityModels).Error)
+		for _, modelName := range abilityModels {
+			addModel(modelName)
+		}
+
+		var channelModels []string
+		rememberErr(DB.Model(&Channel{}).
+			Where("status = ? AND models <> ''", common.ChannelStatusEnabled).
+			Pluck("models", &channelModels).Error)
+		for _, modelList := range channelModels {
+			for _, modelName := range strings.Split(modelList, ",") {
+				addModel(modelName)
+			}
+		}
+
+		var metaModels []string
+		rememberErr(DB.Model(&Model{}).
+			Where("status = ? AND model_name <> ''", common.ChannelStatusEnabled).
+			Pluck("model_name", &metaModels).Error)
+		for _, modelName := range metaModels {
+			addModel(modelName)
+		}
+	}
+
+	models := make([]string, 0, len(modelSet))
+	for modelName := range modelSet {
+		models = append(models, modelName)
+	}
+	sort.Strings(models)
+	return models, firstErr
 }
 
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {

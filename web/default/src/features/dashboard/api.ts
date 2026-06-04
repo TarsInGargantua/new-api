@@ -77,11 +77,24 @@ export async function getEnabledModels() {
   type ModelsResponse = {
     success: boolean
     message?: string
-    data?: string[]
+    data?: unknown[]
+  }
+  const modelNameFromItem = (model: unknown) => {
+    if (typeof model === 'string') return model
+    if (model && typeof model === 'object') {
+      const item = model as {
+        id?: unknown
+        model_name?: unknown
+        name?: unknown
+      }
+      return item.id || item.model_name || item.name || ''
+    }
+    return ''
   }
   const results = await Promise.allSettled([
     api.get<ModelsResponse>('/api/channel/models_enabled'),
     api.get<ModelsResponse>('/api/log/models'),
+    api.get<ModelsResponse>('/api/channel/models'),
   ])
   const models = new Set<string>()
   let message = ''
@@ -94,7 +107,7 @@ export async function getEnabledModels() {
       continue
     }
     for (const model of payload.data || []) {
-      const normalized = String(model || '').trim()
+      const normalized = String(modelNameFromItem(model)).trim()
       if (normalized) models.add(normalized)
     }
   }

@@ -15,6 +15,7 @@ import (
 )
 
 const apiRequestLogWriterKey = "api_request_log_writer"
+const apiRequestLogRecordedKey = "api_request_log_recorded"
 
 type apiRequestLogWriter struct {
 	gin.ResponseWriter
@@ -75,6 +76,9 @@ func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 	if c == nil || c.Request == nil || !common.APIRequestLogEnabled {
 		return
 	}
+	if recorded, exists := c.Get(apiRequestLogRecordedKey); exists && recorded == true {
+		return
+	}
 
 	requestLog := buildRequestLogBody(c)
 	responseLog := buildResponseLogBody(c)
@@ -112,7 +116,9 @@ func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 	}
 	if err := model.CreateAPIRequestLog(log); err != nil {
 		logger.LogError(c, "failed to record api request log: "+err.Error())
+		return
 	}
+	c.Set(apiRequestLogRecordedKey, true)
 }
 
 func buildRequestLogBody(c *gin.Context) apiRequestLogBody {

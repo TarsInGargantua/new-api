@@ -54,8 +54,17 @@ const addUsageSummary = (usageByUserId, item) => {
   });
 };
 
+const modelNameFromItem = (model) => {
+  if (typeof model === 'string') return model;
+  return model?.id || model?.model_name || model?.name || '';
+};
+
 const buildModelOptions = (models) =>
-  Array.from(new Set((models || []).map((model) => String(model || '').trim())))
+  Array.from(
+    new Set(
+      (models || []).map((model) => String(modelNameFromItem(model)).trim()),
+    ),
+  )
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b))
     .map((model) => ({
@@ -157,6 +166,62 @@ export const useUsersData = () => {
     return usageByUserId;
   };
 
+  const formatUsageFilteredUsers = (items, usageParams) =>
+    (items || []).map((user) => {
+      const usageQuota = Number(user.usage_quota) || 0;
+      return {
+        ...user,
+        key: user.id,
+        usage_has_filters: true,
+        usage_quota: usageQuota,
+        usage_token_used: Number(user.usage_token_used) || 0,
+        usage_count: Number(user.usage_count) || 0,
+        usage_daily_average_quota:
+          typeof user.usage_daily_average_quota === 'number'
+            ? user.usage_daily_average_quota
+            : usageParams.dayCount
+              ? usageQuota / usageParams.dayCount
+              : undefined,
+      };
+    });
+
+  const loadUsageFilteredUsers = async (
+    page,
+    size,
+    values = getFormValues(),
+  ) => {
+    const usageParams = getUsageFilterParams(values);
+    const params = {
+      p: page,
+      page_size: size,
+    };
+    if (usageParams.start_timestamp) {
+      params.start_timestamp = usageParams.start_timestamp;
+    }
+    if (usageParams.end_timestamp) {
+      params.end_timestamp = usageParams.end_timestamp;
+    }
+    if (usageParams.model_name) {
+      params.model_name = usageParams.model_name;
+    }
+    if (String(values.searchKeyword || '').trim()) {
+      params.keyword = String(values.searchKeyword).trim();
+    }
+    if (String(values.searchGroup || '').trim()) {
+      params.group = String(values.searchGroup).trim();
+    }
+
+    const res = await API.get('/api/log/user_usage/users', { params });
+    const { success, message, data } = res.data;
+    if (success) {
+      setActivePage(data.page);
+      setUserCount(data.total);
+      setUsers(formatUsageFilteredUsers(data.items, usageParams));
+    } else {
+      showError(message);
+    }
+  };
+
   // Set user format with key field and filtered usage summary
   const setUserFormat = async (users) => {
     const pageUsers = users.map((user) => ({
@@ -188,6 +253,12 @@ export const useUsersData = () => {
   const loadUsers = async (startIdx, pageSize) => {
     setLoading(true);
     try {
+      const values = getFormValues();
+      if (getUsageFilterParams(values).hasFilters) {
+        await loadUsageFilteredUsers(startIdx, pageSize, values);
+        return;
+      }
+
       const res = await API.get(
         `/api/user/?p=${startIdx}&page_size=${pageSize}`,
       );
@@ -217,6 +288,21 @@ export const useUsersData = () => {
       const formValues = getFormValues();
       searchKeyword = formValues.searchKeyword;
       searchGroup = formValues.searchGroup;
+    }
+    const values = {
+      ...getFormValues(),
+      searchKeyword,
+      searchGroup,
+    };
+
+    if (getUsageFilterParams(values).hasFilters) {
+      setSearching(true);
+      try {
+        await loadUsageFilteredUsers(startIdx, pageSize, values);
+      } finally {
+        setSearching(false);
+      }
+      return;
     }
 
     if (searchKeyword === '' && searchGroup === '') {
@@ -388,6 +474,7 @@ export const useUsersData = () => {
     const results = await Promise.allSettled([
       API.get('/api/channel/models_enabled', { skipErrorHandler: true }),
       API.get('/api/log/models', { skipErrorHandler: true }),
+      API.get('/api/channel/models', { skipErrorHandler: true }),
     ]);
     const models = [];
 

@@ -26,8 +26,17 @@ import { TIME_OPTIONS } from '../../constants/dashboard.constants';
 import { useIsMobile } from '../common/useIsMobile';
 import { useMinimumLoadingTime } from '../common/useMinimumLoadingTime';
 
+const modelNameFromItem = (model) => {
+  if (typeof model === 'string') return model;
+  return model?.id || model?.model_name || model?.name || '';
+};
+
 const buildModelOptions = (models) =>
-  Array.from(new Set((models || []).map((model) => String(model || '').trim())))
+  Array.from(
+    new Set(
+      (models || []).map((model) => String(modelNameFromItem(model)).trim()),
+    ),
+  )
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b))
     .map((model) => ({
@@ -255,6 +264,7 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
     const results = await Promise.allSettled([
       API.get('/api/channel/models_enabled', { skipErrorHandler: true }),
       API.get('/api/log/models', { skipErrorHandler: true }),
+      API.get('/api/channel/models', { skipErrorHandler: true }),
     ]);
     const models = [];
 

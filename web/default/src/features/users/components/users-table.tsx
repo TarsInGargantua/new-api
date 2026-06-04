@@ -44,7 +44,7 @@ import {
 } from '@/components/data-table'
 import {
   getEnabledModels,
-  getUserUsageStats,
+  getUserUsageUsers,
   getUsers,
   searchUsers,
 } from '../api'
@@ -67,12 +67,6 @@ type UserUsageFilters = {
   modelName: string
 }
 
-type UsageSummary = {
-  quota: number
-  token_used: number
-  count: number
-}
-
 function isDisabledUserRow(user: User) {
   return isUserDeleted(user) || user.status === USER_STATUS.DISABLED
 }
@@ -82,26 +76,6 @@ function getDateRangeDayCount(start?: Date, end?: Date) {
   const diff = end.getTime() - start.getTime()
   if (!Number.isFinite(diff) || diff < 0) return 1
   return Math.max(1, Math.ceil((diff + 1) / (24 * 60 * 60 * 1000)))
-}
-
-function addUsageSummary(
-  usageByUserId: Map<number, UsageSummary>,
-  userId: number | undefined,
-  quota: number | undefined,
-  tokenUsed: number | undefined,
-  count: number | undefined
-) {
-  if (!userId) return
-  const prev = usageByUserId.get(userId) || {
-    quota: 0,
-    token_used: 0,
-    count: 0,
-  }
-  usageByUserId.set(userId, {
-    quota: prev.quota + (Number(quota) || 0),
-    token_used: prev.token_used + (Number(tokenUsed) || 0),
-    count: prev.count + (Number(count) || 0),
-  })
 }
 
 export function UsersTable() {
@@ -162,6 +136,9 @@ export function UsersTable() {
     usageFilters.start || usageFilters.end || usageFilters.modelName.trim()
   )
   const modelName = usageFilters.modelName.trim()
+  const groupFilter = String(
+    columnFilters.find((filter) => filter.id === 'group')?.value || ''
+  ).trim()
 
   // Fetch data with React Query
   const { data, isLoading, isFetching } = useQuery({
@@ -175,6 +152,7 @@ export function UsersTable() {
       modelName,
       hasUsageFilters,
       usageRangeDays,
+      groupFilter,
       refreshTrigger,
     ],
     queryFn: async () => {
@@ -182,6 +160,42 @@ export function UsersTable() {
       const params = {
         p: pagination.pageIndex + 1,
         page_size: pagination.pageSize,
+      }
+
+      if (hasUsageFilters) {
+        const result = await getUserUsageUsers({
+          ...params,
+          keyword: hasFilter || undefined,
+          group: groupFilter || undefined,
+          start_timestamp: startTimestamp,
+          end_timestamp: endTimestamp,
+          model_name: modelName || undefined,
+        })
+
+        if (!result.success) {
+          toast.error(result.message || 'Failed to load user usage')
+          return { items: [], total: 0 }
+        }
+
+        const items = result.data?.items || []
+        return {
+          items: items.map((user) => {
+            const usageQuota = Number(user.usage_quota) || 0
+            return {
+              ...user,
+              usage_quota: usageQuota,
+              usage_token_used: Number(user.usage_token_used) || 0,
+              usage_count: Number(user.usage_count) || 0,
+              usage_daily_average_quota:
+                typeof user.usage_daily_average_quota === 'number'
+                  ? user.usage_daily_average_quota
+                  : usageRangeDays
+                    ? usageQuota / usageRangeDays
+                    : undefined,
+            }
+          }),
+          total: result.data?.total || 0,
+        }
       }
 
       const result = hasFilter
@@ -196,44 +210,8 @@ export function UsersTable() {
       }
 
       const items = result.data?.items || []
-      const usageByUserId = new Map<number, UsageSummary>()
-      const userIds = items.map((user) => user.id).filter(Boolean)
-
-      if (hasUsageFilters && userIds.length > 0) {
-        const usageResult = await getUserUsageStats({
-          user_ids: userIds,
-          start_timestamp: startTimestamp,
-          end_timestamp: endTimestamp,
-          model_name: modelName || undefined,
-        })
-
-        if (usageResult.success) {
-          for (const item of usageResult.data || []) {
-            addUsageSummary(
-              usageByUserId,
-              item.user_id,
-              item.quota,
-              item.token_used,
-              item.count
-            )
-          }
-        }
-      }
-
       return {
-        items: items.map((user) => {
-          const usage = usageByUserId.get(user.id)
-          const usageQuota = usage?.quota ?? 0
-          return {
-            ...user,
-            usage_quota: usageQuota,
-            usage_token_used: usage?.token_used ?? 0,
-            usage_count: usage?.count ?? 0,
-            usage_daily_average_quota: usageRangeDays
-              ? usageQuota / usageRangeDays
-              : undefined,
-          }
-        }),
+        items,
         total: result.data?.total || 0,
       }
     },
