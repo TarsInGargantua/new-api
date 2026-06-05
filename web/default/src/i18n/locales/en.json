@@ -4508,6 +4508,17 @@
     "Zero retention": "Zero retention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Prompt Tokens": "Prompt Tokens",
+    "Completion Tokens": "Completion Tokens",
+    "Usage Content": "Usage Content",
+    "Usage Metadata": "Usage Metadata",
+    "No matching usage log": "No matching usage log",
+    "Request log rows": "Request log rows",
+    "Request log table missing": "Request log table missing",
+    "Capture response": "Capture response",
+    "Redact secrets": "Redact secrets",
+    "Last captured": "Last captured",
+    "Token Usage": "Token Usage"
   }
 }

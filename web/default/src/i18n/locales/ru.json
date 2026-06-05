@@ -4508,6 +4508,17 @@
     "Zero retention": "Без хранения данных",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Prompt Tokens": "Токены запроса",
+    "Completion Tokens": "Токены ответа",
+    "Usage Content": "Содержимое журнала использования",
+    "Usage Metadata": "Метаданные использования",
+    "No matching usage log": "Нет соответствующего журнала использования",
+    "Request log rows": "Строки журнала запросов",
+    "Request log table missing": "Таблица журнала запросов отсутствует",
+    "Capture response": "Записывать ответ",
+    "Redact secrets": "Маскировать секреты",
+    "Last captured": "Последняя запись",
+    "Token Usage": "Использование токенов"
   }
 }

@@ -56,6 +56,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { SectionPageLayout } from '@/components/layout'
 import { CompactDateTimeRangePicker } from '@/features/usage-logs/components/compact-date-time-range-picker'
 import { getDefaultTimeRange } from '@/features/usage-logs/lib/utils'
+import { formatLogQuota, formatTokens, formatUseTime } from '@/lib/format'
 
 const route = getRouteApi('/_authenticated/request-data')
 
@@ -92,12 +93,40 @@ type APIRequestLogListItem = {
   request_omitted_reason?: string
   response_omitted_reason?: string
   redacted: boolean
+  usage?: APIRequestLogUsage
 }
 
 type APIRequestLogDetail = APIRequestLogListItem & {
   request_body?: string
   response_body?: string
   metadata?: string
+}
+
+type APIRequestLogUsage = {
+  log_id: number
+  created_at: number
+  model_name: string
+  token_name: string
+  quota: number
+  prompt_tokens: number
+  completion_tokens: number
+  token_used: number
+  use_time: number
+  content?: string
+  other?: string
+}
+
+type APIRequestLogStatus = {
+  enabled: boolean
+  redact_secrets: boolean
+  capture_response: boolean
+  has_table: boolean
+  count: number
+  last_created_at?: number
+  last_request_id?: string
+  last_write_error?: string
+  log_db_dialect?: string
+  ensure_migration_failed?: boolean
 }
 
 type PageData<T> = {
@@ -144,6 +173,13 @@ async function fetchRequestData(search: RequestDataSearch) {
 async function fetchRequestDataDetail(id: number) {
   const res = await api.get<APIResponse<APIRequestLogDetail>>(
     `/api/request-log/${id}`
+  )
+  return res.data
+}
+
+async function fetchRequestDataStatus() {
+  const res = await api.get<APIResponse<APIRequestLogStatus>>(
+    '/api/request-log/status'
   )
   return res.data
 }
@@ -228,6 +264,65 @@ function BodyPanel(props: {
   )
 }
 
+function UsagePanel(props: { usage?: APIRequestLogUsage }) {
+  const { t } = useTranslation()
+  const usage = props.usage
+  const usageOther = usage?.other ? prettyText(usage.other) : ''
+
+  if (!usage) {
+    return (
+      <div className='bg-muted/30 text-muted-foreground rounded-md border p-4 text-sm'>
+        {t('No matching usage log')}
+      </div>
+    )
+  }
+
+  return (
+    <div className='space-y-3'>
+      <div className='grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-5'>
+        <div className='bg-muted/30 rounded-md border p-2'>
+          <div className='text-muted-foreground'>{t('Prompt Tokens')}</div>
+          <div className='font-medium'>
+            {formatTokens(usage.prompt_tokens || 0)}
+          </div>
+        </div>
+        <div className='bg-muted/30 rounded-md border p-2'>
+          <div className='text-muted-foreground'>{t('Completion Tokens')}</div>
+          <div className='font-medium'>
+            {formatTokens(usage.completion_tokens || 0)}
+          </div>
+        </div>
+        <div className='bg-muted/30 rounded-md border p-2'>
+          <div className='text-muted-foreground'>{t('Total tokens')}</div>
+          <div className='font-medium'>{formatTokens(usage.token_used || 0)}</div>
+        </div>
+        <div className='bg-muted/30 rounded-md border p-2'>
+          <div className='text-muted-foreground'>{t('Cost')}</div>
+          <div className='font-medium'>{formatLogQuota(usage.quota || 0)}</div>
+        </div>
+        <div className='bg-muted/30 rounded-md border p-2'>
+          <div className='text-muted-foreground'>{t('Duration')}</div>
+          <div className='font-medium'>{formatUseTime(usage.use_time || 0)}</div>
+        </div>
+      </div>
+      <BodyPanel
+        title={t('Usage Content')}
+        contentType='text/plain'
+        size={usage.content?.length || 0}
+        body={usage.content || ''}
+      />
+      {usageOther && (
+        <BodyPanel
+          title={t('Usage Metadata')}
+          contentType='application/json'
+          size={usageOther.length}
+          body={usageOther}
+        />
+      )}
+    </div>
+  )
+}
+
 function DetailDialog(props: {
   log: APIRequestLogListItem | null
   open: boolean
@@ -302,6 +397,7 @@ function DetailDialog(props: {
               <TabsList>
                 <TabsTrigger value='request'>{t('Request')}</TabsTrigger>
                 <TabsTrigger value='response'>{t('Response')}</TabsTrigger>
+                <TabsTrigger value='usage'>{t('Usage')}</TabsTrigger>
                 <TabsTrigger value='metadata'>{t('Metadata')}</TabsTrigger>
               </TabsList>
               <TabsContent value='request'>
@@ -321,6 +417,9 @@ function DetailDialog(props: {
                   omittedReason={detail.response_omitted_reason}
                   body={data?.response_body || ''}
                 />
+              </TabsContent>
+              <TabsContent value='usage'>
+                <UsagePanel usage={data?.usage || props.log?.usage} />
               </TabsContent>
               <TabsContent value='metadata'>
                 <BodyPanel
@@ -378,12 +477,17 @@ export function RequestData() {
       return result.data || { items: [], total: 0, page: 1, page_size: 20 }
     },
   })
+  const { data: statusResult } = useQuery({
+    queryKey: ['request-data-status'],
+    queryFn: fetchRequestDataStatus,
+  })
 
   const page = effectiveSearch.page || 1
   const pageSize = effectiveSearch.pageSize || 20
   const total = data?.total || 0
   const pageCount = Math.max(1, Math.ceil(total / pageSize))
   const logs = data?.items || []
+  const status = statusResult?.success ? statusResult.data : null
 
   const updateSearch = useCallback(
     (next: RequestDataSearch) => {
@@ -456,6 +560,45 @@ export function RequestData() {
         </SectionPageLayout.Actions>
         <SectionPageLayout.Content>
           <div className='space-y-3'>
+            {status && (
+              <div className='bg-muted/20 flex flex-wrap items-center gap-2 rounded-md border p-2 text-xs'>
+                <Badge
+                  variant={
+                    status.enabled && status.has_table ? 'default' : 'secondary'
+                  }
+                  className='rounded-md'
+                >
+                  {status.enabled ? t('Enabled') : t('Disabled')}
+                </Badge>
+                <Badge
+                  variant={status.has_table ? 'outline' : 'destructive'}
+                  className='rounded-md'
+                >
+                  {status.has_table
+                    ? `${t('Request log rows')}: ${status.count || 0}`
+                    : t('Request log table missing')}
+                </Badge>
+                <Badge variant='outline' className='rounded-md'>
+                  {t('Capture response')}:{' '}
+                  {status.capture_response ? t('Enabled') : t('Disabled')}
+                </Badge>
+                <Badge variant='outline' className='rounded-md'>
+                  {t('Redact secrets')}:{' '}
+                  {status.redact_secrets ? t('Enabled') : t('Disabled')}
+                </Badge>
+                {status.last_created_at ? (
+                  <Badge variant='outline' className='rounded-md'>
+                    {t('Last captured')}: {formatDate(status.last_created_at)}
+                  </Badge>
+                ) : null}
+                {status.last_write_error ? (
+                  <Badge variant='destructive' className='rounded-md'>
+                    {status.last_write_error}
+                  </Badge>
+                ) : null}
+              </div>
+            )}
+
             <div className='bg-muted/20 flex flex-wrap items-center gap-2 rounded-md border p-2'>
               <CompactDateTimeRangePicker
                 start={filters.startTime}
@@ -525,20 +668,21 @@ export function RequestData() {
                     <TableHead>{t('Path')}</TableHead>
                     <TableHead>{t('Status')}</TableHead>
                     <TableHead>{t('Body Size')}</TableHead>
+                    <TableHead>{t('Token Usage')}</TableHead>
                     <TableHead>{t('Actions')}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {isLoading ? (
                     <TableRow>
-                      <TableCell colSpan={8} className='h-28 text-center'>
+                      <TableCell colSpan={9} className='h-28 text-center'>
                         {t('Loading...')}
                       </TableCell>
                     </TableRow>
                   ) : logs.length === 0 ? (
                     <TableRow>
                       <TableCell
-                        colSpan={8}
+                        colSpan={9}
                         className='text-muted-foreground h-28 text-center'
                       >
                         {t('No request data found')}
@@ -585,6 +729,18 @@ export function RequestData() {
                               {formatBytes(log.response_size)}
                             </span>
                           </div>
+                        </TableCell>
+                        <TableCell>
+                          {log.usage ? (
+                            <div className='flex flex-col gap-0.5 font-mono text-xs'>
+                              <span>{formatTokens(log.usage.token_used || 0)}</span>
+                              <span className='text-muted-foreground'>
+                                {formatLogQuota(log.usage.quota || 0)}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className='text-muted-foreground'>-</span>
+                          )}
                         </TableCell>
                         <TableCell>
                           <div className='flex items-center gap-1'>

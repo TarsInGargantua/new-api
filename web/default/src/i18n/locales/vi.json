@@ -4508,6 +4508,17 @@
     "Zero retention": "Không lưu dữ liệu",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Prompt Tokens": "Token prompt",
+    "Completion Tokens": "Token hoàn tất",
+    "Usage Content": "Nội dung nhật ký sử dụng",
+    "Usage Metadata": "Siêu dữ liệu sử dụng",
+    "No matching usage log": "Không có nhật ký sử dụng phù hợp",
+    "Request log rows": "Số dòng nhật ký yêu cầu",
+    "Request log table missing": "Thiếu bảng nhật ký yêu cầu",
+    "Capture response": "Ghi lại phản hồi",
+    "Redact secrets": "Ẩn thông tin nhạy cảm",
+    "Last captured": "Lần ghi cuối",
+    "Token Usage": "Mức dùng token"
   }
 }

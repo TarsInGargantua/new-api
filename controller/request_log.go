@@ -9,6 +9,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type apiRequestLogStatusResponse struct {
+	Enabled         bool `json:"enabled"`
+	RedactSecrets   bool `json:"redact_secrets"`
+	CaptureResponse bool `json:"capture_response"`
+	*model.APIRequestLogStorageStatus
+}
+
 func GetAPIRequestLogs(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
@@ -43,4 +50,18 @@ func GetAPIRequestLog(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, log)
+}
+
+func GetAPIRequestLogStatus(c *gin.Context) {
+	storageStatus, err := model.GetAPIRequestLogStorageStatus()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, apiRequestLogStatusResponse{
+		Enabled:                    common.APIRequestLogEnabled,
+		RedactSecrets:              common.APIRequestLogRedactSecrets,
+		CaptureResponse:            common.APIRequestLogCaptureResponse,
+		APIRequestLogStorageStatus: storageStatus,
+	})
 }

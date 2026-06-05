@@ -4508,6 +4508,17 @@
     "Zero retention": "データ保持なし",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V 4",
-    "Zoom": "ズーム"
+    "Zoom": "ズーム",
+    "Prompt Tokens": "プロンプトトークン",
+    "Completion Tokens": "補完トークン",
+    "Usage Content": "使用ログ内容",
+    "Usage Metadata": "使用ログメタデータ",
+    "No matching usage log": "一致する使用ログがありません",
+    "Request log rows": "リクエストログ行数",
+    "Request log table missing": "リクエストログテーブルがありません",
+    "Capture response": "レスポンスを記録",
+    "Redact secrets": "シークレットをマスク",
+    "Last captured": "最終記録",
+    "Token Usage": "トークン使用量"
   }
 }

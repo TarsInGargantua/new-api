@@ -3059,7 +3059,7 @@
     "翻译": "Dịch",
     "翻转": "Lật",
     "老密码": "Mật khẩu cũ",
-    "耗时": "Thời gian đã trôi qua",
+    "耗时": "Thời lượng",
     "聊天": "Trò chuyện",
     "聊天会话管理": "Quản lý phiên trò chuyện",
     "聊天区域": "Khu vực trò chuyện",
@@ -4232,6 +4232,19 @@
     "范围内用量": "Mức dùng trong khoảng",
     "请求数": "Số yêu cầu",
     "请求数据": "Dữ liệu yêu cầu",
-    "请求数据详情": "Chi tiết dữ liệu yêu cầu"
+    "请求数据详情": "Chi tiết dữ liệu yêu cầu",
+    "未匹配到使用日志": "Không có nhật ký sử dụng phù hợp",
+    "提示词 token": "Token prompt",
+    "补全 token": "Token hoàn tất",
+    "总 token": "Tổng token",
+    "使用日志内容": "Nội dung nhật ký sử dụng",
+    "使用日志元数据": "Siêu dữ liệu sử dụng",
+    "Token 消耗": "Mức dùng token",
+    "请求日志行数": "Số dòng nhật ký yêu cầu",
+    "表未创建": "Bảng chưa được tạo",
+    "响应采集": "Ghi lại phản hồi",
+    "脱敏": "Ẩn dữ liệu",
+    "最后捕获": "Lần ghi cuối",
+    "用量": "Mức dùng"
   }
 }

@@ -3845,6 +3845,20 @@
     "请求内容": "Request Body",
     "请求数": "Requests",
     "请求数据": "Request Data",
-    "请求数据详情": "Request Data Detail"
+    "请求数据详情": "Request Data Detail",
+    "未匹配到使用日志": "No matching usage log",
+    "提示词 token": "Prompt tokens",
+    "补全 token": "Completion tokens",
+    "总 token": "Total tokens",
+    "耗时": "Duration",
+    "使用日志内容": "Usage log content",
+    "使用日志元数据": "Usage log metadata",
+    "Token 消耗": "Token Usage",
+    "请求日志行数": "Request log rows",
+    "表未创建": "Table missing",
+    "响应采集": "Capture response",
+    "脱敏": "Redaction",
+    "最后捕获": "Last captured",
+    "用量": "Usage"
   }
 }

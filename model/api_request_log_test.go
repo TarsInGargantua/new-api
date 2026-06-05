@@ -152,6 +152,20 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 		Metadata:            APIRequestLogBody(`{"relay_format":"openai"}`),
 	})
 	require.NoError(t, err)
+	require.NoError(t, LOG_DB.Create(&Log{
+		UserId:           2,
+		Username:         "alice",
+		Type:             LogTypeConsume,
+		ModelName:        "gpt-test",
+		TokenName:        "prod-token",
+		Quota:            1234,
+		PromptTokens:     100,
+		CompletionTokens: 20,
+		UseTime:          3,
+		RequestId:        "req-1",
+		Content:          "consume detail",
+		Other:            `{"foo":"bar"}`,
+	}).Error)
 	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
 		UserId:    3,
 		Username:  "bob",
@@ -174,9 +188,41 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 	require.Len(t, items, 1)
 	require.Equal(t, "prod-token", items[0].TokenName)
 	require.Equal(t, int64(18), items[0].RequestSize)
+	require.NotNil(t, items[0].Usage)
+	require.Equal(t, 1234, items[0].Usage.Quota)
+	require.Equal(t, 120, items[0].Usage.TokenUsed)
+	require.Empty(t, items[0].Usage.Content)
 
 	detail, err := GetAPIRequestLogById(items[0].Id)
 	require.NoError(t, err)
 	require.Equal(t, APIRequestLogBody(`{"prompt":"hello"}`), detail.RequestBody)
 	require.Equal(t, APIRequestLogBody(`data: {"ok":true}`), detail.ResponseBody)
+	require.NotNil(t, detail.Usage)
+	require.Equal(t, "consume detail", detail.Usage.Content)
+	require.Equal(t, `{"foo":"bar"}`, detail.Usage.Other)
+}
+
+func TestCreateAPIRequestLogEnsuresTable(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+
+	oldLogDB := LOG_DB
+	LOG_DB = db
+	t.Cleanup(func() {
+		LOG_DB = oldLogDB
+	})
+
+	require.False(t, LOG_DB.Migrator().HasTable(&APIRequestLog{}))
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		Username:  "alice",
+		TokenName: "prod-token",
+		ModelName: "gpt-test",
+		CreatedAt: 100,
+	}))
+	require.True(t, LOG_DB.Migrator().HasTable(&APIRequestLog{}))
+
+	status, err := GetAPIRequestLogStorageStatus()
+	require.NoError(t, err)
+	require.True(t, status.HasTable)
+	require.Equal(t, int64(1), status.Count)
 }

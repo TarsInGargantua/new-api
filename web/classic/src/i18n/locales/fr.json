@@ -3700,6 +3700,20 @@
     "请求内容": "Contenu de la requête",
     "请求数": "Requêtes",
     "请求数据": "Données des requêtes",
-    "请求数据详情": "Détail des données de requête"
+    "请求数据详情": "Détail des données de requête",
+    "未匹配到使用日志": "Aucun journal d’utilisation correspondant",
+    "提示词 token": "Tokens de prompt",
+    "补全 token": "Tokens de complétion",
+    "总 token": "Total des tokens",
+    "耗时": "Durée",
+    "使用日志内容": "Contenu du journal d’utilisation",
+    "使用日志元数据": "Métadonnées d’utilisation",
+    "Token 消耗": "Utilisation des tokens",
+    "请求日志行数": "Lignes du journal de requêtes",
+    "表未创建": "Table absente",
+    "响应采集": "Capturer la réponse",
+    "脱敏": "Masquage",
+    "最后捕获": "Dernière capture",
+    "用量": "Utilisation"
   }
 }

@@ -4508,6 +4508,17 @@
     "Zero retention": "零数据保留",
     "Zhipu": "智谱",
     "Zhipu V4": "智谱 V4",
-    "Zoom": "缩放"
+    "Zoom": "缩放",
+    "Prompt Tokens": "提示词 Tokens",
+    "Completion Tokens": "补全 Tokens",
+    "Usage Content": "使用日志内容",
+    "Usage Metadata": "使用日志元数据",
+    "No matching usage log": "未匹配到使用日志",
+    "Request log rows": "请求日志行数",
+    "Request log table missing": "请求日志表未创建",
+    "Capture response": "响应采集",
+    "Redact secrets": "敏感信息脱敏",
+    "Last captured": "最后捕获",
+    "Token Usage": "Token 消耗"
   }
 }

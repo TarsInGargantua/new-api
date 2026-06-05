@@ -4508,6 +4508,17 @@
     "Zero retention": "Aucune rétention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Prompt Tokens": "Tokens de prompt",
+    "Completion Tokens": "Tokens de complétion",
+    "Usage Content": "Contenu du journal d’utilisation",
+    "Usage Metadata": "Métadonnées d’utilisation",
+    "No matching usage log": "Aucun journal d’utilisation correspondant",
+    "Request log rows": "Lignes du journal de requêtes",
+    "Request log table missing": "Table des journaux de requêtes absente",
+    "Capture response": "Capturer la réponse",
+    "Redact secrets": "Masquer les secrets",
+    "Last captured": "Dernière capture",
+    "Token Usage": "Utilisation des tokens"
   }
 }

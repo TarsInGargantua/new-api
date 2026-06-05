@@ -39,6 +39,7 @@ import { useIsMobile } from '../../hooks/common/useIsMobile';
 import {
   API,
   copy,
+  renderQuota,
   showError,
   showSuccess,
   timestamp2string,
@@ -59,6 +60,19 @@ const statusColor = (statusCode) => {
   if (statusCode >= 200 && statusCode < 300) return 'green';
   if (statusCode >= 400) return 'red';
   return 'orange';
+};
+
+const formatTokens = (tokens) => {
+  const value = Number(tokens) || 0;
+  if (value <= 0) return '0';
+  return value.toLocaleString();
+};
+
+const formatUseTime = (seconds) => {
+  const value = Number(seconds) || 0;
+  if (value <= 0) return '-';
+  if (value < 60) return `${value}s`;
+  return `${(value / 60).toFixed(1)}m`;
 };
 
 const toUnixTimestamp = (value) => {
@@ -129,6 +143,62 @@ const BodyPanel = ({ title, contentType, size, omittedReason, body, t }) => {
   );
 };
 
+const UsagePanel = ({ usage, t }) => {
+  if (!usage) {
+    return (
+      <div
+        className='rounded-lg border p-4 text-sm'
+        style={{
+          borderColor: 'var(--semi-color-border)',
+          background: 'var(--semi-color-fill-0)',
+        }}
+      >
+        {t('未匹配到使用日志')}
+      </div>
+    );
+  }
+
+  const usageOther = prettyText(usage.other);
+
+  return (
+    <div className='flex flex-col gap-3'>
+      <div className='grid grid-cols-1 md:grid-cols-5 gap-2 text-xs'>
+        <Tag color='white' shape='circle'>
+          {t('提示词 token')}: {formatTokens(usage.prompt_tokens)}
+        </Tag>
+        <Tag color='white' shape='circle'>
+          {t('补全 token')}: {formatTokens(usage.completion_tokens)}
+        </Tag>
+        <Tag color='white' shape='circle'>
+          {t('总 token')}: {formatTokens(usage.token_used)}
+        </Tag>
+        <Tag color='white' shape='circle'>
+          {t('消耗额度')}: {renderQuota(usage.quota || 0, 6)}
+        </Tag>
+        <Tag color='white' shape='circle'>
+          {t('耗时')}: {formatUseTime(usage.use_time)}
+        </Tag>
+      </div>
+      <BodyPanel
+        title={t('使用日志内容')}
+        contentType='text/plain'
+        size={(usage.content || '').length}
+        body={usage.content || t('无内容')}
+        t={t}
+      />
+      {usageOther && (
+        <BodyPanel
+          title={t('使用日志元数据')}
+          contentType='application/json'
+          size={usageOther.length}
+          body={usageOther}
+          t={t}
+        />
+      )}
+    </div>
+  );
+};
+
 const RequestData = () => {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
@@ -142,6 +212,7 @@ const RequestData = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [selectedLog, setSelectedLog] = useState(null);
   const [detail, setDetail] = useState(null);
+  const [status, setStatus] = useState(null);
 
   const formInitValues = {
     dateRange: [],
@@ -205,6 +276,18 @@ const RequestData = () => {
     },
     [activePage, getFilterParams, pageSize, t],
   );
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const res = await API.get('/api/request-log/status');
+      const { success, data } = res.data;
+      if (success) {
+        setStatus(data || null);
+      }
+    } catch {
+      setStatus(null);
+    }
+  }, []);
 
   const openDetail = useCallback(
     async (log) => {
@@ -309,6 +392,23 @@ const RequestData = () => {
         ),
       },
       {
+        title: t('Token 消耗'),
+        dataIndex: 'usage',
+        render: (value, record) =>
+          record.usage ? (
+            <div className='flex flex-col text-xs'>
+              <span>
+                {t('总 token')}: {formatTokens(record.usage.token_used)}
+              </span>
+              <span>
+                {t('额度')}: {renderQuota(record.usage.quota || 0, 6)}
+              </span>
+            </div>
+          ) : (
+            '-'
+          ),
+      },
+      {
         title: '',
         dataIndex: 'operate',
         fixed: 'right',
@@ -337,6 +437,7 @@ const RequestData = () => {
 
   useEffect(() => {
     loadLogs(1, pageSize);
+    loadStatus();
   }, []);
 
   const metadata = detail?.metadata ? prettyText(detail.metadata) : '';
@@ -346,9 +447,39 @@ const RequestData = () => {
       <CardPro
         type='type2'
         statsArea={
-          <div className='flex items-center gap-2'>
+          <div className='flex flex-wrap items-center gap-2'>
             <Database size={18} />
             <span className='font-semibold'>{t('请求数据')}</span>
+            {status && (
+              <>
+                <Tag
+                  color={status.enabled && status.has_table ? 'green' : 'orange'}
+                  shape='circle'
+                >
+                  {status.enabled ? t('已启用') : t('已禁用')}
+                </Tag>
+                <Tag color={status.has_table ? 'white' : 'red'} shape='circle'>
+                  {status.has_table ? t('请求日志行数') : t('表未创建')}:{' '}
+                  {status.count || 0}
+                </Tag>
+                <Tag color='white' shape='circle'>
+                  {t('响应采集')}: {status.capture_response ? t('已启用') : t('已禁用')}
+                </Tag>
+                <Tag color='white' shape='circle'>
+                  {t('脱敏')}: {status.redact_secrets ? t('已启用') : t('已禁用')}
+                </Tag>
+                {status.last_created_at && (
+                  <Tag color='white' shape='circle'>
+                    {t('最后捕获')}: {timestamp2string(status.last_created_at)}
+                  </Tag>
+                )}
+                {status.last_write_error && (
+                  <Tag color='red' shape='circle'>
+                    {status.last_write_error}
+                  </Tag>
+                )}
+              </>
+            )}
           </div>
         }
         searchArea={
@@ -500,6 +631,9 @@ const RequestData = () => {
                   body={detail?.response_body}
                   t={t}
                 />
+              </TabPane>
+              <TabPane tab={t('用量')} itemKey='usage'>
+                <UsagePanel usage={detail?.usage} t={t} />
               </TabPane>
               <TabPane tab={t('元数据')} itemKey='metadata'>
                 <BodyPanel

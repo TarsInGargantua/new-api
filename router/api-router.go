@@ -317,6 +317,7 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			requestLogRoute.GET("", controller.GetAPIRequestLogs)
 			requestLogRoute.GET("/", controller.GetAPIRequestLogs)
+			requestLogRoute.GET("/status", controller.GetAPIRequestLogStatus)
 			requestLogRoute.GET("/:id", controller.GetAPIRequestLog)
 		}
 
