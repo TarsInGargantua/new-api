@@ -159,6 +159,7 @@ func ChargeViolationFeeIfNeeded(ctx *gin.Context, relayInfo *relaycommon.RelayIn
 		Group:          relayInfo.UsingGroup,
 		Other:          other,
 	})
+	RecordAPIRequestLogForConsume(ctx, relayInfo)
 
 	return true
 }

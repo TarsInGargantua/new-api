@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -109,5 +110,71 @@ func TestAPIRequestLogCaptureRecordsOnce(t *testing.T) {
 	}
 	if !strings.Contains(string(logs[0].ResponseBody), "chatcmpl-test") {
 		t.Fatalf("expected response body to be captured, got %s", logs[0].ResponseBody)
+	}
+}
+
+func TestRecordAPIRequestLogForConsumeRecordsWithoutRouteCapture(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.APIRequestLog{}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLogDB := model.LOG_DB
+	oldEnabled := common.APIRequestLogEnabled
+	oldCaptureResponse := common.APIRequestLogCaptureResponse
+	oldRedactSecrets := common.APIRequestLogRedactSecrets
+	model.LOG_DB = db
+	common.APIRequestLogEnabled = true
+	common.APIRequestLogCaptureResponse = true
+	common.APIRequestLogRedactSecrets = true
+	t.Cleanup(func() {
+		model.LOG_DB = oldLogDB
+		common.APIRequestLogEnabled = oldEnabled
+		common.APIRequestLogCaptureResponse = oldCaptureResponse
+		common.APIRequestLogRedactSecrets = oldRedactSecrets
+	})
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-consume","input":"hello"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Set("username", "consume-user")
+	ctx.Set("token_name", "consume-token")
+	if _, err := ctx.Writer.Write([]byte(`{"id":"resp-test"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	relayInfo := &relaycommon.RelayInfo{
+		UserId:          7,
+		TokenId:         11,
+		OriginModelName: "gpt-consume",
+		UsingGroup:      "vip",
+		IsStream:        true,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelId: 13,
+		},
+	}
+	RecordAPIRequestLogForConsume(ctx, relayInfo)
+	RecordAPIRequestLog(ctx, relayInfo, nil)
+
+	var logs []model.APIRequestLog
+	if err := db.Find(&logs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected one request log, got %d", len(logs))
+	}
+	if logs[0].UserId != 7 || logs[0].TokenId != 11 || logs[0].ChannelId != 13 {
+		t.Fatalf("expected relay info fallback fields, got %+v", logs[0])
+	}
+	if logs[0].ModelName != "gpt-consume" || logs[0].Group != "vip" || !logs[0].IsStream {
+		t.Fatalf("unexpected relay info metadata: %+v", logs[0])
+	}
+	if !strings.Contains(string(logs[0].RequestBody), "hello") {
+		t.Fatalf("expected request body to be captured, got %s", logs[0].RequestBody)
 	}
 }

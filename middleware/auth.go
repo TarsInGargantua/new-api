@@ -402,6 +402,9 @@ func TokenAuth() func(c *gin.Context) {
 		if err != nil {
 			return
 		}
+		if common.APIRequestLogEnabled && isRelayAPIPath(c.Request.URL.Path) && !isRealtimeRelayPath(c.Request.URL.Path) && !c.IsWebsocket() {
+			service.StartAPIRequestLogCapture(c)
+		}
 		c.Next()
 	}
 }

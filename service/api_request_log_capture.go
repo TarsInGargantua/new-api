@@ -87,9 +87,9 @@ func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 	metadataJSON, _ := common.Marshal(metadata)
 
 	log := &model.APIRequestLog{
-		UserId:                c.GetInt("id"),
+		UserId:                firstNonZero(c.GetInt("id"), relayUserId(relayInfo)),
 		Username:              c.GetString("username"),
-		TokenId:               c.GetInt("token_id"),
+		TokenId:               firstNonZero(c.GetInt("token_id"), relayTokenId(relayInfo)),
 		TokenName:             c.GetString("token_name"),
 		ModelName:             firstNonEmpty(c.GetString("original_model"), relayModelName(relayInfo)),
 		CreatedAt:             common.GetTimestamp(),
@@ -99,7 +99,7 @@ func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 		RequestPath:           requestPath(c, relayInfo),
 		StatusCode:            c.Writer.Status(),
 		IsStream:              common.GetContextKeyBool(c, constant.ContextKeyIsStream) || (relayInfo != nil && relayInfo.IsStream),
-		ChannelId:             c.GetInt("channel_id"),
+		ChannelId:             firstNonZero(c.GetInt("channel_id"), relayChannelId(relayInfo)),
 		Group:                 firstNonEmpty(c.GetString("group"), relayUsingGroup(relayInfo)),
 		RequestContentType:    requestLog.contentType,
 		ResponseContentType:   responseLog.contentType,
@@ -120,6 +120,16 @@ func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 		return
 	}
 	c.Set(apiRequestLogRecordedKey, true)
+}
+
+func RecordAPIRequestLogForConsume(c *gin.Context, relayInfo *relaycommon.RelayInfo) {
+	if c == nil || relayInfo == nil || !common.APIRequestLogEnabled {
+		return
+	}
+	if _, exists := c.Get(apiRequestLogWriterKey); !exists {
+		StartAPIRequestLogCapture(c)
+	}
+	RecordAPIRequestLog(c, relayInfo, nil)
 }
 
 func buildRequestLogBody(c *gin.Context) apiRequestLogBody {
@@ -232,6 +242,27 @@ func relayModelName(relayInfo *relaycommon.RelayInfo) string {
 	return relayInfo.OriginModelName
 }
 
+func relayUserId(relayInfo *relaycommon.RelayInfo) int {
+	if relayInfo == nil {
+		return 0
+	}
+	return relayInfo.UserId
+}
+
+func relayTokenId(relayInfo *relaycommon.RelayInfo) int {
+	if relayInfo == nil {
+		return 0
+	}
+	return relayInfo.TokenId
+}
+
+func relayChannelId(relayInfo *relaycommon.RelayInfo) int {
+	if relayInfo == nil {
+		return 0
+	}
+	return relayInfo.ChannelId
+}
+
 func relayUsingGroup(relayInfo *relaycommon.RelayInfo) string {
 	if relayInfo == nil {
 		return ""
@@ -252,4 +283,13 @@ func requestPath(c *gin.Context, relayInfo *relaycommon.RelayInfo) string {
 		return relayInfo.RequestURLPath
 	}
 	return ""
+}
+
+func firstNonZero(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
