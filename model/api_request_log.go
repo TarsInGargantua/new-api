@@ -366,12 +366,12 @@ func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 	}
 
 	var last APIRequestLog
-	err := LOG_DB.Select("created_at, request_id").Order("id desc").Limit(1).First(&last).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return status, nil
-		}
-		return status, err
+	result := LOG_DB.Select("created_at, request_id").Order("id desc").Limit(1).Find(&last)
+	if result.Error != nil {
+		return status, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return status, nil
 	}
 	status.LastCreatedAt = last.CreatedAt
 	status.LastRequestId = last.RequestId
