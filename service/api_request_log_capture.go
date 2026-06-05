@@ -16,6 +16,7 @@ import (
 
 const apiRequestLogWriterKey = "api_request_log_writer"
 const apiRequestLogRecordedKey = "api_request_log_recorded"
+const APIRequestLogOriginalPathKey = "api_request_log_original_path"
 
 type apiRequestLogWriter struct {
 	gin.ResponseWriter
@@ -239,6 +240,11 @@ func relayUsingGroup(relayInfo *relaycommon.RelayInfo) string {
 }
 
 func requestPath(c *gin.Context, relayInfo *relaycommon.RelayInfo) string {
+	if c != nil {
+		if originalPath := c.GetString(APIRequestLogOriginalPathKey); originalPath != "" {
+			return originalPath
+		}
+	}
 	if c != nil && c.Request != nil && c.Request.URL != nil && c.Request.URL.Path != "" {
 		return c.Request.URL.Path
 	}

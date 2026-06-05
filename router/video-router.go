@@ -31,6 +31,18 @@ func SetVideoRouter(router *gin.Engine) {
 		videoV1Router.GET("/videos/:task_id", controller.RelayTaskFetch)
 	}
 
+	videoRootRouter := router.Group("")
+	videoRootRouter.Use(middleware.RouteTag("relay"))
+	videoRootRouter.Use(middleware.NormalizeOpenAICompatibleRootPath())
+	videoRootRouter.Use(middleware.TokenAuth(), middleware.APIRequestLogCapture(), middleware.Distribute())
+	{
+		videoRootRouter.POST("/video/generations", controller.RelayTask)
+		videoRootRouter.GET("/video/generations/:task_id", controller.RelayTaskFetch)
+		videoRootRouter.POST("/videos/:video_id/remix", controller.RelayTask)
+		videoRootRouter.POST("/videos", controller.RelayTask)
+		videoRootRouter.GET("/videos/:task_id", controller.RelayTaskFetch)
+	}
+
 	klingV1Router := router.Group("/kling/v1")
 	klingV1Router.Use(middleware.RouteTag("relay"))
 	klingV1Router.Use(middleware.KlingRequestConvert(), middleware.TokenAuth(), middleware.APIRequestLogCapture(), middleware.Distribute())
