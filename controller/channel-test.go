@@ -484,7 +484,7 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 	milliseconds := tok.Sub(tik).Milliseconds()
 	consumedTime := float64(milliseconds) / 1000.0
 	other := buildTestLogOther(c, info, priceData, usage, tieredResult)
-	model.RecordConsumeLog(c, 1, model.RecordConsumeLogParams{
+	consumeLog := model.RecordConsumeLog(c, 1, model.RecordConsumeLogParams{
 		ChannelId:        channel.Id,
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
@@ -497,6 +497,7 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 		Group:            info.UsingGroup,
 		Other:            other,
 	})
+	service.RecordAPIRequestLogForConsume(c, info, consumeLog)
 	common.SysLog(fmt.Sprintf("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
 	return testResult{
 		context:     c,

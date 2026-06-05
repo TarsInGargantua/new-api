@@ -113,12 +113,12 @@ func TestAPIRequestLogCaptureRecordsOnce(t *testing.T) {
 	}
 }
 
-func TestRecordAPIRequestLogForConsumeRecordsWithoutRouteCapture(t *testing.T) {
+func TestRecordAPIRequestLogForConsumeUsesConsumeLogFields(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&model.APIRequestLog{}); err != nil {
+	if err := db.AutoMigrate(&model.APIRequestLog{}, &model.Log{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -142,8 +142,14 @@ func TestRecordAPIRequestLogForConsumeRecordsWithoutRouteCapture(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-consume","input":"hello"}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
-	ctx.Set("username", "consume-user")
-	ctx.Set("token_name", "consume-token")
+	ctx.Set("id", 7000)
+	ctx.Set("username", "context-user")
+	ctx.Set("token_id", 11000)
+	ctx.Set("token_name", "context-token")
+	ctx.Set("channel_id", 13000)
+	ctx.Set("group", "context-group")
+	ctx.Set("original_model", "context-model")
+	StartAPIRequestLogCapture(ctx)
 	if _, err := ctx.Writer.Write([]byte(`{"id":"resp-test"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +164,29 @@ func TestRecordAPIRequestLogForConsumeRecordsWithoutRouteCapture(t *testing.T) {
 			ChannelId: 13,
 		},
 	}
-	RecordAPIRequestLogForConsume(ctx, relayInfo)
+	consumeLog := &model.Log{
+		UserId:            17,
+		Username:          "consume-user",
+		TokenId:           21,
+		TokenName:         "consume-token",
+		ModelName:         "gpt-consume-log",
+		CreatedAt:         123,
+		RequestId:         "req-consume",
+		UpstreamRequestId: "upstream-consume",
+		IsStream:          true,
+		ChannelId:         23,
+		Group:             "consume-group",
+		Type:              model.LogTypeConsume,
+		Quota:             99,
+		PromptTokens:      8,
+		CompletionTokens:  9,
+		Content:           "consume content",
+	}
+	if err := db.Create(consumeLog).Error; err != nil {
+		t.Fatal(err)
+	}
+	RecordAPIRequestLogForConsume(ctx, relayInfo, consumeLog)
+	RecordAPIRequestLogForConsume(ctx, relayInfo, consumeLog)
 	RecordAPIRequestLog(ctx, relayInfo, nil)
 
 	var logs []model.APIRequestLog
@@ -168,13 +196,25 @@ func TestRecordAPIRequestLogForConsumeRecordsWithoutRouteCapture(t *testing.T) {
 	if len(logs) != 1 {
 		t.Fatalf("expected one request log, got %d", len(logs))
 	}
-	if logs[0].UserId != 7 || logs[0].TokenId != 11 || logs[0].ChannelId != 13 {
-		t.Fatalf("expected relay info fallback fields, got %+v", logs[0])
+	if logs[0].UsageLogId != consumeLog.Id {
+		t.Fatalf("expected usage log id %d, got %d", consumeLog.Id, logs[0].UsageLogId)
 	}
-	if logs[0].ModelName != "gpt-consume" || logs[0].Group != "vip" || !logs[0].IsStream {
-		t.Fatalf("unexpected relay info metadata: %+v", logs[0])
+	if logs[0].UserId != consumeLog.UserId || logs[0].TokenId != consumeLog.TokenId || logs[0].ChannelId != consumeLog.ChannelId {
+		t.Fatalf("expected consume log identity fields, got %+v", logs[0])
+	}
+	if logs[0].Username != consumeLog.Username || logs[0].TokenName != consumeLog.TokenName || logs[0].ModelName != consumeLog.ModelName {
+		t.Fatalf("expected consume log display fields, got %+v", logs[0])
+	}
+	if logs[0].CreatedAt != consumeLog.CreatedAt || logs[0].RequestId != consumeLog.RequestId || logs[0].UpstreamRequestId != consumeLog.UpstreamRequestId {
+		t.Fatalf("expected consume log request fields, got %+v", logs[0])
+	}
+	if logs[0].Group != consumeLog.Group || !logs[0].IsStream {
+		t.Fatalf("unexpected consume log metadata: %+v", logs[0])
 	}
 	if !strings.Contains(string(logs[0].RequestBody), "hello") {
 		t.Fatalf("expected request body to be captured, got %s", logs[0].RequestBody)
+	}
+	if !strings.Contains(string(logs[0].ResponseBody), "resp-test") {
+		t.Fatalf("expected response body to be captured, got %s", logs[0].ResponseBody)
 	}
 }

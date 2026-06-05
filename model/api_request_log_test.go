@@ -131,7 +131,23 @@ func TestGetUserUsageStatsPage(t *testing.T) {
 func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
 
+	usageLog := &Log{
+		UserId:           2,
+		Username:         "alice",
+		Type:             LogTypeConsume,
+		ModelName:        "gpt-test",
+		TokenName:        "prod-token",
+		Quota:            1234,
+		PromptTokens:     100,
+		CompletionTokens: 20,
+		UseTime:          3,
+		Content:          "consume detail",
+		Other:            `{"foo":"bar"}`,
+	}
+	require.NoError(t, LOG_DB.Create(usageLog).Error)
+
 	err := CreateAPIRequestLog(&APIRequestLog{
+		UsageLogId:          usageLog.Id,
 		UserId:              2,
 		Username:            "alice",
 		TokenId:             9,
@@ -152,20 +168,6 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 		Metadata:            APIRequestLogBody(`{"relay_format":"openai"}`),
 	})
 	require.NoError(t, err)
-	require.NoError(t, LOG_DB.Create(&Log{
-		UserId:           2,
-		Username:         "alice",
-		Type:             LogTypeConsume,
-		ModelName:        "gpt-test",
-		TokenName:        "prod-token",
-		Quota:            1234,
-		PromptTokens:     100,
-		CompletionTokens: 20,
-		UseTime:          3,
-		RequestId:        "req-1",
-		Content:          "consume detail",
-		Other:            `{"foo":"bar"}`,
-	}).Error)
 	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
 		UserId:    3,
 		Username:  "bob",
@@ -187,6 +189,7 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 	require.Equal(t, int64(1), total)
 	require.Len(t, items, 1)
 	require.Equal(t, "prod-token", items[0].TokenName)
+	require.Equal(t, usageLog.Id, items[0].UsageLogId)
 	require.Equal(t, int64(18), items[0].RequestSize)
 	require.NotNil(t, items[0].Usage)
 	require.Equal(t, 1234, items[0].Usage.Quota)

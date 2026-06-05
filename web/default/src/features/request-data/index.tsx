@@ -72,6 +72,7 @@ type RequestDataSearch = {
 
 type APIRequestLogListItem = {
   id: number
+  usage_log_id: number
   user_id: number
   username: string
   token_id: number

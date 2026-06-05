@@ -16,6 +16,7 @@ import (
 
 const apiRequestLogWriterKey = "api_request_log_writer"
 const apiRequestLogRecordedKey = "api_request_log_recorded"
+const apiRequestLogRecordedUsageIdsKey = "api_request_log_recorded_usage_ids"
 const APIRequestLogOriginalPathKey = "api_request_log_original_path"
 
 type apiRequestLogWriter struct {
@@ -74,22 +75,34 @@ func StartAPIRequestLogCapture(c *gin.Context) {
 }
 
 func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relayErr *types.NewAPIError) {
+	recordAPIRequestLog(c, relayInfo, relayErr, nil)
+}
+
+func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relayErr *types.NewAPIError, usageLog *model.Log) {
 	if c == nil || c.Request == nil || !common.APIRequestLogEnabled {
 		return
 	}
-	if recorded, exists := c.Get(apiRequestLogRecordedKey); exists && recorded == true {
+	if usageLog == nil {
+		if recorded, exists := c.Get(apiRequestLogRecordedKey); exists && recorded == true {
+			return
+		}
+	} else if isAPIRequestLogUsageRecorded(c, usageLog.Id) {
 		return
 	}
 
 	requestLog := buildRequestLogBody(c)
 	responseLog := buildResponseLogBody(c)
 	metadata := buildAPIRequestLogMetadata(c, relayInfo, relayErr, requestLog, responseLog)
+	if usageLog != nil {
+		metadata["usage_log_id"] = usageLog.Id
+		metadata["usage_log_created_at"] = usageLog.CreatedAt
+	}
 	metadataJSON, _ := common.Marshal(metadata)
 
 	log := &model.APIRequestLog{
-		UserId:                firstNonZero(c.GetInt("id"), relayUserId(relayInfo)),
+		UserId:                c.GetInt("id"),
 		Username:              c.GetString("username"),
-		TokenId:               firstNonZero(c.GetInt("token_id"), relayTokenId(relayInfo)),
+		TokenId:               c.GetInt("token_id"),
 		TokenName:             c.GetString("token_name"),
 		ModelName:             firstNonEmpty(c.GetString("original_model"), relayModelName(relayInfo)),
 		CreatedAt:             common.GetTimestamp(),
@@ -99,7 +112,7 @@ func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 		RequestPath:           requestPath(c, relayInfo),
 		StatusCode:            c.Writer.Status(),
 		IsStream:              common.GetContextKeyBool(c, constant.ContextKeyIsStream) || (relayInfo != nil && relayInfo.IsStream),
-		ChannelId:             firstNonZero(c.GetInt("channel_id"), relayChannelId(relayInfo)),
+		ChannelId:             c.GetInt("channel_id"),
 		Group:                 firstNonEmpty(c.GetString("group"), relayUsingGroup(relayInfo)),
 		RequestContentType:    requestLog.contentType,
 		ResponseContentType:   responseLog.contentType,
@@ -112,6 +125,7 @@ func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 		ResponseBody:          model.APIRequestLogBody(responseLog.body),
 		Metadata:              model.APIRequestLogBody(metadataJSON),
 	}
+	applyUsageLogToAPIRequestLog(log, usageLog)
 	if log.StatusCode == 0 {
 		log.StatusCode = 200
 	}
@@ -119,17 +133,45 @@ func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 		logger.LogError(c, "failed to record api request log: "+err.Error())
 		return
 	}
+	if usageLog != nil {
+		markAPIRequestLogUsageRecorded(c, usageLog.Id)
+	}
 	c.Set(apiRequestLogRecordedKey, true)
 }
 
-func RecordAPIRequestLogForConsume(c *gin.Context, relayInfo *relaycommon.RelayInfo) {
-	if c == nil || relayInfo == nil || !common.APIRequestLogEnabled {
+func RecordAPIRequestLogForConsume(c *gin.Context, relayInfo *relaycommon.RelayInfo, usageLog *model.Log) {
+	if c == nil || usageLog == nil || usageLog.Id <= 0 || !common.APIRequestLogEnabled {
 		return
 	}
-	if _, exists := c.Get(apiRequestLogWriterKey); !exists {
-		StartAPIRequestLogCapture(c)
+	recordAPIRequestLog(c, relayInfo, nil, usageLog)
+}
+
+func isAPIRequestLogUsageRecorded(c *gin.Context, usageLogId int) bool {
+	if c == nil || usageLogId <= 0 {
+		return false
 	}
-	RecordAPIRequestLog(c, relayInfo, nil)
+	raw, exists := c.Get(apiRequestLogRecordedUsageIdsKey)
+	if !exists {
+		return false
+	}
+	recorded, ok := raw.(map[int]bool)
+	if !ok {
+		return false
+	}
+	return recorded[usageLogId]
+}
+
+func markAPIRequestLogUsageRecorded(c *gin.Context, usageLogId int) {
+	if c == nil || usageLogId <= 0 {
+		return
+	}
+	raw, _ := c.Get(apiRequestLogRecordedUsageIdsKey)
+	recorded, _ := raw.(map[int]bool)
+	if recorded == nil {
+		recorded = make(map[int]bool)
+		c.Set(apiRequestLogRecordedUsageIdsKey, recorded)
+	}
+	recorded[usageLogId] = true
 }
 
 func buildRequestLogBody(c *gin.Context) apiRequestLogBody {
@@ -235,32 +277,29 @@ func buildAPIRequestLogMetadata(c *gin.Context, relayInfo *relaycommon.RelayInfo
 	return metadata
 }
 
+func applyUsageLogToAPIRequestLog(log *model.APIRequestLog, usageLog *model.Log) {
+	if log == nil || usageLog == nil {
+		return
+	}
+	log.UsageLogId = usageLog.Id
+	log.UserId = usageLog.UserId
+	log.Username = usageLog.Username
+	log.TokenId = usageLog.TokenId
+	log.TokenName = usageLog.TokenName
+	log.ModelName = usageLog.ModelName
+	log.CreatedAt = usageLog.CreatedAt
+	log.RequestId = usageLog.RequestId
+	log.UpstreamRequestId = usageLog.UpstreamRequestId
+	log.IsStream = usageLog.IsStream
+	log.ChannelId = usageLog.ChannelId
+	log.Group = usageLog.Group
+}
+
 func relayModelName(relayInfo *relaycommon.RelayInfo) string {
 	if relayInfo == nil {
 		return ""
 	}
 	return relayInfo.OriginModelName
-}
-
-func relayUserId(relayInfo *relaycommon.RelayInfo) int {
-	if relayInfo == nil {
-		return 0
-	}
-	return relayInfo.UserId
-}
-
-func relayTokenId(relayInfo *relaycommon.RelayInfo) int {
-	if relayInfo == nil {
-		return 0
-	}
-	return relayInfo.TokenId
-}
-
-func relayChannelId(relayInfo *relaycommon.RelayInfo) int {
-	if relayInfo == nil {
-		return 0
-	}
-	return relayInfo.ChannelId
 }
 
 func relayUsingGroup(relayInfo *relaycommon.RelayInfo) string {
@@ -283,13 +322,4 @@ func requestPath(c *gin.Context, relayInfo *relaycommon.RelayInfo) string {
 		return relayInfo.RequestURLPath
 	}
 	return ""
-}
-
-func firstNonZero(values ...int) int {
-	for _, value := range values {
-		if value != 0 {
-			return value
-		}
-	}
-	return 0
 }

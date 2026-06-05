@@ -25,6 +25,7 @@ func (APIRequestLogBody) GormDBDataType(db *gorm.DB, field *schema.Field) string
 
 type APIRequestLog struct {
 	Id                    int                 `json:"id" gorm:"index:idx_api_request_logs_created_at_id,priority:1"`
+	UsageLogId            int                 `json:"usage_log_id" gorm:"index;default:0"`
 	UserId                int                 `json:"user_id" gorm:"index"`
 	Username              string              `json:"username" gorm:"index;default:''"`
 	TokenId               int                 `json:"token_id" gorm:"index;default:0"`
@@ -54,6 +55,7 @@ type APIRequestLog struct {
 
 type APIRequestLogListItem struct {
 	Id                    int                 `json:"id"`
+	UsageLogId            int                 `json:"usage_log_id"`
 	UserId                int                 `json:"user_id"`
 	Username              string              `json:"username"`
 	TokenId               int                 `json:"token_id"`
@@ -145,14 +147,6 @@ func EnsureAPIRequestLogTable() error {
 	}
 	apiRequestLogEnsureMu.Unlock()
 
-	if LOG_DB.Migrator().HasTable(&APIRequestLog{}) {
-		apiRequestLogEnsureMu.Lock()
-		apiRequestLogEnsuredDB = LOG_DB
-		apiRequestLogEnsured = true
-		apiRequestLogEnsureMu.Unlock()
-		return nil
-	}
-
 	if err := LOG_DB.AutoMigrate(&APIRequestLog{}); err != nil {
 		setAPIRequestLogLastWriteError(err)
 		return err
@@ -195,7 +189,7 @@ func GetAPIRequestLogs(params APIRequestLogQueryParams) (logs []*APIRequestLogLi
 	}
 
 	err = tx.Select(
-		"id, user_id, username, token_id, token_name, model_name, created_at, request_id, upstream_request_id, method, request_path, status_code, is_stream, channel_id, " +
+		"id, usage_log_id, user_id, username, token_id, token_name, model_name, created_at, request_id, upstream_request_id, method, request_path, status_code, is_stream, channel_id, " +
 			logGroupCol + " as " + logGroupCol + ", request_content_type, response_content_type, request_size, response_size, request_omitted_reason, response_omitted_reason, redacted",
 	).Order("id desc").Limit(params.Num).Offset(params.StartIdx).Find(&logs).Error
 	if err != nil {
@@ -210,7 +204,7 @@ func GetAPIRequestLogById(id int) (*APIRequestLog, error) {
 	if err := LOG_DB.First(&log, id).Error; err != nil {
 		return nil, err
 	}
-	usage, err := GetAPIRequestLogUsage(log.RequestId, log.UpstreamRequestId, true)
+	usage, err := getAPIRequestLogUsage(log.UsageLogId, log.RequestId, log.UpstreamRequestId, true)
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +213,21 @@ func GetAPIRequestLogById(id int) (*APIRequestLog, error) {
 }
 
 func GetAPIRequestLogUsage(requestId string, upstreamRequestId string, includeBody bool) (*APIRequestLogUsage, error) {
+	return getAPIRequestLogUsage(0, requestId, upstreamRequestId, includeBody)
+}
+
+func getAPIRequestLogUsage(usageLogId int, requestId string, upstreamRequestId string, includeBody bool) (*APIRequestLogUsage, error) {
+	if usageLogId > 0 {
+		var log Log
+		err := LOG_DB.Where("type = ?", LogTypeConsume).First(&log, usageLogId).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return apiRequestUsageFromLog(&log, includeBody), nil
+	}
 	if requestId == "" && upstreamRequestId == "" {
 		return nil, nil
 	}
@@ -245,10 +254,15 @@ func attachAPIRequestLogListUsage(logs []*APIRequestLogListItem) error {
 	if len(logs) == 0 {
 		return nil
 	}
+	usageLogIds := make([]int, 0, len(logs))
 	requestIds := make([]string, 0, len(logs))
 	upstreamRequestIds := make([]string, 0, len(logs))
 	for _, item := range logs {
 		if item == nil {
+			continue
+		}
+		if item.UsageLogId > 0 {
+			usageLogIds = append(usageLogIds, item.UsageLogId)
 			continue
 		}
 		if item.RequestId != "" {
@@ -258,27 +272,42 @@ func attachAPIRequestLogListUsage(logs []*APIRequestLogListItem) error {
 			upstreamRequestIds = append(upstreamRequestIds, item.UpstreamRequestId)
 		}
 	}
-	if len(requestIds) == 0 && len(upstreamRequestIds) == 0 {
+	if len(usageLogIds) == 0 && len(requestIds) == 0 && len(upstreamRequestIds) == 0 {
 		return nil
 	}
 
 	var usageLogs []*Log
-	tx := LOG_DB.Model(&Log{}).Where("type = ?", LogTypeConsume)
-	if len(requestIds) > 0 && len(upstreamRequestIds) > 0 {
-		tx = tx.Where("(request_id IN ? OR upstream_request_id IN ?)", requestIds, upstreamRequestIds)
-	} else if len(requestIds) > 0 {
-		tx = tx.Where("request_id IN ?", requestIds)
-	} else {
-		tx = tx.Where("upstream_request_id IN ?", upstreamRequestIds)
+	if len(usageLogIds) > 0 {
+		var logsById []*Log
+		if err := LOG_DB.Model(&Log{}).Where("type = ? AND id IN ?", LogTypeConsume, usageLogIds).Find(&logsById).Error; err != nil {
+			return err
+		}
+		usageLogs = append(usageLogs, logsById...)
 	}
-	if err := tx.Order("id desc").Find(&usageLogs).Error; err != nil {
-		return err
+	if len(requestIds) > 0 || len(upstreamRequestIds) > 0 {
+		var logsByRequest []*Log
+		tx := LOG_DB.Model(&Log{}).Where("type = ?", LogTypeConsume)
+		if len(requestIds) > 0 && len(upstreamRequestIds) > 0 {
+			tx = tx.Where("(request_id IN ? OR upstream_request_id IN ?)", requestIds, upstreamRequestIds)
+		} else if len(requestIds) > 0 {
+			tx = tx.Where("request_id IN ?", requestIds)
+		} else {
+			tx = tx.Where("upstream_request_id IN ?", upstreamRequestIds)
+		}
+		if err := tx.Order("id desc").Find(&logsByRequest).Error; err != nil {
+			return err
+		}
+		usageLogs = append(usageLogs, logsByRequest...)
 	}
 
+	byLogId := make(map[int]*APIRequestLogUsage)
 	byRequestId := make(map[string]*APIRequestLogUsage)
 	byUpstreamRequestId := make(map[string]*APIRequestLogUsage)
 	for _, usageLog := range usageLogs {
 		usage := apiRequestUsageFromLog(usageLog, false)
+		if usageLog.Id > 0 {
+			byLogId[usageLog.Id] = usage
+		}
 		if usageLog.RequestId != "" {
 			if _, exists := byRequestId[usageLog.RequestId]; !exists {
 				byRequestId[usageLog.RequestId] = usage
@@ -293,6 +322,10 @@ func attachAPIRequestLogListUsage(logs []*APIRequestLogListItem) error {
 
 	for _, item := range logs {
 		if item == nil {
+			continue
+		}
+		if item.UsageLogId > 0 {
+			item.Usage = byLogId[item.UsageLogId]
 			continue
 		}
 		if item.RequestId != "" {
