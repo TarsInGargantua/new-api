@@ -1,10 +1,13 @@
 package model
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 
+	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -203,6 +206,147 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 	require.NotNil(t, detail.Usage)
 	require.Equal(t, "consume detail", detail.Usage.Content)
 	require.Equal(t, `{"foo":"bar"}`, detail.Usage.Other)
+}
+
+func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	oldEnabled := common.APIRequestLogEnabled
+	oldLogConsumeEnabled := common.LogConsumeEnabled
+	common.APIRequestLogEnabled = true
+	common.LogConsumeEnabled = true
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.LogConsumeEnabled = oldLogConsumeEnabled
+	})
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Writer.Header().Set("Content-Type", "application/json")
+	ctx.Writer.WriteHeader(http.StatusCreated)
+	ctx.Set("username", "alice")
+	ctx.Set(common.RequestIdKey, "req-sync")
+	ctx.Set(common.UpstreamRequestIdKey, "upstream-sync")
+
+	consumeLog := RecordConsumeLog(ctx, 2, RecordConsumeLogParams{
+		ChannelId:        3,
+		PromptTokens:     11,
+		CompletionTokens: 7,
+		ModelName:        "gpt-sync",
+		TokenName:        "prod-token",
+		Quota:            123,
+		Content:          "consume content",
+		TokenId:          5,
+		UseTimeSeconds:   9,
+		IsStream:         true,
+		Group:            "vip",
+		Other:            map[string]interface{}{"foo": "bar"},
+	})
+	require.NotNil(t, consumeLog)
+
+	var requestLogs []APIRequestLog
+	require.NoError(t, LOG_DB.Find(&requestLogs).Error)
+	require.Len(t, requestLogs, 1)
+	requestLog := requestLogs[0]
+	require.Equal(t, consumeLog.Id, requestLog.UsageLogId)
+	require.Equal(t, consumeLog.UserId, requestLog.UserId)
+	require.Equal(t, consumeLog.Username, requestLog.Username)
+	require.Equal(t, consumeLog.TokenId, requestLog.TokenId)
+	require.Equal(t, consumeLog.TokenName, requestLog.TokenName)
+	require.Equal(t, consumeLog.ModelName, requestLog.ModelName)
+	require.Equal(t, consumeLog.CreatedAt, requestLog.CreatedAt)
+	require.Equal(t, consumeLog.RequestId, requestLog.RequestId)
+	require.Equal(t, consumeLog.UpstreamRequestId, requestLog.UpstreamRequestId)
+	require.Equal(t, consumeLog.ChannelId, requestLog.ChannelId)
+	require.Equal(t, consumeLog.Group, requestLog.Group)
+	require.Equal(t, http.StatusCreated, requestLog.StatusCode)
+	require.Equal(t, "/v1/chat/completions", requestLog.RequestPath)
+	require.Equal(t, "capture_pending", requestLog.RequestOmittedReason)
+	require.Equal(t, "capture_pending", requestLog.ResponseOmittedReason)
+
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		UsageLogId:            consumeLog.Id,
+		UserId:                consumeLog.UserId,
+		Username:              consumeLog.Username,
+		TokenId:               consumeLog.TokenId,
+		TokenName:             consumeLog.TokenName,
+		ModelName:             consumeLog.ModelName,
+		CreatedAt:             consumeLog.CreatedAt,
+		RequestId:             consumeLog.RequestId,
+		UpstreamRequestId:     consumeLog.UpstreamRequestId,
+		Method:                http.MethodPost,
+		RequestPath:           "/v1/chat/completions",
+		StatusCode:            http.StatusOK,
+		IsStream:              consumeLog.IsStream,
+		ChannelId:             consumeLog.ChannelId,
+		Group:                 consumeLog.Group,
+		RequestContentType:    "application/json",
+		RequestSize:           18,
+		RequestBody:           APIRequestLogBody(`{"model":"gpt-sync"}`),
+		ResponseOmittedReason: "capture_disabled",
+	}))
+
+	var count int64
+	require.NoError(t, LOG_DB.Model(&APIRequestLog{}).Count(&count).Error)
+	require.Equal(t, int64(1), count)
+
+	detail, err := GetAPIRequestLogById(requestLog.Id)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, detail.StatusCode)
+	require.Equal(t, APIRequestLogBody(`{"model":"gpt-sync"}`), detail.RequestBody)
+	require.NotNil(t, detail.Usage)
+	require.Equal(t, 123, detail.Usage.Quota)
+	require.Equal(t, 18, detail.Usage.TokenUsed)
+}
+
+func TestGetAPIRequestLogsBackfillsMissingUsageLogs(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	oldEnabled := common.APIRequestLogEnabled
+	common.APIRequestLogEnabled = true
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+	})
+
+	require.NoError(t, LOG_DB.Create(&Log{
+		UserId:           9,
+		Username:         "backfill-user",
+		Type:             LogTypeConsume,
+		ModelName:        "gpt-backfill",
+		TokenName:        "backfill-token",
+		TokenId:          12,
+		ChannelId:        34,
+		Group:            "default",
+		Quota:            456,
+		PromptTokens:     20,
+		CompletionTokens: 30,
+		CreatedAt:        200,
+		RequestId:        "req-backfill",
+		Content:          "backfill content",
+	}).Error)
+
+	items, total, err := GetAPIRequestLogs(APIRequestLogQueryParams{
+		StartTimestamp: 100,
+		EndTimestamp:   300,
+		ModelName:      "gpt-backfill",
+		Username:       "backfill-user",
+		TokenName:      "backfill-token",
+		StartIdx:       0,
+		Num:            20,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total)
+	require.Len(t, items, 1)
+	require.NotZero(t, items[0].UsageLogId)
+	require.Equal(t, "backfill-user", items[0].Username)
+	require.Equal(t, "backfill-token", items[0].TokenName)
+	require.Equal(t, "gpt-backfill", items[0].ModelName)
+	require.NotNil(t, items[0].Usage)
+	require.Equal(t, 456, items[0].Usage.Quota)
+	require.Equal(t, 50, items[0].Usage.TokenUsed)
 }
 
 func TestCreateAPIRequestLogEnsuresTable(t *testing.T) {

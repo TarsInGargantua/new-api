@@ -6,6 +6,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )
@@ -164,13 +165,90 @@ func CreateAPIRequestLog(log *APIRequestLog) error {
 	if err := EnsureAPIRequestLogTable(); err != nil {
 		return err
 	}
+	if log != nil && log.UsageLogId > 0 {
+		err := createOrUpdateAPIRequestLogByUsageLogId(log)
+		setAPIRequestLogLastWriteError(err)
+		return err
+	}
 	err := LOG_DB.Create(log).Error
 	setAPIRequestLogLastWriteError(err)
 	return err
 }
 
+func createOrUpdateAPIRequestLogByUsageLogId(log *APIRequestLog) error {
+	var existing APIRequestLog
+	err := LOG_DB.Where("usage_log_id = ?", log.UsageLogId).Order("id asc").First(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return LOG_DB.Create(log).Error
+	}
+	if err != nil {
+		return err
+	}
+	log.Id = existing.Id
+	return LOG_DB.Save(log).Error
+}
+
+func CreateAPIRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) error {
+	if !common.APIRequestLogEnabled || usageLog == nil || usageLog.Id <= 0 || usageLog.Type != LogTypeConsume {
+		return nil
+	}
+	log := &APIRequestLog{
+		UsageLogId:            usageLog.Id,
+		UserId:                usageLog.UserId,
+		Username:              usageLog.Username,
+		TokenId:               usageLog.TokenId,
+		TokenName:             usageLog.TokenName,
+		ModelName:             usageLog.ModelName,
+		CreatedAt:             usageLog.CreatedAt,
+		RequestId:             usageLog.RequestId,
+		UpstreamRequestId:     usageLog.UpstreamRequestId,
+		StatusCode:            200,
+		IsStream:              usageLog.IsStream,
+		ChannelId:             usageLog.ChannelId,
+		Group:                 usageLog.Group,
+		RequestOmittedReason:  "capture_pending",
+		ResponseOmittedReason: "capture_pending",
+	}
+	if c != nil {
+		if c.Request != nil {
+			log.Method = c.Request.Method
+			log.RequestContentType = c.Request.Header.Get("Content-Type")
+			log.RequestSize = c.Request.ContentLength
+			if c.Request.URL != nil {
+				log.RequestPath = c.Request.URL.Path
+			}
+		}
+		if c.Writer != nil {
+			log.StatusCode = c.Writer.Status()
+			log.ResponseContentType = c.Writer.Header().Get("Content-Type")
+		}
+	}
+	if log.StatusCode == 0 {
+		log.StatusCode = 200
+	}
+	metadata := map[string]interface{}{
+		"usage_log_id":                 usageLog.Id,
+		"synced_from_usage_log":        true,
+		"is_api_request_log_record":    true,
+		"request_omitted_reason":       log.RequestOmittedReason,
+		"response_omitted_reason":      log.ResponseOmittedReason,
+		"request_log_sync_layer":       "model",
+		"request_log_sync_created_at":  common.GetTimestamp(),
+		"request_log_sync_usage_quota": usageLog.Quota,
+	}
+	if c != nil {
+		metadata["upstream_request_id"] = c.GetString(common.UpstreamRequestIdKey)
+	}
+	metadataJSON, _ := common.Marshal(metadata)
+	log.Metadata = APIRequestLogBody(metadataJSON)
+	return CreateAPIRequestLog(log)
+}
+
 func GetAPIRequestLogs(params APIRequestLogQueryParams) (logs []*APIRequestLogListItem, total int64, err error) {
 	if err := EnsureAPIRequestLogTable(); err != nil {
+		return nil, 0, err
+	}
+	if err := SyncMissingAPIRequestLogsFromUsageLogs(params, requestLogSyncLimit(params)); err != nil {
 		return nil, 0, err
 	}
 	tx := LOG_DB.Model(&APIRequestLog{})
@@ -197,6 +275,78 @@ func GetAPIRequestLogs(params APIRequestLogQueryParams) (logs []*APIRequestLogLi
 	}
 	err = attachAPIRequestLogListUsage(logs)
 	return logs, total, err
+}
+
+func requestLogSyncLimit(params APIRequestLogQueryParams) int {
+	limit := params.StartIdx + params.Num
+	if limit < 1000 {
+		return 1000
+	}
+	if limit > 5000 {
+		return 5000
+	}
+	return limit
+}
+
+func SyncMissingAPIRequestLogsFromUsageLogs(params APIRequestLogQueryParams, limit int) error {
+	if !common.APIRequestLogEnabled {
+		return nil
+	}
+	if err := EnsureAPIRequestLogTable(); err != nil {
+		return err
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	tx := LOG_DB.Model(&Log{}).Where("type = ?", LogTypeConsume)
+	tx = applyLogContainsFilter(tx, "logs.model_name", params.ModelName)
+	tx = applyLogContainsFilter(tx, "logs.username", params.Username)
+	tx = applyLogContainsFilter(tx, "logs.token_name", params.TokenName)
+	if params.StartTimestamp != 0 {
+		tx = tx.Where("logs.created_at >= ?", params.StartTimestamp)
+	}
+	if params.EndTimestamp != 0 {
+		tx = tx.Where("logs.created_at <= ?", params.EndTimestamp)
+	}
+
+	var usageLogs []*Log
+	if err := tx.Order("id desc").Limit(limit).Find(&usageLogs).Error; err != nil {
+		return err
+	}
+	if len(usageLogs) == 0 {
+		return nil
+	}
+
+	usageLogIds := make([]int, 0, len(usageLogs))
+	for _, usageLog := range usageLogs {
+		if usageLog != nil && usageLog.Id > 0 {
+			usageLogIds = append(usageLogIds, usageLog.Id)
+		}
+	}
+	if len(usageLogIds) == 0 {
+		return nil
+	}
+
+	var existingLogs []*APIRequestLog
+	if err := LOG_DB.Select("usage_log_id").Where("usage_log_id IN ?", usageLogIds).Find(&existingLogs).Error; err != nil {
+		return err
+	}
+	existing := make(map[int]bool, len(existingLogs))
+	for _, log := range existingLogs {
+		if log != nil && log.UsageLogId > 0 {
+			existing[log.UsageLogId] = true
+		}
+	}
+	for _, usageLog := range usageLogs {
+		if usageLog == nil || usageLog.Id <= 0 || existing[usageLog.Id] {
+			continue
+		}
+		if err := CreateAPIRequestLogFromConsumeLog(nil, usageLog); err != nil {
+			return err
+		}
+		existing[usageLog.Id] = true
+	}
+	return nil
 }
 
 func GetAPIRequestLogById(id int) (*APIRequestLog, error) {

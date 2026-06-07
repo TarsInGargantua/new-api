@@ -253,6 +253,9 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		logger.LogError(c, "failed to record log: "+err.Error())
 		return nil
 	}
+	if err := CreateAPIRequestLogFromConsumeLog(c, log); err != nil {
+		logger.LogError(c, "failed to sync consume log to api request log: "+err.Error())
+	}
 	if common.DataExportEnabled {
 		gopool.Go(func() {
 			LogQuotaData(userId, username, params.ModelName, params.Quota, common.GetTimestamp(), params.PromptTokens+params.CompletionTokens)
@@ -273,9 +276,9 @@ type RecordTaskBillingLogParams struct {
 	Other     map[string]interface{}
 }
 
-func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
+func RecordTaskBillingLog(params RecordTaskBillingLogParams) *Log {
 	if params.LogType == LogTypeConsume && !common.LogConsumeEnabled {
-		return
+		return nil
 	}
 	username, _ := GetUsernameById(params.UserId, false)
 	tokenName := ""
@@ -301,7 +304,14 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	err := LOG_DB.Create(log).Error
 	if err != nil {
 		common.SysLog("failed to record task billing log: " + err.Error())
+		return nil
 	}
+	if params.LogType == LogTypeConsume {
+		if err := CreateAPIRequestLogFromConsumeLog(nil, log); err != nil {
+			common.SysLog("failed to sync task billing log to api request log: " + err.Error())
+		}
+	}
+	return log
 }
 
 func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, conversationId string) (logs []*Log, total int64, err error) {
