@@ -2,6 +2,8 @@ package model
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
@@ -123,6 +125,15 @@ var apiRequestLogLastWriteError string
 var apiRequestLogLastWriteErrorAt int64
 
 const apiRequestLogListSyncMax = 200
+const apiRequestLogCapturePending = "capture_pending"
+
+type apiRequestLogHydratedBody struct {
+	body        APIRequestLogBody
+	contentType string
+	size        int64
+	redacted    bool
+	source      string
+}
 
 func setAPIRequestLogLastWriteError(err error) {
 	apiRequestLogEnsureMu.Lock()
@@ -212,8 +223,8 @@ func apiRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) *APIRequestLog {
 		IsStream:              usageLog.IsStream,
 		ChannelId:             usageLog.ChannelId,
 		Group:                 usageLog.Group,
-		RequestOmittedReason:  "capture_pending",
-		ResponseOmittedReason: "capture_pending",
+		RequestOmittedReason:  apiRequestLogCapturePending,
+		ResponseOmittedReason: apiRequestLogCapturePending,
 	}
 	if c != nil {
 		if c.Request != nil {
@@ -228,6 +239,7 @@ func apiRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) *APIRequestLog {
 			log.StatusCode = c.Writer.Status()
 			log.ResponseContentType = c.Writer.Header().Get("Content-Type")
 		}
+		applyRequestBodyFromContext(c, log)
 	}
 	if log.StatusCode == 0 {
 		log.StatusCode = 200
@@ -242,12 +254,44 @@ func apiRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) *APIRequestLog {
 		"request_log_sync_created_at":  common.GetTimestamp(),
 		"request_log_sync_usage_quota": usageLog.Quota,
 	}
+	if log.RequestOmittedReason == "" {
+		metadata["request_body_source"] = "context_body_storage"
+	}
 	if c != nil {
 		metadata["upstream_request_id"] = c.GetString(common.UpstreamRequestIdKey)
 	}
 	metadataJSON, _ := common.Marshal(metadata)
 	log.Metadata = APIRequestLogBody(metadataJSON)
 	return log
+}
+
+func applyRequestBodyFromContext(c *gin.Context, log *APIRequestLog) {
+	if c == nil || c.Request == nil || log == nil {
+		return
+	}
+	contentType := c.Request.Header.Get("Content-Type")
+	log.RequestContentType = contentType
+	if !common.IsAuditableContentType(contentType) {
+		log.RequestSize = c.Request.ContentLength
+		log.RequestOmittedReason = "non_text_content_type"
+		return
+	}
+	storage, err := common.GetBodyStorage(c)
+	if err != nil {
+		return
+	}
+	body, err := storage.Bytes()
+	if err != nil {
+		return
+	}
+	if len(body) == 0 && c.Request.ContentLength != 0 {
+		return
+	}
+	text, redacted := common.AuditBodyToStringWithRedact(body, contentType, common.APIRequestLogRedactSecrets)
+	log.RequestBody = APIRequestLogBody(text)
+	log.RequestSize = int64(len(body))
+	log.RequestOmittedReason = ""
+	log.Redacted = redacted
 }
 
 func GetAPIRequestLogs(params APIRequestLogQueryParams) (logs []*APIRequestLogListItem, total int64, err error) {
@@ -399,7 +443,276 @@ func GetAPIRequestLogById(id int) (*APIRequestLog, error) {
 		return nil, err
 	}
 	log.Usage = usage
+	if err := hydrateAPIRequestLogBodiesFromUsage(&log, usage); err != nil {
+		return nil, err
+	}
 	return &log, nil
+}
+
+func hydrateAPIRequestLogBodiesFromUsage(log *APIRequestLog, usage *APIRequestLogUsage) error {
+	if log == nil || usage == nil {
+		return nil
+	}
+
+	other := apiRequestLogUsageOtherMap(usage)
+	if len(other) == 0 {
+		return nil
+	}
+
+	updates := make(map[string]interface{})
+	metadata := apiRequestLogMetadataMap(log.Metadata)
+	now := common.GetTimestamp()
+
+	if shouldHydrateAPIRequestLogBody(log.RequestBody, log.RequestOmittedReason) {
+		if body := apiRequestBodyFromUsageMetadata(other); body != nil {
+			log.RequestBody = body.body
+			log.RequestContentType = firstNonEmptyString(log.RequestContentType, body.contentType)
+			log.RequestSize = body.size
+			log.RequestOmittedReason = ""
+			log.Redacted = log.Redacted || body.redacted
+			updates["request_body"] = log.RequestBody
+			updates["request_content_type"] = log.RequestContentType
+			updates["request_size"] = log.RequestSize
+			updates["request_omitted_reason"] = log.RequestOmittedReason
+			updates["redacted"] = log.Redacted
+			metadata["request_body_source"] = body.source
+			metadata["request_body_hydrated_at"] = now
+		}
+	}
+
+	if shouldHydrateAPIRequestLogBody(log.ResponseBody, log.ResponseOmittedReason) {
+		if body := apiResponseBodyFromUsageMetadata(other); body != nil {
+			log.ResponseBody = body.body
+			log.ResponseContentType = firstNonEmptyString(log.ResponseContentType, body.contentType)
+			log.ResponseSize = body.size
+			log.ResponseOmittedReason = ""
+			log.Redacted = log.Redacted || body.redacted
+			updates["response_body"] = log.ResponseBody
+			updates["response_content_type"] = log.ResponseContentType
+			updates["response_size"] = log.ResponseSize
+			updates["response_omitted_reason"] = log.ResponseOmittedReason
+			updates["redacted"] = log.Redacted
+			metadata["response_body_source"] = body.source
+			metadata["response_body_hydrated_at"] = now
+		}
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
+	metadataJSON, err := common.Marshal(metadata)
+	if err == nil {
+		log.Metadata = APIRequestLogBody(metadataJSON)
+		updates["metadata"] = log.Metadata
+	}
+	return LOG_DB.Model(&APIRequestLog{}).Where("id = ?", log.Id).Updates(updates).Error
+}
+
+func shouldHydrateAPIRequestLogBody(body APIRequestLogBody, omittedReason string) bool {
+	return strings.TrimSpace(string(body)) == "" && omittedReason == apiRequestLogCapturePending
+}
+
+func apiRequestLogUsageOtherMap(usage *APIRequestLogUsage) map[string]interface{} {
+	if usage == nil || strings.TrimSpace(usage.Other) == "" {
+		return nil
+	}
+	var other map[string]interface{}
+	if err := common.UnmarshalJsonStr(usage.Other, &other); err != nil {
+		return nil
+	}
+	return other
+}
+
+func apiRequestLogMetadataMap(metadata APIRequestLogBody) map[string]interface{} {
+	out := make(map[string]interface{})
+	if strings.TrimSpace(string(metadata)) == "" {
+		return out
+	}
+	if err := common.UnmarshalJsonStr(string(metadata), &out); err != nil {
+		return make(map[string]interface{})
+	}
+	if out == nil {
+		return make(map[string]interface{})
+	}
+	return out
+}
+
+func apiRequestBodyFromUsageMetadata(other map[string]interface{}) *apiRequestLogHydratedBody {
+	messageCapture := mapFromInterface(other["message_capture"])
+	if messageCapture != nil {
+		if raw := hydratedBodyFromCapturedBodyMap(mapFromInterface(messageCapture["raw_request"]), "usage_log.message_capture.raw_request"); raw != nil {
+			return raw
+		}
+	}
+	if audit := mapFromInterface(other["audit_content"]); audit != nil {
+		if raw := hydratedBodyFromCapturedBodyMap(mapFromInterface(audit["request"]), "usage_log.audit_content.request"); raw != nil {
+			return raw
+		}
+	}
+	if messageCapture != nil {
+		return hydratedRequestBodyFromMessageCapture(messageCapture)
+	}
+	return nil
+}
+
+func apiResponseBodyFromUsageMetadata(other map[string]interface{}) *apiRequestLogHydratedBody {
+	messageCapture := mapFromInterface(other["message_capture"])
+	if messageCapture != nil {
+		if raw := hydratedBodyFromCapturedBodyMap(mapFromInterface(messageCapture["raw_response"]), "usage_log.message_capture.raw_response"); raw != nil {
+			return raw
+		}
+	}
+	if audit := mapFromInterface(other["audit_content"]); audit != nil {
+		if raw := hydratedBodyFromCapturedBodyMap(mapFromInterface(audit["response"]), "usage_log.audit_content.response"); raw != nil {
+			return raw
+		}
+	}
+	if messageCapture != nil {
+		return hydratedResponseBodyFromMessageCapture(messageCapture)
+	}
+	return nil
+}
+
+func hydratedBodyFromCapturedBodyMap(bodyMap map[string]interface{}, source string) *apiRequestLogHydratedBody {
+	if bodyMap == nil {
+		return nil
+	}
+	body := common.Interface2String(bodyMap["body"])
+	if strings.TrimSpace(body) == "" {
+		return nil
+	}
+	size := int64(interfaceToInt(bodyMap["size"]))
+	if size <= 0 {
+		size = int64(len(body))
+	}
+	return &apiRequestLogHydratedBody{
+		body:        APIRequestLogBody(body),
+		contentType: common.Interface2String(bodyMap["content_type"]),
+		size:        size,
+		redacted:    interfaceToBool(bodyMap["redacted"]),
+		source:      source,
+	}
+}
+
+func hydratedRequestBodyFromMessageCapture(capture map[string]interface{}) *apiRequestLogHydratedBody {
+	payload := make(map[string]interface{})
+	copyIfPresent(payload, capture, "conversation_id")
+	copyIfPresent(payload, capture, "question")
+	copyIfPresent(payload, capture, "messages")
+	copyIfPresent(payload, capture, "meta")
+	if len(payload) == 0 {
+		return nil
+	}
+	encoded, err := common.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return &apiRequestLogHydratedBody{
+		body:        APIRequestLogBody(encoded),
+		contentType: "application/json",
+		size:        int64(len(encoded)),
+		source:      "usage_log.message_capture",
+	}
+}
+
+func hydratedResponseBodyFromMessageCapture(capture map[string]interface{}) *apiRequestLogHydratedBody {
+	payload := make(map[string]interface{})
+	copyIfPresent(payload, capture, "conversation_id")
+	copyIfPresent(payload, capture, "answer")
+	copyIfPresent(payload, capture, "model_reasoning")
+	copyIfPresent(payload, capture, "meta")
+	if len(payload) == 0 {
+		return nil
+	}
+	encoded, err := common.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return &apiRequestLogHydratedBody{
+		body:        APIRequestLogBody(encoded),
+		contentType: "application/json",
+		size:        int64(len(encoded)),
+		source:      "usage_log.message_capture",
+	}
+}
+
+func copyIfPresent(dst map[string]interface{}, src map[string]interface{}, key string) {
+	if dst == nil || src == nil {
+		return
+	}
+	value, exists := src[key]
+	if !exists || value == nil {
+		return
+	}
+	switch v := value.(type) {
+	case string:
+		if strings.TrimSpace(v) != "" {
+			dst[key] = v
+		}
+	case []interface{}:
+		if len(v) > 0 {
+			dst[key] = v
+		}
+	case map[string]interface{}:
+		if len(v) > 0 {
+			dst[key] = v
+		}
+	default:
+		dst[key] = value
+	}
+}
+
+func mapFromInterface(value interface{}) map[string]interface{} {
+	if value == nil {
+		return nil
+	}
+	if m, ok := value.(map[string]interface{}); ok {
+		return m
+	}
+	return nil
+}
+
+func interfaceToInt(value interface{}) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case int32:
+		return int(v)
+	case float64:
+		return int(v)
+	case float32:
+		return int(v)
+	case string:
+		i, err := strconv.Atoi(v)
+		if err == nil {
+			return i
+		}
+		return 0
+	default:
+		return 0
+	}
+}
+
+func interfaceToBool(value interface{}) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(v, "true")
+	default:
+		return false
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func GetAPIRequestLogUsage(requestId string, upstreamRequestId string, includeBody bool) (*APIRequestLogUsage, error) {

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -223,7 +224,7 @@ func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-sync","messages":[{"role":"user","content":"hello"}]}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	ctx.Writer.Header().Set("Content-Type", "application/json")
 	ctx.Writer.WriteHeader(http.StatusCreated)
@@ -264,7 +265,9 @@ func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
 	require.Equal(t, consumeLog.Group, requestLog.Group)
 	require.Equal(t, http.StatusCreated, requestLog.StatusCode)
 	require.Equal(t, "/v1/chat/completions", requestLog.RequestPath)
-	require.Equal(t, "capture_pending", requestLog.RequestOmittedReason)
+	require.Empty(t, requestLog.RequestOmittedReason)
+	require.Contains(t, string(requestLog.RequestBody), "gpt-sync")
+	require.Positive(t, requestLog.RequestSize)
 	require.Equal(t, "capture_pending", requestLog.ResponseOmittedReason)
 
 	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
@@ -300,6 +303,121 @@ func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
 	require.NotNil(t, detail.Usage)
 	require.Equal(t, 123, detail.Usage.Quota)
 	require.Equal(t, 18, detail.Usage.TokenUsed)
+}
+
+func TestGetAPIRequestLogByIdHydratesBodiesFromUsageRawCapture(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	other := map[string]interface{}{
+		"message_capture": map[string]interface{}{
+			"raw_request": map[string]interface{}{
+				"content_type": "application/json",
+				"body":         `{"model":"gpt-hydrate","messages":[{"role":"user","content":"raw context"}]}`,
+				"size":         76,
+				"redacted":     true,
+			},
+			"raw_response": map[string]interface{}{
+				"content_type": "application/json",
+				"body":         `{"choices":[{"message":{"content":"raw answer"}}]}`,
+				"size":         50,
+			},
+		},
+	}
+	otherJSON, err := common.Marshal(other)
+	require.NoError(t, err)
+	usageLog := &Log{
+		UserId:    2,
+		Username:  "alice",
+		Type:      LogTypeConsume,
+		ModelName: "gpt-hydrate",
+		TokenName: "prod-token",
+		CreatedAt: 100,
+		Other:     string(otherJSON),
+	}
+	require.NoError(t, LOG_DB.Create(usageLog).Error)
+
+	requestLog := &APIRequestLog{
+		UsageLogId:            usageLog.Id,
+		UserId:                usageLog.UserId,
+		Username:              usageLog.Username,
+		TokenName:             usageLog.TokenName,
+		ModelName:             usageLog.ModelName,
+		CreatedAt:             usageLog.CreatedAt,
+		RequestOmittedReason:  apiRequestLogCapturePending,
+		ResponseOmittedReason: apiRequestLogCapturePending,
+		Metadata:              APIRequestLogBody(`{"request_omitted_reason":"capture_pending"}`),
+	}
+	require.NoError(t, LOG_DB.Create(requestLog).Error)
+
+	detail, err := GetAPIRequestLogById(requestLog.Id)
+	require.NoError(t, err)
+	require.Equal(t, APIRequestLogBody(`{"model":"gpt-hydrate","messages":[{"role":"user","content":"raw context"}]}`), detail.RequestBody)
+	require.Equal(t, APIRequestLogBody(`{"choices":[{"message":{"content":"raw answer"}}]}`), detail.ResponseBody)
+	require.Equal(t, "application/json", detail.RequestContentType)
+	require.Equal(t, int64(76), detail.RequestSize)
+	require.Empty(t, detail.RequestOmittedReason)
+	require.Empty(t, detail.ResponseOmittedReason)
+	require.True(t, detail.Redacted)
+
+	var stored APIRequestLog
+	require.NoError(t, LOG_DB.First(&stored, requestLog.Id).Error)
+	require.Equal(t, detail.RequestBody, stored.RequestBody)
+	require.Empty(t, stored.RequestOmittedReason)
+	require.Contains(t, string(stored.Metadata), "usage_log.message_capture.raw_request")
+}
+
+func TestGetAPIRequestLogByIdHydratesRequestFromMessageCapture(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	other := map[string]interface{}{
+		"message_capture": map[string]interface{}{
+			"conversation_id": "conv-1",
+			"question":        "hello context",
+			"answer":          "hello answer",
+			"messages": []interface{}{
+				map[string]interface{}{"role": "system", "content": "be concise"},
+				map[string]interface{}{"role": "user", "content": "hello context"},
+			},
+			"meta": map[string]interface{}{
+				"model":        "gpt-message",
+				"request_path": "/v1/chat/completions",
+			},
+		},
+	}
+	otherJSON, err := common.Marshal(other)
+	require.NoError(t, err)
+	usageLog := &Log{
+		UserId:    3,
+		Username:  "bob",
+		Type:      LogTypeConsume,
+		ModelName: "gpt-message",
+		TokenName: "context-token",
+		CreatedAt: 200,
+		Other:     string(otherJSON),
+	}
+	require.NoError(t, LOG_DB.Create(usageLog).Error)
+
+	requestLog := &APIRequestLog{
+		UsageLogId:            usageLog.Id,
+		UserId:                usageLog.UserId,
+		Username:              usageLog.Username,
+		TokenName:             usageLog.TokenName,
+		ModelName:             usageLog.ModelName,
+		CreatedAt:             usageLog.CreatedAt,
+		RequestOmittedReason:  apiRequestLogCapturePending,
+		ResponseOmittedReason: apiRequestLogCapturePending,
+	}
+	require.NoError(t, LOG_DB.Create(requestLog).Error)
+
+	detail, err := GetAPIRequestLogById(requestLog.Id)
+	require.NoError(t, err)
+	require.Equal(t, "application/json", detail.RequestContentType)
+	require.Contains(t, string(detail.RequestBody), "hello context")
+	require.Contains(t, string(detail.RequestBody), "messages")
+	require.Contains(t, string(detail.ResponseBody), "hello answer")
+	require.Empty(t, detail.RequestOmittedReason)
+	require.Empty(t, detail.ResponseOmittedReason)
+	require.Contains(t, string(detail.Metadata), "usage_log.message_capture")
 }
 
 func TestGetAPIRequestLogsBackfillsMissingUsageLogs(t *testing.T) {
