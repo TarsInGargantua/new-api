@@ -168,9 +168,8 @@ const Dashboard = () => {
         isMobile={dashboardData.isMobile}
         isAdminUser={dashboardData.isAdminUser}
         inputs={dashboardData.inputs}
-        dataExportDefaultTime={dashboardData.dataExportDefaultTime}
-        timeOptions={dashboardData.timeOptions}
         enabledModelOptions={dashboardData.enabledModelOptions}
+        userOptions={dashboardData.userOptions}
         handleInputChange={dashboardData.handleInputChange}
         t={dashboardData.t}
       />

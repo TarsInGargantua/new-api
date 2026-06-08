@@ -156,7 +156,8 @@ func GetUserDailyUsageStats(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	modelName := c.Query("model_name")
-	stats, err := model.GetUserDailyUsageStats(startTimestamp, endTimestamp, modelName)
+	username := c.Query("username")
+	stats, err := model.GetUserDailyUsageStats(startTimestamp, endTimestamp, modelName, username)
 	if err != nil {
 		common.ApiError(c, err)
 		return

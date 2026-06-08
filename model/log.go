@@ -489,6 +489,14 @@ func applyLogContainsFilter(tx *gorm.DB, column string, value string) *gorm.DB {
 	return tx.Where(column+" LIKE ? ESCAPE '!'", pattern)
 }
 
+func applyLogExactStringFilter(tx *gorm.DB, column string, value string) *gorm.DB {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return tx
+	}
+	return tx.Where(column+" = ?", value)
+}
+
 func applyConversationIDFilter(tx *gorm.DB, conversationId string) *gorm.DB {
 	conversationId = strings.TrimSpace(conversationId)
 	if tx == nil || conversationId == "" {
@@ -574,13 +582,14 @@ func GetUserUsageStatsPage(userIds []int, restrictUserIds bool, startTimestamp i
 	return rows, total, err
 }
 
-func GetUserDailyUsageStats(startTimestamp int64, endTimestamp int64, modelName string) ([]UserDailyUsageStat, error) {
+func GetUserDailyUsageStats(startTimestamp int64, endTimestamp int64, modelName string, username string) ([]UserDailyUsageStat, error) {
 	var rows []UserDailyUsageStat
 	bucketExpr := logBucketExpr(86400)
 	query := LOG_DB.Table("logs").
 		Select(fmt.Sprintf("user_id, MAX(username) as username, %s as created_at, COALESCE(SUM(quota), 0) as quota, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as token_used, COUNT(*) as count", bucketExpr)).
 		Where("user_id > 0")
 	query = applyLogUsageFilters(query, startTimestamp, endTimestamp, modelName)
+	query = applyLogExactStringFilter(query, "username", username)
 	err := query.Group(fmt.Sprintf("user_id, %s", bucketExpr)).
 		Order(bucketExpr + " ASC").
 		Scan(&rows).Error
