@@ -122,6 +122,8 @@ var apiRequestLogEnsured bool
 var apiRequestLogLastWriteError string
 var apiRequestLogLastWriteErrorAt int64
 
+const apiRequestLogListSyncMax = 200
+
 func setAPIRequestLogLastWriteError(err error) {
 	apiRequestLogEnsureMu.Lock()
 	defer apiRequestLogEnsureMu.Unlock()
@@ -192,6 +194,10 @@ func CreateAPIRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) error {
 	if !common.APIRequestLogEnabled || usageLog == nil || usageLog.Id <= 0 || usageLog.Type != LogTypeConsume {
 		return nil
 	}
+	return CreateAPIRequestLog(apiRequestLogFromConsumeLog(c, usageLog))
+}
+
+func apiRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) *APIRequestLog {
 	log := &APIRequestLog{
 		UsageLogId:            usageLog.Id,
 		UserId:                usageLog.UserId,
@@ -241,7 +247,7 @@ func CreateAPIRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) error {
 	}
 	metadataJSON, _ := common.Marshal(metadata)
 	log.Metadata = APIRequestLogBody(metadataJSON)
-	return CreateAPIRequestLog(log)
+	return log
 }
 
 func GetAPIRequestLogs(params APIRequestLogQueryParams) (logs []*APIRequestLogListItem, total int64, err error) {
@@ -262,8 +268,15 @@ func GetAPIRequestLogs(params APIRequestLogQueryParams) (logs []*APIRequestLogLi
 		tx = tx.Where("api_request_logs.created_at <= ?", params.EndTimestamp)
 	}
 
-	if err = tx.Count(&total).Error; err != nil {
-		return nil, 0, err
+	if isUnfilteredAPIRequestLogQuery(params) {
+		total, err = getAPIRequestLogFastTotal()
+		if err != nil {
+			return nil, 0, err
+		}
+	} else {
+		if err = tx.Count(&total).Error; err != nil {
+			return nil, 0, err
+		}
 	}
 
 	err = tx.Select(
@@ -277,13 +290,36 @@ func GetAPIRequestLogs(params APIRequestLogQueryParams) (logs []*APIRequestLogLi
 	return logs, total, err
 }
 
+func isUnfilteredAPIRequestLogQuery(params APIRequestLogQueryParams) bool {
+	return params.StartTimestamp == 0 &&
+		params.EndTimestamp == 0 &&
+		params.ModelName == "" &&
+		params.Username == "" &&
+		params.TokenName == ""
+}
+
+func getAPIRequestLogFastTotal() (int64, error) {
+	var last APIRequestLog
+	result := LOG_DB.Select("id").Order("id desc").Limit(1).Find(&last)
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return 0, nil
+	}
+	return int64(last.Id), nil
+}
+
 func requestLogSyncLimit(params APIRequestLogQueryParams) int {
 	limit := params.StartIdx + params.Num
-	if limit < 1000 {
-		return 1000
+	if limit < params.Num {
+		limit = params.Num
 	}
-	if limit > 5000 {
-		return 5000
+	if limit < 20 {
+		limit = 20
+	}
+	if limit > apiRequestLogListSyncMax {
+		return apiRequestLogListSyncMax
 	}
 	return limit
 }
@@ -337,16 +373,20 @@ func SyncMissingAPIRequestLogsFromUsageLogs(params APIRequestLogQueryParams, lim
 			existing[log.UsageLogId] = true
 		}
 	}
+	requestLogs := make([]*APIRequestLog, 0, len(usageLogs))
 	for _, usageLog := range usageLogs {
 		if usageLog == nil || usageLog.Id <= 0 || existing[usageLog.Id] {
 			continue
 		}
-		if err := CreateAPIRequestLogFromConsumeLog(nil, usageLog); err != nil {
-			return err
-		}
+		requestLogs = append(requestLogs, apiRequestLogFromConsumeLog(nil, usageLog))
 		existing[usageLog.Id] = true
 	}
-	return nil
+	if len(requestLogs) == 0 {
+		return nil
+	}
+	err := LOG_DB.CreateInBatches(requestLogs, 100).Error
+	setAPIRequestLogLastWriteError(err)
+	return err
 }
 
 func GetAPIRequestLogById(id int) (*APIRequestLog, error) {
@@ -544,9 +584,11 @@ func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 		return status, nil
 	}
 
-	if err := LOG_DB.Model(&APIRequestLog{}).Count(&status.Count).Error; err != nil {
+	count, err := getAPIRequestLogFastTotal()
+	if err != nil {
 		return status, err
 	}
+	status.Count = count
 
 	var last APIRequestLog
 	result := LOG_DB.Select("created_at, request_id").Order("id desc").Limit(1).Find(&last)
