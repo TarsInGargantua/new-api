@@ -131,22 +131,24 @@ func generateDefaultSidebarConfigForRole(userRole int) string {
 	if userRole == common.RoleAdminUser {
 		// 管理员可以访问管理员区域，但不能访问系统设置
 		defaultConfig["admin"] = map[string]interface{}{
-			"enabled":    true,
-			"channel":    true,
-			"models":     true,
-			"redemption": true,
-			"user":       true,
-			"setting":    false, // 管理员不能访问系统设置
+			"enabled":      true,
+			"channel":      true,
+			"models":       true,
+			"redemption":   true,
+			"user":         true,
+			"request_data": true,
+			"setting":      false, // 管理员不能访问系统设置
 		}
 	} else if userRole == common.RoleRootUser {
 		// 超级管理员可以访问所有功能
 		defaultConfig["admin"] = map[string]interface{}{
-			"enabled":    true,
-			"channel":    true,
-			"models":     true,
-			"redemption": true,
-			"user":       true,
-			"setting":    true,
+			"enabled":      true,
+			"channel":      true,
+			"models":       true,
+			"redemption":   true,
+			"user":         true,
+			"request_data": true,
+			"setting":      true,
 		}
 	}
 	// 普通用户不包含admin区域
@@ -290,6 +292,40 @@ func SearchUsers(keyword string, group string, startIdx int, num int) ([]*User, 
 	}
 
 	return users, total, nil
+}
+
+func GetUserIdsByFilters(keyword string, group string) ([]int, error) {
+	var ids []int
+	query := DB.Unscoped().Model(&User{})
+
+	keyword = strings.TrimSpace(keyword)
+	group = strings.TrimSpace(group)
+
+	if keyword != "" {
+		likeCondition := "username LIKE ? OR email LIKE ? OR display_name LIKE ?"
+		keywordInt, err := strconv.Atoi(keyword)
+		if err == nil {
+			likeCondition = "id = ? OR " + likeCondition
+			query = query.Where("("+likeCondition+")", keywordInt, "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
+		} else {
+			query = query.Where("("+likeCondition+")", "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
+		}
+	}
+	if group != "" {
+		query = query.Where(commonGroupCol+" = ?", group)
+	}
+
+	err := query.Pluck("id", &ids).Error
+	return ids, err
+}
+
+func GetUsersByIds(ids []int) ([]*User, error) {
+	if len(ids) == 0 {
+		return []*User{}, nil
+	}
+	var users []*User
+	err := DB.Unscoped().Omit("password").Where("id IN ?", ids).Find(&users).Error
+	return users, err
 }
 
 func GetUserById(id int, selectAll bool) (*User, error) {

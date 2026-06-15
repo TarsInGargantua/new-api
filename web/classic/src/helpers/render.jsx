@@ -80,6 +80,7 @@ import {
   Package,
   Server,
   CalendarClock,
+  Database,
 } from 'lucide-react';
 import {
   SiAtlassian,
@@ -150,6 +151,8 @@ export function getLucideIcon(key, selected = false) {
       return <Server {...commonProps} color={iconColor} />;
     case 'subscription':
       return <CalendarClock {...commonProps} color={iconColor} />;
+    case 'request_data':
+      return <Database {...commonProps} color={iconColor} />;
     case 'setting':
       return <Settings {...commonProps} color={iconColor} />;
     default:

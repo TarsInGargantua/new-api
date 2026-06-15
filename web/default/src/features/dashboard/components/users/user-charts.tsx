@@ -21,19 +21,24 @@ import { useQuery } from '@tanstack/react-query'
 import { VChart } from '@visactor/react-vchart'
 import { Users, Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
+import {
+  dateToUnixTimestamp,
+  getRollingDateRange,
+  type TimeGranularity,
+} from '@/lib/time'
 import { VCHART_OPTION } from '@/lib/vchart'
 import { useThemeCustomization } from '@/context/theme-customization-provider'
 import { useTheme } from '@/context/theme-provider'
+import { ComboboxInput } from '@/components/ui/combobox-input'
 import { Skeleton } from '@/components/ui/skeleton'
-import { getUserQuotaDataByUsers } from '@/features/dashboard/api'
+import { CompactDateTimeRangePicker } from '@/components/compact-date-time-range-picker'
 import {
-  TIME_GRANULARITY_OPTIONS,
-  TIME_RANGE_PRESETS,
-} from '@/features/dashboard/constants'
+  getEnabledModels,
+  getUserDailyUsageStats,
+} from '@/features/dashboard/api'
+import { TIME_GRANULARITY_OPTIONS } from '@/features/dashboard/constants'
 import {
   getDefaultDays,
-  getSavedGranularity,
   saveGranularity,
   processUserChartData,
 } from '@/features/dashboard/lib'
@@ -55,7 +60,7 @@ const USER_CHARTS: {
   },
   {
     value: 'trend',
-    labelKey: 'User Consumption Trend',
+    labelKey: 'User Daily Consumption',
     specKey: 'spec_user_trend',
   },
 ]
@@ -71,28 +76,27 @@ export function UserCharts() {
     (typeof import('@visactor/vchart'))['ThemeManager'] | null
   >(null)
 
-  const [timeGranularity, setTimeGranularity] = useState<TimeGranularity>(() =>
-    getSavedGranularity()
-  )
-  const [selectedRange, setSelectedRange] = useState<number>(() =>
-    getDefaultDays(timeGranularity)
-  )
+  const [timeGranularity, setTimeGranularity] =
+    useState<TimeGranularity>('day')
   const [topUserLimit, setTopUserLimit] = useState(10)
-  const [timeRange, setTimeRange] = useState(() => {
+  const [modelName, setModelName] = useState('')
+  const [timeRange, setTimeRange] = useState<{
+    start?: Date
+    end?: Date
+  }>(() => {
     const days = getDefaultDays(timeGranularity)
     const { start, end } = getRollingDateRange(days)
     return {
-      start_timestamp: Math.floor(start.getTime() / 1000),
-      end_timestamp: Math.floor(end.getTime() / 1000),
+      start,
+      end,
     }
   })
 
   const handleRangeChange = useCallback((days: number) => {
-    setSelectedRange(days)
     const { start, end } = getRollingDateRange(days)
     setTimeRange({
-      start_timestamp: Math.floor(start.getTime() / 1000),
-      end_timestamp: Math.floor(end.getTime() / 1000),
+      start,
+      end,
     })
   }, [])
 
@@ -101,11 +105,9 @@ export function UserCharts() {
       setTimeGranularity(g)
       saveGranularity(g)
       const days = getDefaultDays(g)
-      if (days !== selectedRange) {
-        handleRangeChange(days)
-      }
+      handleRangeChange(days)
     },
-    [selectedRange, handleRangeChange]
+    [handleRangeChange]
   )
 
   useEffect(() => {
@@ -124,9 +126,32 @@ export function UserCharts() {
     updateTheme()
   }, [resolvedTheme])
 
+  const queryParams = useMemo(
+    () => ({
+      start_timestamp: timeRange.start
+        ? dateToUnixTimestamp(timeRange.start)
+        : undefined,
+      end_timestamp: timeRange.end
+        ? dateToUnixTimestamp(timeRange.end)
+        : undefined,
+      model_name: modelName.trim() || undefined,
+    }),
+    [modelName, timeRange.end, timeRange.start]
+  )
+
+  const { data: enabledModels } = useQuery({
+    queryKey: ['enabled-models'],
+    queryFn: getEnabledModels,
+    select: (res) => (res.success && Array.isArray(res.data) ? res.data : []),
+    staleTime: 5 * 60_000,
+  })
+
+  const modelOptions =
+    enabledModels?.map((model) => ({ label: model, value: model })) ?? []
+
   const { data: userData, isLoading } = useQuery({
-    queryKey: ['dashboard', 'user-quota', timeRange],
-    queryFn: () => getUserQuotaDataByUsers(timeRange),
+    queryKey: ['dashboard', 'user-daily-usage', queryParams],
+    queryFn: () => getUserDailyUsageStats(queryParams),
     select: (res) => (res.success ? res.data : []),
     staleTime: 60_000,
   })
@@ -153,22 +178,24 @@ export function UserCharts() {
 
   return (
     <div className='space-y-3'>
-      <div className='flex items-center gap-1.5 overflow-x-auto pb-1 sm:gap-2'>
-        <div className='flex shrink-0 items-center gap-1.5 rounded-lg border p-0.5'>
-          {TIME_RANGE_PRESETS.map((preset) => (
-            <button
-              key={preset.days}
-              type='button'
-              onClick={() => handleRangeChange(preset.days)}
-              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                selectedRange === preset.days
-                  ? 'bg-primary text-primary-foreground shadow-sm'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-              }`}
-            >
-              {t(preset.label)}
-            </button>
-          ))}
+      <div className='flex flex-wrap items-center gap-1.5 pb-1 sm:gap-2'>
+        <CompactDateTimeRangePicker
+          start={timeRange.start}
+          end={timeRange.end}
+          onChange={setTimeRange}
+          className='h-8 w-full sm:w-[280px] lg:w-[340px]'
+        />
+
+        <div className='w-full sm:w-[220px] lg:w-[260px]'>
+          <ComboboxInput
+            options={modelOptions}
+            value={modelName}
+            onValueChange={setModelName}
+            placeholder={t('Filter by model')}
+            emptyText={t('No models found.')}
+            allowCustomValue
+            className='h-8'
+          />
         </div>
 
         <div className='flex shrink-0 items-center gap-1.5 rounded-lg border p-0.5'>

@@ -57,6 +57,10 @@ export const userSchema = z.object({
   last_login_at: z.number().optional(),
   DeletedAt: z.any().nullable().optional(),
   remark: z.string().optional(),
+  usage_quota: z.number().optional(),
+  usage_token_used: z.number().optional(),
+  usage_count: z.number().optional(),
+  usage_daily_average_quota: z.number().optional(),
 })
 export type User = z.infer<typeof userSchema>
 
@@ -94,6 +98,31 @@ export interface SearchUsersParams {
   group?: string
   p?: number
   page_size?: number
+}
+
+export interface UserUsageStats {
+  user_id: number
+  username?: string
+  quota: number
+  token_used: number
+  count: number
+}
+
+export interface GetUserUsageStatsParams {
+  user_ids: number[]
+  start_timestamp?: number
+  end_timestamp?: number
+  model_name?: string
+}
+
+export interface GetUserUsageUsersParams {
+  p?: number
+  page_size?: number
+  keyword?: string
+  group?: string
+  start_timestamp?: number
+  end_timestamp?: number
+  model_name?: string
 }
 
 export interface UserFormData {

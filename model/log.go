@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -205,9 +206,9 @@ type RecordConsumeLogParams struct {
 	Other            map[string]interface{} `json:"other"`
 }
 
-func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
+func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) *Log {
 	if !common.LogConsumeEnabled {
-		return
+		return nil
 	}
 	logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
 	username := c.GetString("username")
@@ -250,12 +251,17 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	err := LOG_DB.Create(log).Error
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
+		return nil
+	}
+	if err := CreateAPIRequestLogFromConsumeLog(c, log); err != nil {
+		logger.LogError(c, "failed to sync consume log to api request log: "+err.Error())
 	}
 	if common.DataExportEnabled {
 		gopool.Go(func() {
 			LogQuotaData(userId, username, params.ModelName, params.Quota, common.GetTimestamp(), params.PromptTokens+params.CompletionTokens)
 		})
 	}
+	return log
 }
 
 type RecordTaskBillingLogParams struct {
@@ -270,9 +276,9 @@ type RecordTaskBillingLogParams struct {
 	Other     map[string]interface{}
 }
 
-func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
+func RecordTaskBillingLog(params RecordTaskBillingLogParams) *Log {
 	if params.LogType == LogTypeConsume && !common.LogConsumeEnabled {
-		return
+		return nil
 	}
 	username, _ := GetUsernameById(params.UserId, false)
 	tokenName := ""
@@ -298,7 +304,14 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	err := LOG_DB.Create(log).Error
 	if err != nil {
 		common.SysLog("failed to record task billing log: " + err.Error())
+		return nil
 	}
+	if params.LogType == LogTypeConsume {
+		if err := CreateAPIRequestLogFromConsumeLog(nil, log); err != nil {
+			common.SysLog("failed to sync task billing log to api request log: " + err.Error())
+		}
+	}
+	return log
 }
 
 func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, conversationId string) (logs []*Log, total int64, err error) {
@@ -432,6 +445,32 @@ type Stat struct {
 	Tpm   int `json:"tpm"`
 }
 
+type UserUsageStat struct {
+	UserId    int    `json:"user_id" gorm:"column:user_id"`
+	Username  string `json:"username" gorm:"column:username"`
+	Quota     int64  `json:"quota" gorm:"column:quota"`
+	TokenUsed int64  `json:"token_used" gorm:"column:token_used"`
+	Count     int64  `json:"count" gorm:"column:count"`
+}
+
+type UserUsageUser struct {
+	User
+	UsageHasFilters        bool    `json:"usage_has_filters"`
+	UsageQuota             int64   `json:"usage_quota"`
+	UsageTokenUsed         int64   `json:"usage_token_used"`
+	UsageCount             int64   `json:"usage_count"`
+	UsageDailyAverageQuota float64 `json:"usage_daily_average_quota,omitempty"`
+}
+
+type UserDailyUsageStat struct {
+	UserId    int    `json:"user_id" gorm:"column:user_id"`
+	Username  string `json:"username" gorm:"column:username"`
+	CreatedAt int64  `json:"created_at" gorm:"column:created_at"`
+	Quota     int64  `json:"quota" gorm:"column:quota"`
+	TokenUsed int64  `json:"token_used" gorm:"column:token_used"`
+	Count     int64  `json:"count" gorm:"column:count"`
+}
+
 func logContainsPattern(input string) (string, bool) {
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -450,6 +489,14 @@ func applyLogContainsFilter(tx *gorm.DB, column string, value string) *gorm.DB {
 	return tx.Where(column+" LIKE ? ESCAPE '!'", pattern)
 }
 
+func applyLogExactStringFilter(tx *gorm.DB, column string, value string) *gorm.DB {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return tx
+	}
+	return tx.Where(column+" = ?", value)
+}
+
 func applyConversationIDFilter(tx *gorm.DB, conversationId string) *gorm.DB {
 	conversationId = strings.TrimSpace(conversationId)
 	if tx == nil || conversationId == "" {
@@ -461,6 +508,155 @@ func applyConversationIDFilter(tx *gorm.DB, conversationId string) *gorm.DB {
 	}
 	escaped := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(string(encoded))
 	return tx.Where(`logs.other LIKE ? ESCAPE '!'`, fmt.Sprintf(`%%"conversation_id":%s%%`, escaped))
+}
+
+func applyLogUsageFilters(tx *gorm.DB, startTimestamp int64, endTimestamp int64, modelName string) *gorm.DB {
+	tx = tx.Where("type = ?", LogTypeConsume)
+	if startTimestamp != 0 {
+		tx = tx.Where("created_at >= ?", startTimestamp)
+	}
+	if endTimestamp != 0 {
+		tx = tx.Where("created_at <= ?", endTimestamp)
+	}
+	if strings.TrimSpace(modelName) != "" {
+		tx = tx.Where("model_name = ?", strings.TrimSpace(modelName))
+	}
+	return tx
+}
+
+func logUsingMySQL() bool {
+	if LOG_DB == DB {
+		return common.UsingMySQL
+	}
+	return common.LogSqlType == common.DatabaseTypeMySQL
+}
+
+func logBucketExpr(bucketSize int64) string {
+	if bucketSize <= 0 {
+		bucketSize = 86400
+	}
+	if logUsingMySQL() {
+		return fmt.Sprintf("FLOOR(created_at / %d) * %d", bucketSize, bucketSize)
+	}
+	return fmt.Sprintf("(created_at / %d) * %d", bucketSize, bucketSize)
+}
+
+func GetUserUsageStats(userIds []int, startTimestamp int64, endTimestamp int64, modelName string) ([]UserUsageStat, error) {
+	if len(userIds) == 0 {
+		return []UserUsageStat{}, nil
+	}
+	var rows []UserUsageStat
+	query := LOG_DB.Table("logs").
+		Select("user_id, MAX(username) as username, COALESCE(SUM(quota), 0) as quota, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as token_used, COUNT(*) as count").
+		Where("user_id IN ?", userIds)
+	query = applyLogUsageFilters(query, startTimestamp, endTimestamp, modelName)
+	err := query.Group("user_id").Scan(&rows).Error
+	return rows, err
+}
+
+func GetUserUsageStatsPage(userIds []int, restrictUserIds bool, startTimestamp int64, endTimestamp int64, modelName string, startIdx int, num int) ([]UserUsageStat, int64, error) {
+	if restrictUserIds && len(userIds) == 0 {
+		return []UserUsageStat{}, 0, nil
+	}
+
+	base := LOG_DB.Table("logs").Where("user_id > 0")
+	if restrictUserIds {
+		base = base.Where("user_id IN ?", userIds)
+	}
+	base = applyLogUsageFilters(base, startTimestamp, endTimestamp, modelName)
+
+	var total int64
+	countQuery := LOG_DB.Table("(?) as usage_users", base.Select("user_id").Group("user_id"))
+	if err := countQuery.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var rows []UserUsageStat
+	err := base.Select("user_id, MAX(username) as username, COALESCE(SUM(quota), 0) as quota, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as token_used, COUNT(*) as count").
+		Group("user_id").
+		Order("quota DESC").
+		Order("user_id ASC").
+		Limit(num).
+		Offset(startIdx).
+		Scan(&rows).Error
+	return rows, total, err
+}
+
+func GetUserDailyUsageStats(startTimestamp int64, endTimestamp int64, modelName string, username string) ([]UserDailyUsageStat, error) {
+	var rows []UserDailyUsageStat
+	bucketExpr := logBucketExpr(86400)
+	query := LOG_DB.Table("logs").
+		Select(fmt.Sprintf("user_id, MAX(username) as username, %s as created_at, COALESCE(SUM(quota), 0) as quota, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as token_used, COUNT(*) as count", bucketExpr)).
+		Where("user_id > 0")
+	query = applyLogUsageFilters(query, startTimestamp, endTimestamp, modelName)
+	query = applyLogExactStringFilter(query, "username", username)
+	err := query.Group(fmt.Sprintf("user_id, %s", bucketExpr)).
+		Order(bucketExpr + " ASC").
+		Scan(&rows).Error
+	return rows, err
+}
+
+func GetLogModelNames() ([]string, error) {
+	modelSet := make(map[string]struct{})
+	addModel := func(modelName string) {
+		modelName = strings.TrimSpace(modelName)
+		if modelName == "" {
+			return
+		}
+		modelSet[modelName] = struct{}{}
+	}
+
+	var firstErr error
+	rememberErr := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	var logModels []string
+	rememberErr(LOG_DB.Model(&Log{}).
+		Where("model_name <> ''").
+		Distinct("model_name").
+		Pluck("model_name", &logModels).Error)
+	for _, modelName := range logModels {
+		addModel(modelName)
+	}
+
+	if DB != nil {
+		var abilityModels []string
+		rememberErr(DB.Model(&Ability{}).
+			Where("model <> ''").
+			Distinct("model").
+			Pluck("model", &abilityModels).Error)
+		for _, modelName := range abilityModels {
+			addModel(modelName)
+		}
+
+		var channelModels []string
+		rememberErr(DB.Model(&Channel{}).
+			Where("status = ? AND models <> ''", common.ChannelStatusEnabled).
+			Pluck("models", &channelModels).Error)
+		for _, modelList := range channelModels {
+			for _, modelName := range strings.Split(modelList, ",") {
+				addModel(modelName)
+			}
+		}
+
+		var metaModels []string
+		rememberErr(DB.Model(&Model{}).
+			Where("status = ? AND model_name <> ''", common.ChannelStatusEnabled).
+			Pluck("model_name", &metaModels).Error)
+		for _, modelName := range metaModels {
+			addModel(modelName)
+		}
+	}
+
+	models := make([]string, 0, len(modelSet))
+	for modelName := range modelSet {
+		models = append(models, modelName)
+	}
+	sort.Strings(models)
+	return models, firstErr
 }
 
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {

@@ -33,13 +33,21 @@ import {
 import { useMediaQuery } from '@/hooks'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+import { dateToUnixTimestamp } from '@/lib/time'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { ComboboxInput } from '@/components/ui/combobox-input'
+import { CompactDateTimeRangePicker } from '@/components/compact-date-time-range-picker'
 import {
   DISABLED_ROW_DESKTOP,
   DISABLED_ROW_MOBILE,
   DataTablePage,
 } from '@/components/data-table'
-import { getUsers, searchUsers } from '../api'
+import {
+  getEnabledModels,
+  getUserUsageUsers,
+  getUsers,
+  searchUsers,
+} from '../api'
 import {
   USER_STATUS,
   getUserStatusOptions,
@@ -53,8 +61,21 @@ import { useUsers } from './users-provider'
 
 const route = getRouteApi('/_authenticated/users/')
 
+type UserUsageFilters = {
+  start?: Date
+  end?: Date
+  modelName: string
+}
+
 function isDisabledUserRow(user: User) {
   return isUserDeleted(user) || user.status === USER_STATUS.DISABLED
+}
+
+function getDateRangeDayCount(start?: Date, end?: Date) {
+  if (!start || !end) return null
+  const diff = end.getTime() - start.getTime()
+  if (!Number.isFinite(diff) || diff < 0) return 1
+  return Math.max(1, Math.ceil((diff + 1) / (24 * 60 * 60 * 1000)))
 }
 
 export function UsersTable() {
@@ -65,6 +86,11 @@ export function UsersTable() {
   const [rowSelection, setRowSelection] = useState({})
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({})
+  const [usageFilters, setUsageFilters] = useState<UserUsageFilters>({
+    start: undefined,
+    end: undefined,
+    modelName: '',
+  })
 
   const {
     globalFilter,
@@ -86,6 +112,34 @@ export function UsersTable() {
     ],
   })
 
+  const { data: enabledModels } = useQuery({
+    queryKey: ['enabled-models'],
+    queryFn: getEnabledModels,
+    select: (res) => (res.success && Array.isArray(res.data) ? res.data : []),
+    staleTime: 5 * 60_000,
+  })
+
+  const modelOptions =
+    enabledModels?.map((model) => ({ label: model, value: model })) ?? []
+
+  const startTimestamp = usageFilters.start
+    ? dateToUnixTimestamp(usageFilters.start)
+    : undefined
+  const endTimestamp = usageFilters.end
+    ? dateToUnixTimestamp(usageFilters.end)
+    : undefined
+  const usageRangeDays = getDateRangeDayCount(
+    usageFilters.start,
+    usageFilters.end
+  )
+  const hasUsageFilters = Boolean(
+    usageFilters.start || usageFilters.end || usageFilters.modelName.trim()
+  )
+  const modelName = usageFilters.modelName.trim()
+  const groupFilter = String(
+    columnFilters.find((filter) => filter.id === 'group')?.value || ''
+  ).trim()
+
   // Fetch data with React Query
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [
@@ -93,6 +147,12 @@ export function UsersTable() {
       pagination.pageIndex + 1,
       pagination.pageSize,
       globalFilter,
+      startTimestamp,
+      endTimestamp,
+      modelName,
+      hasUsageFilters,
+      usageRangeDays,
+      groupFilter,
       refreshTrigger,
     ],
     queryFn: async () => {
@@ -100,6 +160,42 @@ export function UsersTable() {
       const params = {
         p: pagination.pageIndex + 1,
         page_size: pagination.pageSize,
+      }
+
+      if (hasUsageFilters) {
+        const result = await getUserUsageUsers({
+          ...params,
+          keyword: hasFilter || undefined,
+          group: groupFilter || undefined,
+          start_timestamp: startTimestamp,
+          end_timestamp: endTimestamp,
+          model_name: modelName || undefined,
+        })
+
+        if (!result.success) {
+          toast.error(result.message || 'Failed to load user usage')
+          return { items: [], total: 0 }
+        }
+
+        const items = result.data?.items || []
+        return {
+          items: items.map((user) => {
+            const usageQuota = Number(user.usage_quota) || 0
+            return {
+              ...user,
+              usage_quota: usageQuota,
+              usage_token_used: Number(user.usage_token_used) || 0,
+              usage_count: Number(user.usage_count) || 0,
+              usage_daily_average_quota:
+                typeof user.usage_daily_average_quota === 'number'
+                  ? user.usage_daily_average_quota
+                  : usageRangeDays
+                    ? usageQuota / usageRangeDays
+                    : undefined,
+            }
+          }),
+          total: result.data?.total || 0,
+        }
       }
 
       const result = hasFilter
@@ -113,8 +209,9 @@ export function UsersTable() {
         return { items: [], total: 0 }
       }
 
+      const items = result.data?.items || []
       return {
-        items: result.data?.items || [],
+        items,
         total: result.data?.total || 0,
       }
     },
@@ -182,6 +279,42 @@ export function UsersTable() {
       skeletonKeyPrefix='users-skeleton'
       toolbarProps={{
         searchPlaceholder: t('Filter by username, name or email...'),
+        additionalSearch: (
+          <>
+            <CompactDateTimeRangePicker
+              start={usageFilters.start}
+              end={usageFilters.end}
+              onChange={(range) =>
+                setUsageFilters((prev) => ({
+                  ...prev,
+                  start: range.start,
+                  end: range.end,
+                }))
+              }
+              className='h-8 w-full sm:w-[260px] lg:w-[320px]'
+            />
+            <div className='w-full sm:w-[220px] lg:w-[260px]'>
+              <ComboboxInput
+                options={modelOptions}
+                value={usageFilters.modelName}
+                onValueChange={(value) =>
+                  setUsageFilters((prev) => ({ ...prev, modelName: value }))
+                }
+                placeholder={t('Filter by model')}
+                emptyText={t('No models found.')}
+                allowCustomValue
+                className='h-8'
+              />
+            </div>
+          </>
+        ),
+        hasAdditionalFilters: hasUsageFilters,
+        onReset: () =>
+          setUsageFilters({
+            start: undefined,
+            end: undefined,
+            modelName: '',
+          }),
         filters: [
           {
             columnId: 'status',

@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { type ColumnDef } from '@tanstack/react-table'
 import { useTranslation } from 'react-i18next'
-import { formatQuota, formatTimestamp } from '@/lib/format'
+import { formatNumber, formatQuota, formatTimestamp } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Progress } from '@/components/ui/progress'
@@ -219,6 +219,68 @@ export function useUsersColumns(): ColumnDef<User>[] {
         )
       },
       meta: { label: t('Quota') },
+    },
+    {
+      id: 'usage_quota',
+      accessorKey: 'usage_quota',
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title={t('Usage in Range')} />
+      ),
+      cell: ({ row }) => {
+        const user = row.original
+        const quota = Number(user.usage_quota) || 0
+        const tokenUsed = Number(user.usage_token_used) || 0
+        const count = Number(user.usage_count) || 0
+        const hasDailyAverage =
+          typeof user.usage_daily_average_quota === 'number'
+        const dailyAverage = hasDailyAverage
+          ? Number(user.usage_daily_average_quota) || 0
+          : null
+
+        if (quota === 0 && tokenUsed === 0 && count === 0) {
+          return (
+            <StatusBadge
+              label={t('No usage')}
+              variant='neutral'
+              copyable={false}
+            />
+          )
+        }
+
+        return (
+          <Tooltip>
+            <TooltipTrigger
+              render={<div className='min-w-[150px] cursor-help' />}
+            >
+              <div className='font-medium tabular-nums'>
+                {formatQuota(quota)}
+              </div>
+              <div className='text-muted-foreground text-xs tabular-nums'>
+                {t('Avg/day')}:{' '}
+                {dailyAverage == null ? '-' : formatQuota(dailyAverage)}
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>
+              <div className='space-y-1 text-xs'>
+                <div>
+                  {t('Usage in Range')}: {formatQuota(quota)}
+                </div>
+                <div>
+                  {t('Daily average:')}{' '}
+                  {dailyAverage == null ? '-' : formatQuota(dailyAverage)}
+                </div>
+                <div>
+                  {t('Tokens:')} {formatNumber(tokenUsed)}
+                </div>
+                <div>
+                  {t('Requests:')} {formatNumber(count)}
+                </div>
+              </div>
+            </TooltipContent>
+          </Tooltip>
+        )
+      },
+      meta: { label: t('Usage in Range') },
     },
     {
       accessorKey: 'group',

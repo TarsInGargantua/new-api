@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,38 +102,60 @@ func increaseQuotaData(userId int, username string, modelName string, count int,
 	}
 }
 
-func GetQuotaDataByUsername(username string, startTime int64, endTime int64) (quotaData []*QuotaData, err error) {
+func applyQuotaDataFilters(tx *gorm.DB, startTime int64, endTime int64, username string, modelName string) *gorm.DB {
+	if startTime != 0 {
+		tx = tx.Where("created_at >= ?", startTime)
+	}
+	if endTime != 0 {
+		tx = tx.Where("created_at <= ?", endTime)
+	}
+	tx = applyLogExactStringFilter(tx, "username", username)
+	modelName = strings.TrimSpace(modelName)
+	if modelName != "" {
+		tx = tx.Where("model_name = ?", modelName)
+	}
+	return tx
+}
+
+func GetQuotaDataByUsername(username string, startTime int64, endTime int64, modelName string) (quotaData []*QuotaData, err error) {
 	var quotaDatas []*QuotaData
 	// 从quota_data表中查询数据
-	err = DB.Table("quota_data").Where("username = ? and created_at >= ? and created_at <= ?", username, startTime, endTime).Find(&quotaDatas).Error
+	tx := DB.Table("quota_data")
+	tx = applyQuotaDataFilters(tx, startTime, endTime, username, modelName)
+	err = tx.Find(&quotaDatas).Error
 	return quotaDatas, err
 }
 
-func GetQuotaDataByUserId(userId int, startTime int64, endTime int64) (quotaData []*QuotaData, err error) {
+func GetQuotaDataByUserId(userId int, startTime int64, endTime int64, modelName string) (quotaData []*QuotaData, err error) {
 	var quotaDatas []*QuotaData
 	// 从quota_data表中查询数据
-	err = DB.Table("quota_data").Where("user_id = ? and created_at >= ? and created_at <= ?", userId, startTime, endTime).Find(&quotaDatas).Error
+	tx := DB.Table("quota_data").Where("user_id = ?", userId)
+	tx = applyQuotaDataFilters(tx, startTime, endTime, "", modelName)
+	err = tx.Find(&quotaDatas).Error
 	return quotaDatas, err
 }
 
-func GetQuotaDataGroupByUser(startTime int64, endTime int64) (quotaData []*QuotaData, err error) {
+func GetQuotaDataGroupByUser(startTime int64, endTime int64, username string, modelName string) (quotaData []*QuotaData, err error) {
 	var quotaDatas []*QuotaData
-	err = DB.Table("quota_data").
-		Select("username, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
-		Where("created_at >= ? and created_at <= ?", startTime, endTime).
+	tx := DB.Table("quota_data").
+		Select("username, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used")
+	tx = applyQuotaDataFilters(tx, startTime, endTime, username, modelName)
+	err = tx.
 		Group("username, created_at").
 		Find(&quotaDatas).Error
 	return quotaDatas, err
 }
 
-func GetAllQuotaDates(startTime int64, endTime int64, username string) (quotaData []*QuotaData, err error) {
+func GetAllQuotaDates(startTime int64, endTime int64, username string, modelName string) (quotaData []*QuotaData, err error) {
 	if username != "" {
-		return GetQuotaDataByUsername(username, startTime, endTime)
+		return GetQuotaDataByUsername(username, startTime, endTime, modelName)
 	}
 	var quotaDatas []*QuotaData
 	// 从quota_data表中查询数据
 	// only select model_name, sum(count) as count, sum(quota) as quota, model_name, created_at from quota_data group by model_name, created_at;
 	//err = DB.Table("quota_data").Where("created_at >= ? and created_at <= ?", startTime, endTime).Find(&quotaDatas).Error
-	err = DB.Table("quota_data").Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used, created_at").Where("created_at >= ? and created_at <= ?", startTime, endTime).Group("model_name, created_at").Find(&quotaDatas).Error
+	tx := DB.Table("quota_data").Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used, created_at")
+	tx = applyQuotaDataFilters(tx, startTime, endTime, "", modelName)
+	err = tx.Group("model_name, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
 }

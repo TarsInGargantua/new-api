@@ -61,6 +61,64 @@ export async function getUserQuotaDataByUsers(params: {
   return res.data
 }
 
+export async function getUserDailyUsageStats(params: {
+  start_timestamp?: number
+  end_timestamp?: number
+  model_name?: string
+}) {
+  const res = await api.get<{ success: boolean; data: QuotaDataItem[] }>(
+    '/api/log/user_daily_usage',
+    { params }
+  )
+  return res.data
+}
+
+export async function getEnabledModels() {
+  type ModelsResponse = {
+    success: boolean
+    message?: string
+    data?: unknown[]
+  }
+  const modelNameFromItem = (model: unknown) => {
+    if (typeof model === 'string') return model
+    if (model && typeof model === 'object') {
+      const item = model as {
+        id?: unknown
+        model_name?: unknown
+        name?: unknown
+      }
+      return item.id || item.model_name || item.name || ''
+    }
+    return ''
+  }
+  const results = await Promise.allSettled([
+    api.get<ModelsResponse>('/api/channel/models_enabled'),
+    api.get<ModelsResponse>('/api/log/models'),
+    api.get<ModelsResponse>('/api/channel/models'),
+  ])
+  const models = new Set<string>()
+  let message = ''
+
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue
+    const payload = result.value.data
+    if (!payload.success) {
+      message ||= payload.message || ''
+      continue
+    }
+    for (const model of payload.data || []) {
+      const normalized = String(modelNameFromItem(model)).trim()
+      if (normalized) models.add(normalized)
+    }
+  }
+
+  return {
+    success: models.size > 0 || results.some((r) => r.status === 'fulfilled'),
+    message,
+    data: Array.from(models).sort((a, b) => a.localeCompare(b)),
+  }
+}
+
 // Get uptime monitoring status for all services
 export async function getUptimeStatus() {
   const res = await api.get<{ success: boolean; data: UptimeGroupResult[] }>(

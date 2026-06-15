@@ -144,6 +144,10 @@ export function SidebarModulesSection({
         title: t('Subscription Management'),
         description: t('Manage subscription plans and pricing.'),
       },
+      request_data: {
+        title: t('Request Data'),
+        description: t('Inspect captured API request and response bodies.'),
+      },
     },
   }
   const formDefaults = useMemo(() => config, [config])

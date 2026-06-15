@@ -26,6 +26,9 @@ import type {
   ManageUserAction,
   ManageUserQuotaPayload,
   ApiResponse,
+  UserUsageStats,
+  GetUserUsageStatsParams,
+  GetUserUsageUsersParams,
 } from './types'
 
 // ============================================================================
@@ -54,6 +57,89 @@ export async function searchUsers(
     `/api/user/search?keyword=${keyword}&group=${group}&p=${p}&page_size=${page_size}`
   )
   return res.data
+}
+
+/**
+ * Fallback for deployed backends that already expose dashboard quota data.
+ * This endpoint does not support model filtering.
+ */
+export async function getUserQuotaUsageStats(params: {
+  start_timestamp?: number
+  end_timestamp?: number
+}): Promise<ApiResponse<UserUsageStats[]>> {
+  const res = await api.get('/api/data/users', { params })
+  return res.data
+}
+
+/**
+ * Get aggregated usage for specific users.
+ */
+export async function getUserUsageStats(
+  params: GetUserUsageStatsParams
+): Promise<ApiResponse<UserUsageStats[]>> {
+  const { user_ids, ...rest } = params
+  const res = await api.get('/api/log/user_usage', {
+    params: {
+      ...rest,
+      user_ids: user_ids.join(','),
+    },
+  })
+  return res.data
+}
+
+/**
+ * Get paginated users that have matching usage.
+ */
+export async function getUserUsageUsers(
+  params: GetUserUsageUsersParams
+): Promise<GetUsersResponse> {
+  const res = await api.get('/api/log/user_usage/users', { params })
+  return res.data
+}
+
+function modelNameFromItem(model: unknown) {
+  if (typeof model === 'string') return model
+  if (model && typeof model === 'object') {
+    const item = model as {
+      id?: unknown
+      model_name?: unknown
+      name?: unknown
+    }
+    return item.id || item.model_name || item.name || ''
+  }
+  return ''
+}
+
+/**
+ * Get enabled model names for usage filtering.
+ */
+export async function getEnabledModels(): Promise<ApiResponse<string[]>> {
+  const results = await Promise.allSettled([
+    api.get<ApiResponse<unknown[]>>('/api/channel/models_enabled'),
+    api.get<ApiResponse<unknown[]>>('/api/log/models'),
+    api.get<ApiResponse<unknown[]>>('/api/channel/models'),
+  ])
+  const models = new Set<string>()
+  let message = ''
+
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue
+    const payload = result.value.data
+    if (!payload.success) {
+      message ||= payload.message || ''
+      continue
+    }
+    for (const model of payload.data || []) {
+      const normalized = String(modelNameFromItem(model)).trim()
+      if (normalized) models.add(normalized)
+    }
+  }
+
+  return {
+    success: models.size > 0 || results.some((r) => r.status === 'fulfilled'),
+    message,
+    data: Array.from(models).sort((a, b) => a.localeCompare(b)),
+  }
 }
 
 /**

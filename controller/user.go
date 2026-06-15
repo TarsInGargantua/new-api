@@ -248,6 +248,123 @@ func GetAllUsers(c *gin.Context) {
 	return
 }
 
+func parseQueryIntList(value string) []int {
+	items := strings.Split(value, ",")
+	seen := make(map[int]struct{}, len(items))
+	result := make([]int, 0, len(items))
+	for _, item := range items {
+		id, err := strconv.Atoi(strings.TrimSpace(item))
+		if err != nil || id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
+}
+
+func GetUserUsageStats(c *gin.Context) {
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	modelName := c.Query("model_name")
+	userIds := parseQueryIntList(c.Query("user_ids"))
+
+	stats, err := model.GetUserUsageStats(userIds, startTimestamp, endTimestamp, modelName)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	common.ApiSuccess(c, stats)
+}
+
+func usageDateRangeDayCount(startTimestamp int64, endTimestamp int64) int64 {
+	if startTimestamp == 0 || endTimestamp == 0 {
+		return 0
+	}
+	diffSeconds := endTimestamp - startTimestamp
+	if diffSeconds < 0 {
+		return 1
+	}
+	return (diffSeconds / 86400) + 1
+}
+
+func GetUserUsageUsers(c *gin.Context) {
+	pageInfo := common.GetPageQuery(c)
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	modelName := c.Query("model_name")
+	keyword := c.Query("keyword")
+	group := c.Query("group")
+
+	var userIds []int
+	restrictUserIds := strings.TrimSpace(keyword) != "" || strings.TrimSpace(group) != ""
+	if restrictUserIds {
+		var err error
+		userIds, err = model.GetUserIdsByFilters(keyword, group)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if len(userIds) == 0 {
+			pageInfo.SetTotal(0)
+			pageInfo.SetItems([]model.UserUsageUser{})
+			common.ApiSuccess(c, pageInfo)
+			return
+		}
+	}
+
+	stats, total, err := model.GetUserUsageStatsPage(userIds, restrictUserIds, startTimestamp, endTimestamp, modelName, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	usageUserIds := make([]int, 0, len(stats))
+	for _, stat := range stats {
+		usageUserIds = append(usageUserIds, stat.UserId)
+	}
+
+	users, err := model.GetUsersByIds(usageUserIds)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	userById := make(map[int]*model.User, len(users))
+	for _, user := range users {
+		userById[user.Id] = user
+	}
+
+	dayCount := usageDateRangeDayCount(startTimestamp, endTimestamp)
+	items := make([]model.UserUsageUser, 0, len(stats))
+	for _, stat := range stats {
+		user := userById[stat.UserId]
+		if user == nil {
+			user = &model.User{Id: stat.UserId, Username: stat.Username}
+		}
+		item := model.UserUsageUser{
+			User:                   *user,
+			UsageHasFilters:        true,
+			UsageQuota:             stat.Quota,
+			UsageTokenUsed:         stat.TokenUsed,
+			UsageCount:             stat.Count,
+			UsageDailyAverageQuota: 0,
+		}
+		if dayCount > 0 {
+			item.UsageDailyAverageQuota = float64(stat.Quota) / float64(dayCount)
+		}
+		items = append(items, item)
+	}
+
+	pageInfo.SetTotal(int(total))
+	pageInfo.SetItems(items)
+	common.ApiSuccess(c, pageInfo)
+}
+
 func SearchUsers(c *gin.Context) {
 	keyword := c.Query("keyword")
 	group := c.Query("group")
@@ -494,22 +611,24 @@ func generateDefaultSidebarConfig(userRole int) string {
 	if userRole == common.RoleAdminUser {
 		// 管理员可以访问管理员区域，但不能访问系统设置
 		defaultConfig["admin"] = map[string]interface{}{
-			"enabled":    true,
-			"channel":    true,
-			"models":     true,
-			"redemption": true,
-			"user":       true,
-			"setting":    false, // 管理员不能访问系统设置
+			"enabled":      true,
+			"channel":      true,
+			"models":       true,
+			"redemption":   true,
+			"user":         true,
+			"request_data": true,
+			"setting":      false, // 管理员不能访问系统设置
 		}
 	} else if userRole == common.RoleRootUser {
 		// 超级管理员可以访问所有功能
 		defaultConfig["admin"] = map[string]interface{}{
-			"enabled":    true,
-			"channel":    true,
-			"models":     true,
-			"redemption": true,
-			"user":       true,
-			"setting":    true,
+			"enabled":      true,
+			"channel":      true,
+			"models":       true,
+			"redemption":   true,
+			"user":         true,
+			"request_data": true,
+			"setting":      true,
 		}
 	}
 	// 普通用户不包含admin区域

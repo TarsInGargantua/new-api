@@ -778,7 +778,7 @@ export function processUserChartData(
       seriesField: 'User',
       title: {
         visible: true,
-        text: tt('User Consumption Trend'),
+        text: tt('User Daily Consumption'),
         subtext: tt('No data available'),
       },
       legends: { visible: true, selectMode: 'single' },
@@ -918,7 +918,7 @@ export function processUserChartData(
       stack: false,
       title: {
         visible: true,
-        text: tt('User Consumption Trend'),
+        text: tt('User Daily Consumption'),
         subtext: `${tt('Total:')} ${formatVal(totalQuota)}`,
       },
       legends: { visible: true, selectMode: 'single' },

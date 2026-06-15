@@ -20,15 +20,16 @@ For commercial licensing, please contact support@quantumnous.com
 import React, { useRef } from 'react';
 import { Form, Button } from '@douyinfe/semi-ui';
 import { IconSearch } from '@douyinfe/semi-icons';
+import { DATE_RANGE_PRESETS } from '../../../constants/console.constants';
 
 const UsersFilters = ({
   formInitValues,
   setFormApi,
   searchUsers,
   loadUsers,
-  activePage,
   pageSize,
   groupOptions,
+  enabledModelOptions,
   loading,
   searching,
   t,
@@ -60,52 +61,83 @@ const UsersFilters = ({
       stopValidateWithError={false}
       className='w-full md:w-auto order-1 md:order-2'
     >
-      <div className='flex flex-col md:flex-row items-center gap-2 w-full md:w-auto'>
-        <div className='relative w-full md:w-64'>
-          <Form.Input
-            field='searchKeyword'
-            prefix={<IconSearch />}
-            placeholder={t('支持搜索用户的 ID、用户名、显示名称和邮箱地址')}
-            showClear
-            pure
-            size='small'
-          />
-        </div>
-        <div className='w-full md:w-48'>
-          <Form.Select
-            field='searchGroup'
-            placeholder={t('选择分组')}
-            optionList={groupOptions}
-            onChange={(value) => {
-              // Group change triggers automatic search
-              setTimeout(() => {
-                searchUsers(1, pageSize);
-              }, 100);
-            }}
-            className='w-full'
-            showClear
-            pure
-            size='small'
-          />
-        </div>
-        <div className='flex gap-2 w-full md:w-auto'>
-          <Button
-            type='tertiary'
-            htmlType='submit'
-            loading={loading || searching}
-            className='flex-1 md:flex-initial md:w-auto'
-            size='small'
-          >
-            {t('查询')}
-          </Button>
-          <Button
-            type='tertiary'
-            onClick={handleReset}
-            className='flex-1 md:flex-initial md:w-auto'
-            size='small'
-          >
-            {t('重置')}
-          </Button>
+      <div className='flex flex-col gap-2 w-full'>
+        <div className='flex flex-col xl:flex-row items-center gap-2 w-full'>
+          <div className='relative w-full xl:w-64'>
+            <Form.Input
+              field='searchKeyword'
+              prefix={<IconSearch />}
+              placeholder={t('支持搜索用户的 ID、用户名、显示名称和邮箱地址')}
+              showClear
+              pure
+              size='small'
+            />
+          </div>
+          <div className='w-full xl:w-44'>
+            <Form.Select
+              field='searchGroup'
+              placeholder={t('选择分组')}
+              optionList={groupOptions}
+              onChange={() => {
+                // Group change triggers automatic search
+                setTimeout(() => {
+                  searchUsers(1, pageSize);
+                }, 100);
+              }}
+              className='w-full'
+              showClear
+              pure
+              size='small'
+            />
+          </div>
+          <div className='w-full xl:w-72'>
+            <Form.DatePicker
+              field='usageDateRange'
+              className='w-full'
+              type='dateTimeRange'
+              placeholder={[t('开始时间'), t('结束时间')]}
+              showClear
+              pure
+              size='small'
+              presets={DATE_RANGE_PRESETS.map((preset) => ({
+                text: t(preset.text),
+                start: preset.start(),
+                end: preset.end(),
+              }))}
+            />
+          </div>
+          <div className='w-full xl:w-56'>
+            <Form.Select
+              field='usageModelName'
+              placeholder={t('按模型筛选')}
+              optionList={enabledModelOptions}
+              className='w-full'
+              showClear
+              pure
+              filter
+              allowCreate
+              size='small'
+            />
+          </div>
+          <div className='flex gap-2 w-full xl:w-auto'>
+            <Button
+              type='tertiary'
+              htmlType='submit'
+              loading={loading || searching}
+              className='flex-1 xl:flex-initial xl:w-auto'
+              size='small'
+            >
+              {t('查询')}
+            </Button>
+            <Button
+              type='tertiary'
+              onClick={handleReset}
+              className='flex-1 xl:flex-initial xl:w-auto'
+              size='small'
+            >
+              {t('重置')}
+            </Button>
+          </div>
         </div>
       </div>
     </Form>

@@ -27,8 +27,8 @@ const SearchModal = ({
   isMobile,
   isAdminUser,
   inputs,
-  dataExportDefaultTime,
-  timeOptions,
+  enabledModelOptions,
+  userOptions,
   handleInputChange,
   t,
 }) => {
@@ -42,7 +42,7 @@ const SearchModal = ({
     <Component {...FORM_FIELD_PROPS} {...props} />
   );
 
-  const { start_timestamp, end_timestamp, username } = inputs;
+  const { start_timestamp, end_timestamp, username, model_name } = inputs;
 
   return (
     <Modal
@@ -59,9 +59,11 @@ const SearchModal = ({
           field: 'start_timestamp',
           label: t('起始时间'),
           initValue: start_timestamp,
-          value: start_timestamp,
+          value: start_timestamp || undefined,
           type: 'dateTime',
           name: 'start_timestamp',
+          placeholder: t('全部时间'),
+          showClear: true,
           onChange: (value) => handleInputChange(value, 'start_timestamp'),
         })}
 
@@ -69,31 +71,39 @@ const SearchModal = ({
           field: 'end_timestamp',
           label: t('结束时间'),
           initValue: end_timestamp,
-          value: end_timestamp,
+          value: end_timestamp || undefined,
           type: 'dateTime',
           name: 'end_timestamp',
+          placeholder: t('全部时间'),
+          showClear: true,
           onChange: (value) => handleInputChange(value, 'end_timestamp'),
         })}
 
-        {createFormField(Form.Select, {
-          field: 'data_export_default_time',
-          label: t('时间粒度'),
-          initValue: dataExportDefaultTime,
-          placeholder: t('时间粒度'),
-          name: 'data_export_default_time',
-          optionList: timeOptions,
-          onChange: (value) =>
-            handleInputChange(value, 'data_export_default_time'),
-        })}
-
         {isAdminUser &&
-          createFormField(Form.Input, {
+          createFormField(Form.Select, {
             field: 'username',
             label: t('用户名称'),
             value: username,
-            placeholder: t('可选值'),
+            placeholder: t('所有用户'),
             name: 'username',
-            onChange: (value) => handleInputChange(value, 'username'),
+            optionList: userOptions,
+            filter: true,
+            showClear: true,
+            onChange: (value) => handleInputChange(value || '', 'username'),
+          })}
+
+        {isAdminUser &&
+          createFormField(Form.Select, {
+            field: 'model_name',
+            label: t('模型名称'),
+            value: model_name,
+            placeholder: t('按模型筛选'),
+            name: 'model_name',
+            optionList: enabledModelOptions,
+            filter: true,
+            allowCreate: true,
+            showClear: true,
+            onChange: (value) => handleInputChange(value || '', 'model_name'),
           })}
       </Form>
     </Modal>
