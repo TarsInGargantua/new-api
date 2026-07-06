@@ -55,20 +55,23 @@ func TestAPIRequestLogCaptureRecordsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&model.APIRequestLog{}); err != nil {
+	if err := db.AutoMigrate(&model.APIRequestLog{}, &model.APIRequestLogItem{}); err != nil {
 		t.Fatal(err)
 	}
 
 	oldLogDB := model.LOG_DB
+	oldRequestLogDB := model.REQUEST_LOG_DB
 	oldEnabled := common.APIRequestLogEnabled
 	oldCaptureResponse := common.APIRequestLogCaptureResponse
 	oldRedactSecrets := common.APIRequestLogRedactSecrets
 	model.LOG_DB = db
+	model.REQUEST_LOG_DB = db
 	common.APIRequestLogEnabled = true
 	common.APIRequestLogCaptureResponse = true
 	common.APIRequestLogRedactSecrets = true
 	t.Cleanup(func() {
 		model.LOG_DB = oldLogDB
+		model.REQUEST_LOG_DB = oldRequestLogDB
 		common.APIRequestLogEnabled = oldEnabled
 		common.APIRequestLogCaptureResponse = oldCaptureResponse
 		common.APIRequestLogRedactSecrets = oldRedactSecrets
@@ -77,7 +80,7 @@ func TestAPIRequestLogCaptureRecordsOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-test","api_key":"sk-secret-value"}`))
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-test","api_key":"sk-secret-value","messages":[{"role":"user","content":"hello"}]}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	ctx.Set("id", 2)
 	ctx.Set("username", "alice")
@@ -86,7 +89,7 @@ func TestAPIRequestLogCaptureRecordsOnce(t *testing.T) {
 	ctx.Set("original_model", "gpt-test")
 
 	StartAPIRequestLogCapture(ctx)
-	if _, err := ctx.Writer.Write([]byte(`{"id":"chatcmpl-test"}`)); err != nil {
+	if _, err := ctx.Writer.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"chatcmpl-test"}}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	RecordAPIRequestLog(ctx, nil, nil)
@@ -102,14 +105,22 @@ func TestAPIRequestLogCaptureRecordsOnce(t *testing.T) {
 	if logs[0].Username != "alice" || logs[0].TokenName != "prod-token" || logs[0].ModelName != "gpt-test" {
 		t.Fatalf("unexpected request log metadata: %+v", logs[0])
 	}
-	if !strings.Contains(string(logs[0].RequestBody), "gpt-test") {
-		t.Fatalf("expected request body to be captured, got %s", logs[0].RequestBody)
+	var items []model.APIRequestLogItem
+	if err := db.Where("log_id = ?", logs[0].Id).Order("seq asc").Find(&items).Error; err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(string(logs[0].RequestBody), "sk-secret-value") {
-		t.Fatalf("expected request body secrets to be redacted, got %s", logs[0].RequestBody)
+	if len(items) == 0 {
+		t.Fatal("expected request log items to be captured")
 	}
-	if !strings.Contains(string(logs[0].ResponseBody), "chatcmpl-test") {
-		t.Fatalf("expected response body to be captured, got %s", logs[0].ResponseBody)
+	joined := requestLogItemText(items)
+	if !strings.Contains(joined, "hello") {
+		t.Fatalf("expected request items to include user input, got %s", joined)
+	}
+	if strings.Contains(joined, "sk-secret-value") {
+		t.Fatalf("expected request item secrets to be redacted, got %s", joined)
+	}
+	if !strings.Contains(joined, "chatcmpl-test") {
+		t.Fatalf("expected response items to include response id, got %s", joined)
 	}
 }
 
@@ -118,20 +129,23 @@ func TestRecordAPIRequestLogForConsumeUsesConsumeLogFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&model.APIRequestLog{}, &model.Log{}); err != nil {
+	if err := db.AutoMigrate(&model.APIRequestLog{}, &model.APIRequestLogItem{}, &model.Log{}); err != nil {
 		t.Fatal(err)
 	}
 
 	oldLogDB := model.LOG_DB
+	oldRequestLogDB := model.REQUEST_LOG_DB
 	oldEnabled := common.APIRequestLogEnabled
 	oldCaptureResponse := common.APIRequestLogCaptureResponse
 	oldRedactSecrets := common.APIRequestLogRedactSecrets
 	model.LOG_DB = db
+	model.REQUEST_LOG_DB = db
 	common.APIRequestLogEnabled = true
 	common.APIRequestLogCaptureResponse = true
 	common.APIRequestLogRedactSecrets = true
 	t.Cleanup(func() {
 		model.LOG_DB = oldLogDB
+		model.REQUEST_LOG_DB = oldRequestLogDB
 		common.APIRequestLogEnabled = oldEnabled
 		common.APIRequestLogCaptureResponse = oldCaptureResponse
 		common.APIRequestLogRedactSecrets = oldRedactSecrets
@@ -150,7 +164,7 @@ func TestRecordAPIRequestLogForConsumeUsesConsumeLogFields(t *testing.T) {
 	ctx.Set("group", "context-group")
 	ctx.Set("original_model", "context-model")
 	StartAPIRequestLogCapture(ctx)
-	if _, err := ctx.Writer.Write([]byte(`{"id":"resp-test"}`)); err != nil {
+	if _, err := ctx.Writer.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"resp-test"}]}]}`)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -211,10 +225,23 @@ func TestRecordAPIRequestLogForConsumeUsesConsumeLogFields(t *testing.T) {
 	if logs[0].Group != consumeLog.Group || !logs[0].IsStream {
 		t.Fatalf("unexpected consume log metadata: %+v", logs[0])
 	}
-	if !strings.Contains(string(logs[0].RequestBody), "hello") {
-		t.Fatalf("expected request body to be captured, got %s", logs[0].RequestBody)
+	var items []model.APIRequestLogItem
+	if err := db.Where("log_id = ?", logs[0].Id).Order("seq asc").Find(&items).Error; err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(logs[0].ResponseBody), "resp-test") {
-		t.Fatalf("expected response body to be captured, got %s", logs[0].ResponseBody)
+	joined := requestLogItemText(items)
+	if !strings.Contains(joined, "hello") {
+		t.Fatalf("expected request items to include input, got %s", joined)
 	}
+	if !strings.Contains(joined, "resp-test") {
+		t.Fatalf("expected response items to include response id, got %s", joined)
+	}
+}
+
+func requestLogItemText(items []model.APIRequestLogItem) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, string(item.Content))
+	}
+	return strings.Join(parts, "\n")
 }

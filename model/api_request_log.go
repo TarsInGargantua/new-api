@@ -2,15 +2,38 @@ package model
 
 import (
 	"errors"
-	"strconv"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
+)
+
+const (
+	APIRequestLogSchemaVersion = 1
+
+	APIRequestLogSourceLive     = "live"
+	APIRequestLogSourceLegacy   = "legacy_api_request_logs"
+	APIRequestLogParseOK        = "ok"
+	APIRequestLogParsePartial   = "partial"
+	APIRequestLogParseFailed    = "failed"
+	APIRequestLogPhaseInput     = "input"
+	APIRequestLogPhaseOutput    = "output"
+	APIRequestLogItemMessage    = "message"
+	APIRequestLogItemReasoning  = "reasoning"
+	APIRequestLogItemToolSpec   = "tool_spec"
+	APIRequestLogItemToolCall   = "tool_call"
+	APIRequestLogItemToolResult = "tool_result"
+	APIRequestLogItemError      = "error"
+	APIRequestLogItemRaw        = "raw_unparsed"
 )
 
 type APIRequestLogBody string
@@ -27,9 +50,11 @@ func (APIRequestLogBody) GormDBDataType(db *gorm.DB, field *schema.Field) string
 }
 
 type APIRequestLog struct {
-	Id                    int                 `json:"id" gorm:"index:idx_api_request_logs_created_at_id,priority:1"`
+	Id                    int                 `json:"id" gorm:"primaryKey;index:idx_api_request_logs_created_at_id,priority:1"`
+	Source                string              `json:"source" gorm:"type:varchar(32);index:idx_api_request_logs_source_id,priority:1;default:'live'"`
+	SourceId              int                 `json:"source_id,omitempty" gorm:"index:idx_api_request_logs_source_id,priority:2;default:0"`
 	UsageLogId            int                 `json:"usage_log_id" gorm:"index;default:0"`
-	UserId                int                 `json:"user_id" gorm:"index"`
+	UserId                int                 `json:"user_id" gorm:"index;default:0"`
 	Username              string              `json:"username" gorm:"index;default:''"`
 	TokenId               int                 `json:"token_id" gorm:"index;default:0"`
 	TokenName             string              `json:"token_name" gorm:"index;default:''"`
@@ -39,6 +64,7 @@ type APIRequestLog struct {
 	UpstreamRequestId     string              `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index;default:''"`
 	Method                string              `json:"method" gorm:"type:varchar(16);default:''"`
 	RequestPath           string              `json:"request_path" gorm:"index;default:''"`
+	APIFormat             string              `json:"api_format,omitempty" gorm:"type:varchar(64);index;default:''"`
 	StatusCode            int                 `json:"status_code" gorm:"index;default:0"`
 	IsStream              bool                `json:"is_stream"`
 	ChannelId             int                 `json:"channel_id" gorm:"index;default:0"`
@@ -50,14 +76,44 @@ type APIRequestLog struct {
 	RequestOmittedReason  string              `json:"request_omitted_reason,omitempty" gorm:"default:''"`
 	ResponseOmittedReason string              `json:"response_omitted_reason,omitempty" gorm:"default:''"`
 	Redacted              bool                `json:"redacted"`
-	RequestBody           APIRequestLogBody   `json:"request_body,omitempty"`
-	ResponseBody          APIRequestLogBody   `json:"response_body,omitempty"`
-	Metadata              APIRequestLogBody   `json:"metadata,omitempty"`
+	Quota                 int                 `json:"quota" gorm:"default:0"`
+	PromptTokens          int                 `json:"prompt_tokens" gorm:"default:0"`
+	CompletionTokens      int                 `json:"completion_tokens" gorm:"default:0"`
+	TokenUsed             int                 `json:"token_used" gorm:"default:0"`
+	UseTime               int                 `json:"use_time" gorm:"default:0"`
+	SchemaVersion         int                 `json:"schema_version" gorm:"default:1"`
+	ParseStatus           string              `json:"parse_status" gorm:"type:varchar(16);index;default:'ok'"`
+	ParseError            string              `json:"parse_error,omitempty" gorm:"type:text"`
+	Items                 []APIRequestLogItem `json:"items,omitempty" gorm:"foreignKey:LogId;constraint:OnDelete:CASCADE"`
 	Usage                 *APIRequestLogUsage `json:"usage,omitempty" gorm:"-"`
+
+	// Compatibility-only fields for older controller/frontend code and tests.
+	// They are intentionally excluded from the normalized table.
+	RequestBody  APIRequestLogBody `json:"request_body,omitempty" gorm:"-"`
+	ResponseBody APIRequestLogBody `json:"response_body,omitempty" gorm:"-"`
+	Metadata     APIRequestLogBody `json:"metadata,omitempty" gorm:"-"`
+}
+
+type APIRequestLogItem struct {
+	Id          int               `json:"id" gorm:"primaryKey"`
+	LogId       int               `json:"log_id" gorm:"index:idx_api_request_log_items_log_seq,priority:1;index"`
+	Seq         int               `json:"seq" gorm:"index:idx_api_request_log_items_log_seq,priority:2"`
+	Phase       string            `json:"phase" gorm:"type:varchar(16);index;default:''"`
+	ItemType    string            `json:"item_type" gorm:"type:varchar(32);index;default:''"`
+	Role        string            `json:"role,omitempty" gorm:"type:varchar(32);index;default:''"`
+	ContentType string            `json:"content_type" gorm:"type:varchar(32);default:''"`
+	Content     APIRequestLogBody `json:"content,omitempty"`
+	ToolCallId  string            `json:"tool_call_id,omitempty" gorm:"type:varchar(128);index;default:''"`
+	Name        string            `json:"name,omitempty" gorm:"type:varchar(255);default:''"`
+	Source      string            `json:"source,omitempty" gorm:"type:varchar(128);default:''"`
+	Redacted    bool              `json:"redacted"`
+	Truncated   bool              `json:"truncated"`
 }
 
 type APIRequestLogListItem struct {
 	Id                    int                 `json:"id"`
+	Source                string              `json:"source"`
+	SourceId              int                 `json:"source_id,omitempty"`
 	UsageLogId            int                 `json:"usage_log_id"`
 	UserId                int                 `json:"user_id"`
 	Username              string              `json:"username"`
@@ -69,6 +125,7 @@ type APIRequestLogListItem struct {
 	UpstreamRequestId     string              `json:"upstream_request_id,omitempty"`
 	Method                string              `json:"method"`
 	RequestPath           string              `json:"request_path"`
+	APIFormat             string              `json:"api_format,omitempty"`
 	StatusCode            int                 `json:"status_code"`
 	IsStream              bool                `json:"is_stream"`
 	ChannelId             int                 `json:"channel_id"`
@@ -80,7 +137,10 @@ type APIRequestLogListItem struct {
 	RequestOmittedReason  string              `json:"request_omitted_reason,omitempty"`
 	ResponseOmittedReason string              `json:"response_omitted_reason,omitempty"`
 	Redacted              bool                `json:"redacted"`
-	Usage                 *APIRequestLogUsage `json:"usage,omitempty" gorm:"-"`
+	SchemaVersion         int                 `json:"schema_version"`
+	ParseStatus           string              `json:"parse_status"`
+	ParseError            string              `json:"parse_error,omitempty"`
+	Usage                 *APIRequestLogUsage `json:"usage,omitempty"`
 }
 
 type APIRequestLogQueryParams struct {
@@ -115,8 +175,11 @@ type APIRequestLogStorageStatus struct {
 	LastWriteError        string `json:"last_write_error,omitempty"`
 	LastWriteErrorAt      int64  `json:"last_write_error_at,omitempty"`
 	LogDBDialect          string `json:"log_db_dialect,omitempty"`
+	RequestLogDBDialect   string `json:"request_log_db_dialect,omitempty"`
 	EnsureMigrationFailed bool   `json:"ensure_migration_failed"`
 }
+
+var REQUEST_LOG_DB *gorm.DB
 
 var apiRequestLogEnsureMu sync.Mutex
 var apiRequestLogEnsuredDB *gorm.DB
@@ -124,15 +187,59 @@ var apiRequestLogEnsured bool
 var apiRequestLogLastWriteError string
 var apiRequestLogLastWriteErrorAt int64
 
-const apiRequestLogListSyncMax = 200
-const apiRequestLogCapturePending = "capture_pending"
+func InitRequestLogDB() error {
+	if strings.TrimSpace(os.Getenv("REQUEST_LOG_SQL_DSN")) == "" {
+		REQUEST_LOG_DB = nil
+		if common.APIRequestLogEnabled {
+			return errors.New("REQUEST_LOG_SQL_DSN is required when API_REQUEST_LOG_ENABLED is true")
+		}
+		return nil
+	}
+	db, err := chooseDedicatedRequestLogDB()
+	if err != nil {
+		return err
+	}
+	if common.DebugEnabled {
+		db = db.Debug()
+	}
+	REQUEST_LOG_DB = db
+	if REQUEST_LOG_DB.Dialector != nil && REQUEST_LOG_DB.Dialector.Name() == "mysql" {
+		if err := checkMySQLChineseSupport(REQUEST_LOG_DB); err != nil {
+			return err
+		}
+	}
+	sqlDB, err := REQUEST_LOG_DB.DB()
+	if err != nil {
+		return err
+	}
+	sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("REQUEST_LOG_SQL_MAX_IDLE_CONNS", common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100)))
+	sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("REQUEST_LOG_SQL_MAX_OPEN_CONNS", common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000)))
+	sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("REQUEST_LOG_SQL_MAX_LIFETIME", common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60))))
+	if common.GetEnvOrDefaultBool("REQUEST_LOG_DB_READ_ONLY", false) {
+		return nil
+	}
+	if !common.IsMasterNode {
+		return nil
+	}
+	return EnsureAPIRequestLogTable()
+}
 
-type apiRequestLogHydratedBody struct {
-	body        APIRequestLogBody
-	contentType string
-	size        int64
-	redacted    bool
-	source      string
+func chooseDedicatedRequestLogDB() (*gorm.DB, error) {
+	dsn := resolveConfiguredDSN("REQUEST_LOG_SQL_DSN")
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		return gorm.Open(postgres.New(postgres.Config{
+			DSN:                  dsn,
+			PreferSimpleProtocol: true,
+		}), &gorm.Config{PrepareStmt: true})
+	}
+	if strings.HasPrefix(dsn, "local") {
+		return gorm.Open(sqlite.Open(common.SQLitePath), &gorm.Config{PrepareStmt: true})
+	}
+	return gorm.Open(mysql.Open(ensureMySQLDSNDefaults(dsn)), &gorm.Config{PrepareStmt: true})
+}
+
+func requestLogDB() *gorm.DB {
+	return REQUEST_LOG_DB
 }
 
 func setAPIRequestLogLastWriteError(err error) {
@@ -148,57 +255,138 @@ func setAPIRequestLogLastWriteError(err error) {
 }
 
 func EnsureAPIRequestLogTable() error {
-	if LOG_DB == nil {
-		err := errors.New("log database is not initialized")
+	db := requestLogDB()
+	if db == nil {
+		err := errors.New("request log database is not initialized")
 		setAPIRequestLogLastWriteError(err)
 		return err
 	}
 
 	apiRequestLogEnsureMu.Lock()
-	if apiRequestLogEnsured && apiRequestLogEnsuredDB == LOG_DB {
+	if apiRequestLogEnsured && apiRequestLogEnsuredDB == db {
 		apiRequestLogEnsureMu.Unlock()
 		return nil
 	}
 	apiRequestLogEnsureMu.Unlock()
 
-	if err := LOG_DB.AutoMigrate(&APIRequestLog{}); err != nil {
+	if err := db.AutoMigrate(&APIRequestLog{}, &APIRequestLogItem{}); err != nil {
 		setAPIRequestLogLastWriteError(err)
 		return err
 	}
 	setAPIRequestLogLastWriteError(nil)
 
 	apiRequestLogEnsureMu.Lock()
-	apiRequestLogEnsuredDB = LOG_DB
+	apiRequestLogEnsuredDB = db
 	apiRequestLogEnsured = true
 	apiRequestLogEnsureMu.Unlock()
 	return nil
 }
 
 func CreateAPIRequestLog(log *APIRequestLog) error {
+	if log == nil {
+		return nil
+	}
 	if err := EnsureAPIRequestLogTable(); err != nil {
 		return err
 	}
-	if log != nil && log.UsageLogId > 0 {
-		err := createOrUpdateAPIRequestLogByUsageLogId(log)
-		setAPIRequestLogLastWriteError(err)
-		return err
-	}
-	err := LOG_DB.Create(log).Error
+	normalizeAPIRequestLog(log)
+	err := createOrUpdateAPIRequestLog(log)
 	setAPIRequestLogLastWriteError(err)
 	return err
 }
 
-func createOrUpdateAPIRequestLogByUsageLogId(log *APIRequestLog) error {
-	var existing APIRequestLog
-	err := LOG_DB.Where("usage_log_id = ?", log.UsageLogId).Order("id asc").First(&existing).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return LOG_DB.Create(log).Error
+func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
+	db := requestLogDB()
+	return db.Transaction(func(tx *gorm.DB) error {
+		items := log.Items
+		log.Items = nil
+		replaceItems := len(items) > 0
+
+		var existing APIRequestLog
+		err := findExistingAPIRequestLog(tx, log, &existing)
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			if err := tx.Create(log).Error; err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		default:
+			log.Id = existing.Id
+			if err := tx.Model(&APIRequestLog{}).Where("id = ?", log.Id).Updates(log).Error; err != nil {
+				return err
+			}
+			if replaceItems {
+				if err := tx.Where("log_id = ?", log.Id).Delete(&APIRequestLogItem{}).Error; err != nil {
+					return err
+				}
+			}
+		}
+
+		if !replaceItems {
+			log.Items = nil
+			return nil
+		}
+
+		log.Items = normalizeAPIRequestLogItems(log.Id, items)
+		if len(log.Items) == 0 {
+			return nil
+		}
+		return tx.CreateInBatches(log.Items, 100).Error
+	})
+}
+
+func findExistingAPIRequestLog(tx *gorm.DB, log *APIRequestLog, out *APIRequestLog) error {
+	if log.Source != "" && log.SourceId > 0 {
+		return tx.Where("source = ? AND source_id = ?", log.Source, log.SourceId).Order("id asc").First(out).Error
 	}
-	if err != nil {
-		return err
+	if log.UsageLogId > 0 {
+		return tx.Where("usage_log_id = ?", log.UsageLogId).Order("id asc").First(out).Error
 	}
-	log.Id = existing.Id
-	return LOG_DB.Save(log).Error
+	if log.Id > 0 {
+		return tx.First(out, log.Id).Error
+	}
+	return gorm.ErrRecordNotFound
+}
+
+func normalizeAPIRequestLog(log *APIRequestLog) {
+	if log.Source == "" {
+		log.Source = APIRequestLogSourceLive
+	}
+	if log.CreatedAt == 0 {
+		log.CreatedAt = common.GetTimestamp()
+	}
+	if log.StatusCode == 0 {
+		log.StatusCode = 200
+	}
+	if log.SchemaVersion == 0 {
+		log.SchemaVersion = APIRequestLogSchemaVersion
+	}
+	if log.ParseStatus == "" {
+		log.ParseStatus = APIRequestLogParseOK
+	}
+	if log.TokenUsed == 0 {
+		log.TokenUsed = log.PromptTokens + log.CompletionTokens
+	}
+}
+
+func normalizeAPIRequestLogItems(logId int, items []APIRequestLogItem) []APIRequestLogItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]APIRequestLogItem, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(string(item.Content)) == "" && item.ItemType != APIRequestLogItemError {
+			continue
+		}
+		item.Id = 0
+		item.LogId = logId
+		if item.Seq <= 0 {
+			item.Seq = len(out) + 1
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func CreateAPIRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) error {
@@ -210,21 +398,25 @@ func CreateAPIRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) error {
 
 func apiRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) *APIRequestLog {
 	log := &APIRequestLog{
-		UsageLogId:            usageLog.Id,
-		UserId:                usageLog.UserId,
-		Username:              usageLog.Username,
-		TokenId:               usageLog.TokenId,
-		TokenName:             usageLog.TokenName,
-		ModelName:             usageLog.ModelName,
-		CreatedAt:             usageLog.CreatedAt,
-		RequestId:             usageLog.RequestId,
-		UpstreamRequestId:     usageLog.UpstreamRequestId,
-		StatusCode:            200,
-		IsStream:              usageLog.IsStream,
-		ChannelId:             usageLog.ChannelId,
-		Group:                 usageLog.Group,
-		RequestOmittedReason:  apiRequestLogCapturePending,
-		ResponseOmittedReason: apiRequestLogCapturePending,
+		Source:            APIRequestLogSourceLive,
+		UsageLogId:        usageLog.Id,
+		UserId:            usageLog.UserId,
+		Username:          usageLog.Username,
+		TokenId:           usageLog.TokenId,
+		TokenName:         usageLog.TokenName,
+		ModelName:         usageLog.ModelName,
+		CreatedAt:         usageLog.CreatedAt,
+		RequestId:         usageLog.RequestId,
+		UpstreamRequestId: usageLog.UpstreamRequestId,
+		StatusCode:        200,
+		IsStream:          usageLog.IsStream,
+		ChannelId:         usageLog.ChannelId,
+		Group:             usageLog.Group,
+		Quota:             usageLog.Quota,
+		PromptTokens:      usageLog.PromptTokens,
+		CompletionTokens:  usageLog.CompletionTokens,
+		TokenUsed:         usageLog.PromptTokens + usageLog.CompletionTokens,
+		UseTime:           usageLog.UseTime,
 	}
 	if c != nil {
 		if c.Request != nil {
@@ -239,573 +431,97 @@ func apiRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) *APIRequestLog {
 			log.StatusCode = c.Writer.Status()
 			log.ResponseContentType = c.Writer.Header().Get("Content-Type")
 		}
-		applyRequestBodyFromContext(c, log)
 	}
-	if log.StatusCode == 0 {
-		log.StatusCode = 200
-	}
-	metadata := map[string]interface{}{
-		"usage_log_id":                 usageLog.Id,
-		"synced_from_usage_log":        true,
-		"is_api_request_log_record":    true,
-		"request_omitted_reason":       log.RequestOmittedReason,
-		"response_omitted_reason":      log.ResponseOmittedReason,
-		"request_log_sync_layer":       "model",
-		"request_log_sync_created_at":  common.GetTimestamp(),
-		"request_log_sync_usage_quota": usageLog.Quota,
-	}
-	if log.RequestOmittedReason == "" {
-		metadata["request_body_source"] = "context_body_storage"
-	}
-	if c != nil {
-		metadata["upstream_request_id"] = c.GetString(common.UpstreamRequestIdKey)
-	}
-	metadataJSON, _ := common.Marshal(metadata)
-	log.Metadata = APIRequestLogBody(metadataJSON)
+	normalizeAPIRequestLog(log)
 	return log
 }
 
-func applyRequestBodyFromContext(c *gin.Context, log *APIRequestLog) {
-	if c == nil || c.Request == nil || log == nil {
-		return
-	}
-	contentType := c.Request.Header.Get("Content-Type")
-	log.RequestContentType = contentType
-	if !common.IsAuditableContentType(contentType) {
-		log.RequestSize = c.Request.ContentLength
-		log.RequestOmittedReason = "non_text_content_type"
-		return
-	}
-	storage, err := common.GetBodyStorage(c)
-	if err != nil {
-		return
-	}
-	body, err := storage.Bytes()
-	if err != nil {
-		return
-	}
-	if len(body) == 0 && c.Request.ContentLength != 0 {
-		return
-	}
-	text, redacted := common.AuditBodyToStringWithRedact(body, contentType, common.APIRequestLogRedactSecrets)
-	log.RequestBody = APIRequestLogBody(text)
-	log.RequestSize = int64(len(body))
-	log.RequestOmittedReason = ""
-	log.Redacted = redacted
-}
-
 func GetAPIRequestLogs(params APIRequestLogQueryParams) (logs []*APIRequestLogListItem, total int64, err error) {
-	tx := buildAPIRequestLogsFromUsageLogsQuery(params)
+	if err = EnsureAPIRequestLogTable(); err != nil {
+		return nil, 0, err
+	}
+	tx := buildAPIRequestLogsQuery(params)
 	if err = tx.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
-	var usageLogs []*Log
-	if err = tx.Order("logs.id desc").Limit(params.Num).Offset(params.StartIdx).Find(&usageLogs).Error; err != nil {
+	var requestLogs []*APIRequestLog
+	if err = tx.Order("id desc").Limit(params.Num).Offset(params.StartIdx).Find(&requestLogs).Error; err != nil {
 		return nil, 0, err
 	}
 
-	logs = make([]*APIRequestLogListItem, 0, len(usageLogs))
-	for _, usageLog := range usageLogs {
-		logs = append(logs, apiRequestLogListItemFromUsageLog(usageLog))
+	logs = make([]*APIRequestLogListItem, 0, len(requestLogs))
+	for _, log := range requestLogs {
+		logs = append(logs, apiRequestLogListItemFromLog(log))
 	}
 	return logs, total, nil
 }
 
-func buildAPIRequestLogsFromUsageLogsQuery(params APIRequestLogQueryParams) *gorm.DB {
-	tx := LOG_DB.Model(&Log{}).Where("logs.type = ?", LogTypeConsume)
-	tx = applyLogContainsFilter(tx, "logs.model_name", params.ModelName)
-	tx = applyLogContainsFilter(tx, "logs.username", params.Username)
-	tx = applyLogContainsFilter(tx, "logs.token_name", params.TokenName)
+func buildAPIRequestLogsQuery(params APIRequestLogQueryParams) *gorm.DB {
+	tx := requestLogDB().Model(&APIRequestLog{})
+	tx = applyLogContainsFilter(tx, "model_name", params.ModelName)
+	tx = applyLogContainsFilter(tx, "username", params.Username)
+	tx = applyLogContainsFilter(tx, "token_name", params.TokenName)
 	if params.StartTimestamp != 0 {
-		tx = tx.Where("logs.created_at >= ?", params.StartTimestamp)
+		tx = tx.Where("created_at >= ?", params.StartTimestamp)
 	}
 	if params.EndTimestamp != 0 {
-		tx = tx.Where("logs.created_at <= ?", params.EndTimestamp)
+		tx = tx.Where("created_at <= ?", params.EndTimestamp)
 	}
 	return tx
 }
 
-func apiRequestLogListItemFromUsageLog(log *Log) *APIRequestLogListItem {
+func apiRequestLogListItemFromLog(log *APIRequestLog) *APIRequestLogListItem {
 	if log == nil {
 		return nil
 	}
 	item := &APIRequestLogListItem{
-		Id:                log.Id,
-		UsageLogId:        log.Id,
-		UserId:            log.UserId,
-		Username:          log.Username,
-		TokenId:           log.TokenId,
-		TokenName:         log.TokenName,
-		ModelName:         log.ModelName,
-		CreatedAt:         log.CreatedAt,
-		RequestId:         log.RequestId,
-		UpstreamRequestId: log.UpstreamRequestId,
-		IsStream:          log.IsStream,
-		ChannelId:         log.ChannelId,
-		Group:             log.Group,
-		Usage:             apiRequestUsageFromLog(log, false),
+		Id:                    log.Id,
+		Source:                log.Source,
+		SourceId:              log.SourceId,
+		UsageLogId:            log.UsageLogId,
+		UserId:                log.UserId,
+		Username:              log.Username,
+		TokenId:               log.TokenId,
+		TokenName:             log.TokenName,
+		ModelName:             log.ModelName,
+		CreatedAt:             log.CreatedAt,
+		RequestId:             log.RequestId,
+		UpstreamRequestId:     log.UpstreamRequestId,
+		Method:                log.Method,
+		RequestPath:           log.RequestPath,
+		APIFormat:             log.APIFormat,
+		StatusCode:            log.StatusCode,
+		IsStream:              log.IsStream,
+		ChannelId:             log.ChannelId,
+		Group:                 log.Group,
+		RequestContentType:    log.RequestContentType,
+		ResponseContentType:   log.ResponseContentType,
+		RequestSize:           log.RequestSize,
+		ResponseSize:          log.ResponseSize,
+		RequestOmittedReason:  log.RequestOmittedReason,
+		ResponseOmittedReason: log.ResponseOmittedReason,
+		Redacted:              log.Redacted,
+		SchemaVersion:         log.SchemaVersion,
+		ParseStatus:           log.ParseStatus,
+		ParseError:            log.ParseError,
+		Usage:                 apiRequestUsageFromRequestLog(log),
 	}
-	applyAPIRequestLogListBodiesFromUsage(item, log)
 	return item
 }
 
-func applyAPIRequestLogListBodiesFromUsage(item *APIRequestLogListItem, log *Log) {
-	if item == nil || log == nil || strings.TrimSpace(log.Other) == "" {
-		return
-	}
-	usage := apiRequestUsageFromLog(log, true)
-	other := apiRequestLogUsageOtherMap(usage)
-	if len(other) == 0 {
-		return
-	}
-	if body := apiRequestBodyFromUsageMetadata(other); body != nil {
-		item.RequestContentType = body.contentType
-		item.RequestSize = body.size
-		item.Redacted = item.Redacted || body.redacted
-	}
-	if body := apiResponseBodyFromUsageMetadata(other); body != nil {
-		item.ResponseContentType = body.contentType
-		item.ResponseSize = body.size
-		item.Redacted = item.Redacted || body.redacted
-	}
-}
-
-func isUnfilteredAPIRequestLogQuery(params APIRequestLogQueryParams) bool {
-	return params.StartTimestamp == 0 &&
-		params.EndTimestamp == 0 &&
-		params.ModelName == "" &&
-		params.Username == "" &&
-		params.TokenName == ""
-}
-
-func getAPIRequestLogFastTotal() (int64, error) {
-	var last APIRequestLog
-	result := LOG_DB.Select("id").Order("id desc").Limit(1).Find(&last)
-	if result.Error != nil {
-		return 0, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return 0, nil
-	}
-	return int64(last.Id), nil
-}
-
-func requestLogSyncLimit(params APIRequestLogQueryParams) int {
-	limit := params.StartIdx + params.Num
-	if limit < params.Num {
-		limit = params.Num
-	}
-	if limit < 20 {
-		limit = 20
-	}
-	if limit > apiRequestLogListSyncMax {
-		return apiRequestLogListSyncMax
-	}
-	return limit
-}
-
-func SyncMissingAPIRequestLogsFromUsageLogs(params APIRequestLogQueryParams, limit int) error {
-	if !common.APIRequestLogEnabled {
-		return nil
-	}
-	if err := EnsureAPIRequestLogTable(); err != nil {
-		return err
-	}
-	if limit <= 0 {
-		limit = 1000
-	}
-	tx := LOG_DB.Model(&Log{}).Where("type = ?", LogTypeConsume)
-	tx = applyLogContainsFilter(tx, "logs.model_name", params.ModelName)
-	tx = applyLogContainsFilter(tx, "logs.username", params.Username)
-	tx = applyLogContainsFilter(tx, "logs.token_name", params.TokenName)
-	if params.StartTimestamp != 0 {
-		tx = tx.Where("logs.created_at >= ?", params.StartTimestamp)
-	}
-	if params.EndTimestamp != 0 {
-		tx = tx.Where("logs.created_at <= ?", params.EndTimestamp)
-	}
-
-	var usageLogs []*Log
-	if err := tx.Order("id desc").Limit(limit).Find(&usageLogs).Error; err != nil {
-		return err
-	}
-	if len(usageLogs) == 0 {
-		return nil
-	}
-
-	usageLogIds := make([]int, 0, len(usageLogs))
-	for _, usageLog := range usageLogs {
-		if usageLog != nil && usageLog.Id > 0 {
-			usageLogIds = append(usageLogIds, usageLog.Id)
-		}
-	}
-	if len(usageLogIds) == 0 {
-		return nil
-	}
-
-	var existingLogs []*APIRequestLog
-	if err := LOG_DB.Select("usage_log_id").Where("usage_log_id IN ?", usageLogIds).Find(&existingLogs).Error; err != nil {
-		return err
-	}
-	existing := make(map[int]bool, len(existingLogs))
-	for _, log := range existingLogs {
-		if log != nil && log.UsageLogId > 0 {
-			existing[log.UsageLogId] = true
-		}
-	}
-	requestLogs := make([]*APIRequestLog, 0, len(usageLogs))
-	for _, usageLog := range usageLogs {
-		if usageLog == nil || usageLog.Id <= 0 || existing[usageLog.Id] {
-			continue
-		}
-		requestLogs = append(requestLogs, apiRequestLogFromConsumeLog(nil, usageLog))
-		existing[usageLog.Id] = true
-	}
-	if len(requestLogs) == 0 {
-		return nil
-	}
-	err := LOG_DB.CreateInBatches(requestLogs, 100).Error
-	setAPIRequestLogLastWriteError(err)
-	return err
-}
-
 func GetAPIRequestLogById(id int) (*APIRequestLog, error) {
-	var usageLog Log
-	if err := LOG_DB.Where("type = ?", LogTypeConsume).First(&usageLog, id).Error; err != nil {
+	if err := EnsureAPIRequestLogTable(); err != nil {
 		return nil, err
 	}
-	log := apiRequestLogFromUsageLog(&usageLog, true)
+	var log APIRequestLog
+	if err := requestLogDB().Preload("Items", func(db *gorm.DB) *gorm.DB {
+		return db.Order("seq asc, id asc")
+	}).First(&log, id).Error; err != nil {
+		return nil, err
+	}
+	log.Usage = apiRequestUsageFromRequestLog(&log)
 	return &log, nil
-}
-
-func apiRequestLogFromUsageLog(usageLog *Log, includeUsageBody bool) APIRequestLog {
-	if usageLog == nil {
-		return APIRequestLog{}
-	}
-	log := APIRequestLog{
-		Id:                usageLog.Id,
-		UsageLogId:        usageLog.Id,
-		UserId:            usageLog.UserId,
-		Username:          usageLog.Username,
-		TokenId:           usageLog.TokenId,
-		TokenName:         usageLog.TokenName,
-		ModelName:         usageLog.ModelName,
-		CreatedAt:         usageLog.CreatedAt,
-		RequestId:         usageLog.RequestId,
-		UpstreamRequestId: usageLog.UpstreamRequestId,
-		IsStream:          usageLog.IsStream,
-		ChannelId:         usageLog.ChannelId,
-		Group:             usageLog.Group,
-		Metadata:          APIRequestLogBody(usageLog.Other),
-		Usage:             apiRequestUsageFromLog(usageLog, includeUsageBody),
-	}
-	applyAPIRequestLogBodiesFromUsage(&log, log.Usage)
-	return log
-}
-
-func applyAPIRequestLogBodiesFromUsage(log *APIRequestLog, usage *APIRequestLogUsage) {
-	if log == nil || usage == nil {
-		return
-	}
-
-	other := apiRequestLogUsageOtherMap(usage)
-	if len(other) == 0 {
-		return
-	}
-
-	metadata := apiRequestLogMetadataMap(log.Metadata)
-	changed := false
-	if body := apiRequestBodyFromUsageMetadata(other); body != nil {
-		log.RequestBody = body.body
-		log.RequestContentType = firstNonEmptyString(log.RequestContentType, body.contentType)
-		log.RequestSize = body.size
-		log.RequestOmittedReason = ""
-		log.Redacted = log.Redacted || body.redacted
-		metadata["request_body_source"] = body.source
-		changed = true
-	}
-	if body := apiResponseBodyFromUsageMetadata(other); body != nil {
-		log.ResponseBody = body.body
-		log.ResponseContentType = firstNonEmptyString(log.ResponseContentType, body.contentType)
-		log.ResponseSize = body.size
-		log.ResponseOmittedReason = ""
-		log.Redacted = log.Redacted || body.redacted
-		metadata["response_body_source"] = body.source
-		changed = true
-	}
-	if !changed {
-		return
-	}
-	if metadataJSON, err := common.Marshal(metadata); err == nil {
-		log.Metadata = APIRequestLogBody(metadataJSON)
-	}
-}
-
-func hydrateAPIRequestLogBodiesFromUsage(log *APIRequestLog, usage *APIRequestLogUsage) error {
-	if log == nil || usage == nil {
-		return nil
-	}
-
-	other := apiRequestLogUsageOtherMap(usage)
-	if len(other) == 0 {
-		return nil
-	}
-
-	updates := make(map[string]interface{})
-	metadata := apiRequestLogMetadataMap(log.Metadata)
-	now := common.GetTimestamp()
-
-	if shouldHydrateAPIRequestLogBody(log.RequestBody, log.RequestOmittedReason) {
-		if body := apiRequestBodyFromUsageMetadata(other); body != nil {
-			log.RequestBody = body.body
-			log.RequestContentType = firstNonEmptyString(log.RequestContentType, body.contentType)
-			log.RequestSize = body.size
-			log.RequestOmittedReason = ""
-			log.Redacted = log.Redacted || body.redacted
-			updates["request_body"] = log.RequestBody
-			updates["request_content_type"] = log.RequestContentType
-			updates["request_size"] = log.RequestSize
-			updates["request_omitted_reason"] = log.RequestOmittedReason
-			updates["redacted"] = log.Redacted
-			metadata["request_body_source"] = body.source
-			metadata["request_body_hydrated_at"] = now
-		}
-	}
-
-	if shouldHydrateAPIRequestLogBody(log.ResponseBody, log.ResponseOmittedReason) {
-		if body := apiResponseBodyFromUsageMetadata(other); body != nil {
-			log.ResponseBody = body.body
-			log.ResponseContentType = firstNonEmptyString(log.ResponseContentType, body.contentType)
-			log.ResponseSize = body.size
-			log.ResponseOmittedReason = ""
-			log.Redacted = log.Redacted || body.redacted
-			updates["response_body"] = log.ResponseBody
-			updates["response_content_type"] = log.ResponseContentType
-			updates["response_size"] = log.ResponseSize
-			updates["response_omitted_reason"] = log.ResponseOmittedReason
-			updates["redacted"] = log.Redacted
-			metadata["response_body_source"] = body.source
-			metadata["response_body_hydrated_at"] = now
-		}
-	}
-
-	if len(updates) == 0 {
-		return nil
-	}
-	metadataJSON, err := common.Marshal(metadata)
-	if err == nil {
-		log.Metadata = APIRequestLogBody(metadataJSON)
-		updates["metadata"] = log.Metadata
-	}
-	return LOG_DB.Model(&APIRequestLog{}).Where("id = ?", log.Id).Updates(updates).Error
-}
-
-func shouldHydrateAPIRequestLogBody(body APIRequestLogBody, omittedReason string) bool {
-	return strings.TrimSpace(string(body)) == "" && omittedReason == apiRequestLogCapturePending
-}
-
-func apiRequestLogUsageOtherMap(usage *APIRequestLogUsage) map[string]interface{} {
-	if usage == nil || strings.TrimSpace(usage.Other) == "" {
-		return nil
-	}
-	var other map[string]interface{}
-	if err := common.UnmarshalJsonStr(usage.Other, &other); err != nil {
-		return nil
-	}
-	return other
-}
-
-func apiRequestLogMetadataMap(metadata APIRequestLogBody) map[string]interface{} {
-	out := make(map[string]interface{})
-	if strings.TrimSpace(string(metadata)) == "" {
-		return out
-	}
-	if err := common.UnmarshalJsonStr(string(metadata), &out); err != nil {
-		return make(map[string]interface{})
-	}
-	if out == nil {
-		return make(map[string]interface{})
-	}
-	return out
-}
-
-func apiRequestBodyFromUsageMetadata(other map[string]interface{}) *apiRequestLogHydratedBody {
-	messageCapture := mapFromInterface(other["message_capture"])
-	if messageCapture != nil {
-		if raw := hydratedBodyFromCapturedBodyMap(mapFromInterface(messageCapture["raw_request"]), "usage_log.message_capture.raw_request"); raw != nil {
-			return raw
-		}
-	}
-	if audit := mapFromInterface(other["audit_content"]); audit != nil {
-		if raw := hydratedBodyFromCapturedBodyMap(mapFromInterface(audit["request"]), "usage_log.audit_content.request"); raw != nil {
-			return raw
-		}
-	}
-	if messageCapture != nil {
-		return hydratedRequestBodyFromMessageCapture(messageCapture)
-	}
-	return nil
-}
-
-func apiResponseBodyFromUsageMetadata(other map[string]interface{}) *apiRequestLogHydratedBody {
-	messageCapture := mapFromInterface(other["message_capture"])
-	if messageCapture != nil {
-		if raw := hydratedBodyFromCapturedBodyMap(mapFromInterface(messageCapture["raw_response"]), "usage_log.message_capture.raw_response"); raw != nil {
-			return raw
-		}
-	}
-	if audit := mapFromInterface(other["audit_content"]); audit != nil {
-		if raw := hydratedBodyFromCapturedBodyMap(mapFromInterface(audit["response"]), "usage_log.audit_content.response"); raw != nil {
-			return raw
-		}
-	}
-	if messageCapture != nil {
-		return hydratedResponseBodyFromMessageCapture(messageCapture)
-	}
-	return nil
-}
-
-func hydratedBodyFromCapturedBodyMap(bodyMap map[string]interface{}, source string) *apiRequestLogHydratedBody {
-	if bodyMap == nil {
-		return nil
-	}
-	body := common.Interface2String(bodyMap["body"])
-	if strings.TrimSpace(body) == "" {
-		return nil
-	}
-	size := int64(interfaceToInt(bodyMap["size"]))
-	if size <= 0 {
-		size = int64(len(body))
-	}
-	return &apiRequestLogHydratedBody{
-		body:        APIRequestLogBody(body),
-		contentType: common.Interface2String(bodyMap["content_type"]),
-		size:        size,
-		redacted:    interfaceToBool(bodyMap["redacted"]),
-		source:      source,
-	}
-}
-
-func hydratedRequestBodyFromMessageCapture(capture map[string]interface{}) *apiRequestLogHydratedBody {
-	payload := make(map[string]interface{})
-	copyIfPresent(payload, capture, "conversation_id")
-	copyIfPresent(payload, capture, "question")
-	copyIfPresent(payload, capture, "messages")
-	copyIfPresent(payload, capture, "meta")
-	if len(payload) == 0 {
-		return nil
-	}
-	encoded, err := common.Marshal(payload)
-	if err != nil {
-		return nil
-	}
-	return &apiRequestLogHydratedBody{
-		body:        APIRequestLogBody(encoded),
-		contentType: "application/json",
-		size:        int64(len(encoded)),
-		source:      "usage_log.message_capture",
-	}
-}
-
-func hydratedResponseBodyFromMessageCapture(capture map[string]interface{}) *apiRequestLogHydratedBody {
-	payload := make(map[string]interface{})
-	copyIfPresent(payload, capture, "conversation_id")
-	copyIfPresent(payload, capture, "answer")
-	copyIfPresent(payload, capture, "model_reasoning")
-	copyIfPresent(payload, capture, "meta")
-	if len(payload) == 0 {
-		return nil
-	}
-	encoded, err := common.Marshal(payload)
-	if err != nil {
-		return nil
-	}
-	return &apiRequestLogHydratedBody{
-		body:        APIRequestLogBody(encoded),
-		contentType: "application/json",
-		size:        int64(len(encoded)),
-		source:      "usage_log.message_capture",
-	}
-}
-
-func copyIfPresent(dst map[string]interface{}, src map[string]interface{}, key string) {
-	if dst == nil || src == nil {
-		return
-	}
-	value, exists := src[key]
-	if !exists || value == nil {
-		return
-	}
-	switch v := value.(type) {
-	case string:
-		if strings.TrimSpace(v) != "" {
-			dst[key] = v
-		}
-	case []interface{}:
-		if len(v) > 0 {
-			dst[key] = v
-		}
-	case map[string]interface{}:
-		if len(v) > 0 {
-			dst[key] = v
-		}
-	default:
-		dst[key] = value
-	}
-}
-
-func mapFromInterface(value interface{}) map[string]interface{} {
-	if value == nil {
-		return nil
-	}
-	if m, ok := value.(map[string]interface{}); ok {
-		return m
-	}
-	return nil
-}
-
-func interfaceToInt(value interface{}) int {
-	switch v := value.(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case int32:
-		return int(v)
-	case float64:
-		return int(v)
-	case float32:
-		return int(v)
-	case string:
-		i, err := strconv.Atoi(v)
-		if err == nil {
-			return i
-		}
-		return 0
-	default:
-		return 0
-	}
-}
-
-func interfaceToBool(value interface{}) bool {
-	switch v := value.(type) {
-	case bool:
-		return v
-	case string:
-		return strings.EqualFold(v, "true")
-	default:
-		return false
-	}
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func GetAPIRequestLogUsage(requestId string, upstreamRequestId string, includeBody bool) (*APIRequestLogUsage, error) {
@@ -846,98 +562,6 @@ func getAPIRequestLogUsage(usageLogId int, requestId string, upstreamRequestId s
 	return apiRequestUsageFromLog(logs[0], includeBody), nil
 }
 
-func attachAPIRequestLogListUsage(logs []*APIRequestLogListItem) error {
-	if len(logs) == 0 {
-		return nil
-	}
-	usageLogIds := make([]int, 0, len(logs))
-	requestIds := make([]string, 0, len(logs))
-	upstreamRequestIds := make([]string, 0, len(logs))
-	for _, item := range logs {
-		if item == nil {
-			continue
-		}
-		if item.UsageLogId > 0 {
-			usageLogIds = append(usageLogIds, item.UsageLogId)
-			continue
-		}
-		if item.RequestId != "" {
-			requestIds = append(requestIds, item.RequestId)
-		}
-		if item.UpstreamRequestId != "" {
-			upstreamRequestIds = append(upstreamRequestIds, item.UpstreamRequestId)
-		}
-	}
-	if len(usageLogIds) == 0 && len(requestIds) == 0 && len(upstreamRequestIds) == 0 {
-		return nil
-	}
-
-	var usageLogs []*Log
-	if len(usageLogIds) > 0 {
-		var logsById []*Log
-		if err := LOG_DB.Model(&Log{}).Where("type = ? AND id IN ?", LogTypeConsume, usageLogIds).Find(&logsById).Error; err != nil {
-			return err
-		}
-		usageLogs = append(usageLogs, logsById...)
-	}
-	if len(requestIds) > 0 || len(upstreamRequestIds) > 0 {
-		var logsByRequest []*Log
-		tx := LOG_DB.Model(&Log{}).Where("type = ?", LogTypeConsume)
-		if len(requestIds) > 0 && len(upstreamRequestIds) > 0 {
-			tx = tx.Where("(request_id IN ? OR upstream_request_id IN ?)", requestIds, upstreamRequestIds)
-		} else if len(requestIds) > 0 {
-			tx = tx.Where("request_id IN ?", requestIds)
-		} else {
-			tx = tx.Where("upstream_request_id IN ?", upstreamRequestIds)
-		}
-		if err := tx.Order("id desc").Find(&logsByRequest).Error; err != nil {
-			return err
-		}
-		usageLogs = append(usageLogs, logsByRequest...)
-	}
-
-	byLogId := make(map[int]*APIRequestLogUsage)
-	byRequestId := make(map[string]*APIRequestLogUsage)
-	byUpstreamRequestId := make(map[string]*APIRequestLogUsage)
-	for _, usageLog := range usageLogs {
-		usage := apiRequestUsageFromLog(usageLog, false)
-		if usageLog.Id > 0 {
-			byLogId[usageLog.Id] = usage
-		}
-		if usageLog.RequestId != "" {
-			if _, exists := byRequestId[usageLog.RequestId]; !exists {
-				byRequestId[usageLog.RequestId] = usage
-			}
-		}
-		if usageLog.UpstreamRequestId != "" {
-			if _, exists := byUpstreamRequestId[usageLog.UpstreamRequestId]; !exists {
-				byUpstreamRequestId[usageLog.UpstreamRequestId] = usage
-			}
-		}
-	}
-
-	for _, item := range logs {
-		if item == nil {
-			continue
-		}
-		if item.UsageLogId > 0 {
-			item.Usage = byLogId[item.UsageLogId]
-			continue
-		}
-		if item.RequestId != "" {
-			if usage, exists := byRequestId[item.RequestId]; exists {
-				item.Usage = usage
-				continue
-			}
-		}
-		if item.UpstreamRequestId != "" {
-			item.Usage = byUpstreamRequestId[item.UpstreamRequestId]
-		}
-	}
-
-	return nil
-}
-
 func apiRequestUsageFromLog(log *Log, includeBody bool) *APIRequestLogUsage {
 	if log == nil {
 		return nil
@@ -960,29 +584,49 @@ func apiRequestUsageFromLog(log *Log, includeBody bool) *APIRequestLogUsage {
 	return usage
 }
 
+func apiRequestUsageFromRequestLog(log *APIRequestLog) *APIRequestLogUsage {
+	if log == nil {
+		return nil
+	}
+	return &APIRequestLogUsage{
+		LogId:            log.UsageLogId,
+		CreatedAt:        log.CreatedAt,
+		ModelName:        log.ModelName,
+		TokenName:        log.TokenName,
+		Quota:            log.Quota,
+		PromptTokens:     log.PromptTokens,
+		CompletionTokens: log.CompletionTokens,
+		TokenUsed:        log.TokenUsed,
+		UseTime:          log.UseTime,
+	}
+}
+
 func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 	status := &APIRequestLogStorageStatus{}
-
-	if LOG_DB == nil {
-		status.LastWriteError = "log database is not initialized"
+	db := requestLogDB()
+	if db == nil {
+		status.LastWriteError = "request log database is not initialized"
 		status.EnsureMigrationFailed = true
 		return status, nil
 	}
-	if LOG_DB.Dialector != nil {
+	if LOG_DB != nil && LOG_DB.Dialector != nil {
 		status.LogDBDialect = LOG_DB.Dialector.Name()
 	}
+	if db.Dialector != nil {
+		status.RequestLogDBDialect = db.Dialector.Name()
+	}
 
-	status.HasTable = LOG_DB.Migrator().HasTable(&Log{})
+	status.HasTable = db.Migrator().HasTable(&APIRequestLog{})
 	if !status.HasTable {
 		return status, nil
 	}
 
-	if err := LOG_DB.Model(&Log{}).Where("type = ?", LogTypeConsume).Count(&status.Count).Error; err != nil {
+	if err := db.Model(&APIRequestLog{}).Count(&status.Count).Error; err != nil {
 		return status, err
 	}
 
-	var last Log
-	result := LOG_DB.Model(&Log{}).Select("created_at, request_id").Where("type = ?", LogTypeConsume).Order("id desc").Limit(1).Find(&last)
+	var last APIRequestLog
+	result := db.Model(&APIRequestLog{}).Select("created_at, request_id").Order("id desc").Limit(1).Find(&last)
 	if result.Error != nil {
 		return status, result.Error
 	}

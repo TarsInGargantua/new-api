@@ -4514,6 +4514,8 @@
     "Usage Content": "Nội dung nhật ký sử dụng",
     "Usage Metadata": "Siêu dữ liệu sử dụng",
     "No matching usage log": "Không có nhật ký sử dụng phù hợp",
+    "Training Items": "Mục huấn luyện",
+    "No training items parsed": "Chưa phân tích được mục huấn luyện",
     "Request log rows": "Số dòng nhật ký yêu cầu",
     "Request log table missing": "Thiếu bảng nhật ký yêu cầu",
     "Capture response": "Ghi lại phản hồi",

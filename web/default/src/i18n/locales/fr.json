@@ -4514,6 +4514,8 @@
     "Usage Content": "Contenu du journal d’utilisation",
     "Usage Metadata": "Métadonnées d’utilisation",
     "No matching usage log": "Aucun journal d’utilisation correspondant",
+    "Training Items": "Éléments d’entraînement",
+    "No training items parsed": "Aucun élément d’entraînement analysé",
     "Request log rows": "Lignes du journal de requêtes",
     "Request log table missing": "Table des journaux de requêtes absente",
     "Capture response": "Capturer la réponse",

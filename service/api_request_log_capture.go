@@ -92,14 +92,10 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 
 	requestLog := buildRequestLogBody(c)
 	responseLog := buildResponseLogBody(c)
-	metadata := buildAPIRequestLogMetadata(c, relayInfo, relayErr, requestLog, responseLog)
-	if usageLog != nil {
-		metadata["usage_log_id"] = usageLog.Id
-		metadata["usage_log_created_at"] = usageLog.CreatedAt
-	}
-	metadataJSON, _ := common.Marshal(metadata)
+	itemBuild := buildAPIRequestLogItems(c, relayInfo, requestLog, responseLog)
 
 	log := &model.APIRequestLog{
+		Source:                model.APIRequestLogSourceLive,
 		UserId:                c.GetInt("id"),
 		Username:              c.GetString("username"),
 		TokenId:               c.GetInt("token_id"),
@@ -110,6 +106,7 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 		UpstreamRequestId:     c.GetString(common.UpstreamRequestIdKey),
 		Method:                c.Request.Method,
 		RequestPath:           requestPath(c, relayInfo),
+		APIFormat:             itemBuild.apiFormat,
 		StatusCode:            c.Writer.Status(),
 		IsStream:              common.GetContextKeyBool(c, constant.ContextKeyIsStream) || (relayInfo != nil && relayInfo.IsStream),
 		ChannelId:             c.GetInt("channel_id"),
@@ -121,9 +118,10 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 		RequestOmittedReason:  requestLog.omittedReason,
 		ResponseOmittedReason: responseLog.omittedReason,
 		Redacted:              requestLog.redacted || responseLog.redacted,
-		RequestBody:           model.APIRequestLogBody(requestLog.body),
-		ResponseBody:          model.APIRequestLogBody(responseLog.body),
-		Metadata:              model.APIRequestLogBody(metadataJSON),
+		SchemaVersion:         model.APIRequestLogSchemaVersion,
+		ParseStatus:           itemBuild.parseStatus,
+		ParseError:            itemBuild.parseError,
+		Items:                 itemBuild.items,
 	}
 	applyUsageLogToAPIRequestLog(log, usageLog)
 	if log.StatusCode == 0 {
@@ -293,6 +291,11 @@ func applyUsageLogToAPIRequestLog(log *model.APIRequestLog, usageLog *model.Log)
 	log.IsStream = usageLog.IsStream
 	log.ChannelId = usageLog.ChannelId
 	log.Group = usageLog.Group
+	log.Quota = usageLog.Quota
+	log.PromptTokens = usageLog.PromptTokens
+	log.CompletionTokens = usageLog.CompletionTokens
+	log.TokenUsed = usageLog.PromptTokens + usageLog.CompletionTokens
+	log.UseTime = usageLog.UseTime
 }
 
 func relayModelName(relayInfo *relaycommon.RelayInfo) string {

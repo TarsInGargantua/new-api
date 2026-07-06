@@ -21,20 +21,23 @@ func setupAPIRequestLogMiddlewareTest(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&model.APIRequestLog{}); err != nil {
+	if err := db.AutoMigrate(&model.APIRequestLog{}, &model.APIRequestLogItem{}); err != nil {
 		t.Fatal(err)
 	}
 
 	oldLogDB := model.LOG_DB
+	oldRequestLogDB := model.REQUEST_LOG_DB
 	oldEnabled := common.APIRequestLogEnabled
 	oldCaptureResponse := common.APIRequestLogCaptureResponse
 	oldRedactSecrets := common.APIRequestLogRedactSecrets
 	model.LOG_DB = db
+	model.REQUEST_LOG_DB = db
 	common.APIRequestLogEnabled = true
 	common.APIRequestLogCaptureResponse = true
 	common.APIRequestLogRedactSecrets = true
 	t.Cleanup(func() {
 		model.LOG_DB = oldLogDB
+		model.REQUEST_LOG_DB = oldRequestLogDB
 		common.APIRequestLogEnabled = oldEnabled
 		common.APIRequestLogCaptureResponse = oldCaptureResponse
 		common.APIRequestLogRedactSecrets = oldRedactSecrets
@@ -54,7 +57,7 @@ func TestAPIRequestLogGlobalCaptureRecordsTokenRelayRequest(t *testing.T) {
 		c.Set("token_id", 9)
 		c.Set("token_name", "prod-token")
 		c.Set("original_model", "gpt-5.5")
-		c.JSON(http.StatusOK, gin.H{"id": "chatcmpl-test"})
+		c.JSON(http.StatusOK, gin.H{"choices": []gin.H{{"message": gin.H{"role": "assistant", "content": "chatcmpl-test"}}}})
 	})
 
 	body := bytes.NewBufferString(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`)
@@ -78,11 +81,16 @@ func TestAPIRequestLogGlobalCaptureRecordsTokenRelayRequest(t *testing.T) {
 	if logs[0].RequestPath != "/v1/chat/completions" || logs[0].ModelName != "gpt-5.5" {
 		t.Fatalf("unexpected request log: %+v", logs[0])
 	}
-	if !strings.Contains(string(logs[0].RequestBody), "hello") {
-		t.Fatalf("expected request body to be captured, got %s", logs[0].RequestBody)
+	var items []model.APIRequestLogItem
+	if err := db.Where("log_id = ?", logs[0].Id).Order("seq asc").Find(&items).Error; err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(logs[0].ResponseBody), "chatcmpl-test") {
-		t.Fatalf("expected response body to be captured, got %s", logs[0].ResponseBody)
+	joined := requestLogItemText(items)
+	if !strings.Contains(joined, "hello") {
+		t.Fatalf("expected request items to be captured, got %s", joined)
+	}
+	if !strings.Contains(joined, "chatcmpl-test") {
+		t.Fatalf("expected response items to be captured, got %s", joined)
 	}
 }
 
@@ -119,9 +127,21 @@ func TestAPIRequestLogGlobalCaptureRecordsModelList(t *testing.T) {
 	if logs[0].RequestPath != "/v1/models" || logs[0].TokenName != "sdk-token" {
 		t.Fatalf("unexpected model list request log: %+v", logs[0])
 	}
-	if !strings.Contains(string(logs[0].ResponseBody), "gpt-test") {
-		t.Fatalf("expected model list response to be captured, got %s", logs[0].ResponseBody)
+	var items []model.APIRequestLogItem
+	if err := db.Where("log_id = ?", logs[0].Id).Order("seq asc").Find(&items).Error; err != nil {
+		t.Fatal(err)
 	}
+	if len(items) != 0 {
+		t.Fatalf("model list responses are not training data, got %+v", items)
+	}
+}
+
+func requestLogItemText(items []model.APIRequestLogItem) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, string(item.Content))
+	}
+	return strings.Join(parts, "\n")
 }
 
 func TestAPIRequestLogGlobalCaptureKeepsRootAliasOriginalPath(t *testing.T) {

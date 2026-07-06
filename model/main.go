@@ -257,7 +257,6 @@ func migrateDB() error {
 		&Redemption{},
 		&Ability{},
 		&Log{},
-		&APIRequestLog{},
 		&Midjourney{},
 		&TopUp{},
 		&QuotaData{},
@@ -307,7 +306,6 @@ func migrateDBFast() error {
 		{&Redemption{}, "Redemption"},
 		{&Ability{}, "Ability"},
 		{&Log{}, "Log"},
-		{&APIRequestLog{}, "APIRequestLog"},
 		{&Midjourney{}, "Midjourney"},
 		{&TopUp{}, "TopUp"},
 		{&QuotaData{}, "QuotaData"},
@@ -364,7 +362,7 @@ func migrateDBFast() error {
 
 func migrateLOGDB() error {
 	var err error
-	if err = LOG_DB.AutoMigrate(&Log{}, &APIRequestLog{}); err != nil {
+	if err = LOG_DB.AutoMigrate(&Log{}); err != nil {
 		return err
 	}
 	return nil
@@ -569,6 +567,12 @@ func closeDB(db *gorm.DB) error {
 }
 
 func CloseDB() error {
+	if REQUEST_LOG_DB != nil && REQUEST_LOG_DB != DB && REQUEST_LOG_DB != LOG_DB {
+		err := closeDB(REQUEST_LOG_DB)
+		if err != nil {
+			return err
+		}
+	}
 	if LOG_DB != DB {
 		err := closeDB(LOG_DB)
 		if err != nil {

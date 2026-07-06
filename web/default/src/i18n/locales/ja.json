@@ -4514,6 +4514,8 @@
     "Usage Content": "使用ログ内容",
     "Usage Metadata": "使用ログメタデータ",
     "No matching usage log": "一致する使用ログがありません",
+    "Training Items": "学習項目",
+    "No training items parsed": "解析された学習項目はありません",
     "Request log rows": "リクエストログ行数",
     "Request log table missing": "リクエストログテーブルがありません",
     "Capture response": "レスポンスを記録",

@@ -86,13 +86,30 @@ type APIRequestLogListItem = {
   request_omitted_reason?: string
   response_omitted_reason?: string
   redacted: boolean
+  schema_version?: number
+  parse_status?: string
+  parse_error?: string
   usage?: APIRequestLogUsage
 }
 
 type APIRequestLogDetail = APIRequestLogListItem & {
-  request_body?: string
-  response_body?: string
-  metadata?: string
+  items?: APIRequestLogItem[]
+}
+
+type APIRequestLogItem = {
+  id: number
+  log_id: number
+  seq: number
+  phase: 'input' | 'output' | string
+  item_type: string
+  role?: string
+  content_type: string
+  content?: string
+  tool_call_id?: string
+  name?: string
+  source?: string
+  redacted?: boolean
+  truncated?: boolean
 }
 
 type APIRequestLogUsage = {
@@ -296,6 +313,85 @@ function UsagePanel(props: { usage?: APIRequestLogUsage }) {
   )
 }
 
+function RequestLogItemsPanel(props: { items?: APIRequestLogItem[] }) {
+  const { t } = useTranslation()
+  const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
+  const items = props.items || []
+
+  if (items.length === 0) {
+    return (
+      <div className='bg-muted/30 text-muted-foreground rounded-md border p-4 text-sm'>
+        {t('No training items parsed')}
+      </div>
+    )
+  }
+
+  return (
+    <ScrollArea className='h-[58dvh]'>
+      <div className='space-y-2 pr-3'>
+        {items.map((item) => {
+          const content = prettyText(item.content || '')
+          const copied = copiedText === content
+          return (
+            <div key={item.id || item.seq} className='rounded-md border p-3'>
+              <div className='mb-2 flex flex-wrap items-center gap-2 text-xs'>
+                <Badge variant={item.phase === 'output' ? 'default' : 'secondary'} className='rounded-md'>
+                  {item.phase}
+                </Badge>
+                <Badge variant='outline' className='rounded-md'>
+                  {item.item_type}
+                </Badge>
+                {item.role && (
+                  <Badge variant='outline' className='rounded-md'>
+                    {item.role}
+                  </Badge>
+                )}
+                {item.name && (
+                  <span className='text-muted-foreground truncate'>
+                    {item.name}
+                  </span>
+                )}
+                {item.tool_call_id && (
+                  <span className='text-muted-foreground font-mono'>
+                    {item.tool_call_id}
+                  </span>
+                )}
+                {item.content_type && (
+                  <span className='text-muted-foreground'>
+                    {item.content_type}
+                  </span>
+                )}
+                {item.source && (
+                  <span className='text-muted-foreground'>
+                    {item.source}
+                  </span>
+                )}
+                <Button
+                  variant='ghost'
+                  size='icon-sm'
+                  className='ml-auto'
+                  onClick={() => copyToClipboard(content)}
+                  aria-label={t('Copy to clipboard')}
+                  title={t('Copy to clipboard')}
+                >
+                  {copied ? (
+                    <Check className='size-4 text-green-600' />
+                  ) : (
+                    <Copy className='size-4' />
+                  )}
+                </Button>
+              </div>
+              <pre className='bg-muted/30 max-h-80 overflow-auto rounded-md p-2 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap'>
+                {content || '-'}
+              </pre>
+            </div>
+          )
+        })}
+      </div>
+    </ScrollArea>
+  )
+}
+
 function DetailDialog(props: {
   log: APIRequestLogListItem | null
   open: boolean
@@ -318,15 +414,8 @@ function DetailDialog(props: {
   })
 
   const detail = data || props.log
-  const metadata = data?.metadata ? prettyText(data.metadata) : ''
-  const hasRequestBody = !!data?.request_body
-  const hasResponseBody = !!data?.response_body
-  const hasMetadata = !!metadata
-  const defaultTab = hasRequestBody
-    ? 'request'
-    : hasResponseBody
-      ? 'response'
-      : 'usage'
+  const hasItems = !!data?.items?.length
+  const defaultTab = hasItems ? 'items' : 'usage'
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
@@ -372,50 +461,15 @@ function DetailDialog(props: {
 
             <Tabs key={`${id}-${defaultTab}`} defaultValue={defaultTab}>
               <TabsList>
-                {hasRequestBody && (
-                  <TabsTrigger value='request'>{t('Request')}</TabsTrigger>
-                )}
-                {hasResponseBody && (
-                  <TabsTrigger value='response'>{t('Response')}</TabsTrigger>
-                )}
+                <TabsTrigger value='items'>{t('Training Items')}</TabsTrigger>
                 <TabsTrigger value='usage'>{t('Usage')}</TabsTrigger>
-                {hasMetadata && (
-                  <TabsTrigger value='metadata'>{t('Metadata')}</TabsTrigger>
-                )}
               </TabsList>
-              {hasRequestBody && (
-                <TabsContent value='request'>
-                  <BodyPanel
-                    title={t('Request')}
-                    contentType={detail.request_content_type}
-                    size={detail.request_size}
-                    body={data?.request_body || ''}
-                  />
-                </TabsContent>
-              )}
-              {hasResponseBody && (
-                <TabsContent value='response'>
-                  <BodyPanel
-                    title={t('Response')}
-                    contentType={detail.response_content_type}
-                    size={detail.response_size}
-                    body={data?.response_body || ''}
-                  />
-                </TabsContent>
-              )}
+              <TabsContent value='items'>
+                <RequestLogItemsPanel items={data?.items} />
+              </TabsContent>
               <TabsContent value='usage'>
                 <UsagePanel usage={data?.usage || props.log?.usage} />
               </TabsContent>
-              {hasMetadata && (
-                <TabsContent value='metadata'>
-                  <BodyPanel
-                    title={t('Metadata')}
-                    contentType='application/json'
-                    size={metadata.length}
-                    body={metadata}
-                  />
-                </TabsContent>
-              )}
             </Tabs>
           </div>
         )}
