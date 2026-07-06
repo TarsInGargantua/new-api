@@ -295,43 +295,80 @@ func applyRequestBodyFromContext(c *gin.Context, log *APIRequestLog) {
 }
 
 func GetAPIRequestLogs(params APIRequestLogQueryParams) (logs []*APIRequestLogListItem, total int64, err error) {
-	if err := EnsureAPIRequestLogTable(); err != nil {
+	tx := buildAPIRequestLogsFromUsageLogsQuery(params)
+	if err = tx.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	if err := SyncMissingAPIRequestLogsFromUsageLogs(params, requestLogSyncLimit(params)); err != nil {
+
+	var usageLogs []*Log
+	if err = tx.Order("logs.id desc").Limit(params.Num).Offset(params.StartIdx).Find(&usageLogs).Error; err != nil {
 		return nil, 0, err
 	}
-	tx := LOG_DB.Model(&APIRequestLog{})
-	tx = applyLogContainsFilter(tx, "api_request_logs.model_name", params.ModelName)
-	tx = applyLogContainsFilter(tx, "api_request_logs.username", params.Username)
-	tx = applyLogContainsFilter(tx, "api_request_logs.token_name", params.TokenName)
+
+	logs = make([]*APIRequestLogListItem, 0, len(usageLogs))
+	for _, usageLog := range usageLogs {
+		logs = append(logs, apiRequestLogListItemFromUsageLog(usageLog))
+	}
+	return logs, total, nil
+}
+
+func buildAPIRequestLogsFromUsageLogsQuery(params APIRequestLogQueryParams) *gorm.DB {
+	tx := LOG_DB.Model(&Log{}).Where("logs.type = ?", LogTypeConsume)
+	tx = applyLogContainsFilter(tx, "logs.model_name", params.ModelName)
+	tx = applyLogContainsFilter(tx, "logs.username", params.Username)
+	tx = applyLogContainsFilter(tx, "logs.token_name", params.TokenName)
 	if params.StartTimestamp != 0 {
-		tx = tx.Where("api_request_logs.created_at >= ?", params.StartTimestamp)
+		tx = tx.Where("logs.created_at >= ?", params.StartTimestamp)
 	}
 	if params.EndTimestamp != 0 {
-		tx = tx.Where("api_request_logs.created_at <= ?", params.EndTimestamp)
+		tx = tx.Where("logs.created_at <= ?", params.EndTimestamp)
 	}
+	return tx
+}
 
-	if isUnfilteredAPIRequestLogQuery(params) {
-		total, err = getAPIRequestLogFastTotal()
-		if err != nil {
-			return nil, 0, err
-		}
-	} else {
-		if err = tx.Count(&total).Error; err != nil {
-			return nil, 0, err
-		}
+func apiRequestLogListItemFromUsageLog(log *Log) *APIRequestLogListItem {
+	if log == nil {
+		return nil
 	}
+	item := &APIRequestLogListItem{
+		Id:                log.Id,
+		UsageLogId:        log.Id,
+		UserId:            log.UserId,
+		Username:          log.Username,
+		TokenId:           log.TokenId,
+		TokenName:         log.TokenName,
+		ModelName:         log.ModelName,
+		CreatedAt:         log.CreatedAt,
+		RequestId:         log.RequestId,
+		UpstreamRequestId: log.UpstreamRequestId,
+		IsStream:          log.IsStream,
+		ChannelId:         log.ChannelId,
+		Group:             log.Group,
+		Usage:             apiRequestUsageFromLog(log, false),
+	}
+	applyAPIRequestLogListBodiesFromUsage(item, log)
+	return item
+}
 
-	err = tx.Select(
-		"id, usage_log_id, user_id, username, token_id, token_name, model_name, created_at, request_id, upstream_request_id, method, request_path, status_code, is_stream, channel_id, " +
-			logGroupCol + " as " + logGroupCol + ", request_content_type, response_content_type, request_size, response_size, request_omitted_reason, response_omitted_reason, redacted",
-	).Order("id desc").Limit(params.Num).Offset(params.StartIdx).Find(&logs).Error
-	if err != nil {
-		return nil, 0, err
+func applyAPIRequestLogListBodiesFromUsage(item *APIRequestLogListItem, log *Log) {
+	if item == nil || log == nil || strings.TrimSpace(log.Other) == "" {
+		return
 	}
-	err = attachAPIRequestLogListUsage(logs)
-	return logs, total, err
+	usage := apiRequestUsageFromLog(log, true)
+	other := apiRequestLogUsageOtherMap(usage)
+	if len(other) == 0 {
+		return
+	}
+	if body := apiRequestBodyFromUsageMetadata(other); body != nil {
+		item.RequestContentType = body.contentType
+		item.RequestSize = body.size
+		item.Redacted = item.Redacted || body.redacted
+	}
+	if body := apiResponseBodyFromUsageMetadata(other); body != nil {
+		item.ResponseContentType = body.contentType
+		item.ResponseSize = body.size
+		item.Redacted = item.Redacted || body.redacted
+	}
 }
 
 func isUnfilteredAPIRequestLogQuery(params APIRequestLogQueryParams) bool {
@@ -434,19 +471,75 @@ func SyncMissingAPIRequestLogsFromUsageLogs(params APIRequestLogQueryParams, lim
 }
 
 func GetAPIRequestLogById(id int) (*APIRequestLog, error) {
-	var log APIRequestLog
-	if err := LOG_DB.First(&log, id).Error; err != nil {
+	var usageLog Log
+	if err := LOG_DB.Where("type = ?", LogTypeConsume).First(&usageLog, id).Error; err != nil {
 		return nil, err
 	}
-	usage, err := getAPIRequestLogUsage(log.UsageLogId, log.RequestId, log.UpstreamRequestId, true)
-	if err != nil {
-		return nil, err
-	}
-	log.Usage = usage
-	if err := hydrateAPIRequestLogBodiesFromUsage(&log, usage); err != nil {
-		return nil, err
-	}
+	log := apiRequestLogFromUsageLog(&usageLog, true)
 	return &log, nil
+}
+
+func apiRequestLogFromUsageLog(usageLog *Log, includeUsageBody bool) APIRequestLog {
+	if usageLog == nil {
+		return APIRequestLog{}
+	}
+	log := APIRequestLog{
+		Id:                usageLog.Id,
+		UsageLogId:        usageLog.Id,
+		UserId:            usageLog.UserId,
+		Username:          usageLog.Username,
+		TokenId:           usageLog.TokenId,
+		TokenName:         usageLog.TokenName,
+		ModelName:         usageLog.ModelName,
+		CreatedAt:         usageLog.CreatedAt,
+		RequestId:         usageLog.RequestId,
+		UpstreamRequestId: usageLog.UpstreamRequestId,
+		IsStream:          usageLog.IsStream,
+		ChannelId:         usageLog.ChannelId,
+		Group:             usageLog.Group,
+		Metadata:          APIRequestLogBody(usageLog.Other),
+		Usage:             apiRequestUsageFromLog(usageLog, includeUsageBody),
+	}
+	applyAPIRequestLogBodiesFromUsage(&log, log.Usage)
+	return log
+}
+
+func applyAPIRequestLogBodiesFromUsage(log *APIRequestLog, usage *APIRequestLogUsage) {
+	if log == nil || usage == nil {
+		return
+	}
+
+	other := apiRequestLogUsageOtherMap(usage)
+	if len(other) == 0 {
+		return
+	}
+
+	metadata := apiRequestLogMetadataMap(log.Metadata)
+	changed := false
+	if body := apiRequestBodyFromUsageMetadata(other); body != nil {
+		log.RequestBody = body.body
+		log.RequestContentType = firstNonEmptyString(log.RequestContentType, body.contentType)
+		log.RequestSize = body.size
+		log.RequestOmittedReason = ""
+		log.Redacted = log.Redacted || body.redacted
+		metadata["request_body_source"] = body.source
+		changed = true
+	}
+	if body := apiResponseBodyFromUsageMetadata(other); body != nil {
+		log.ResponseBody = body.body
+		log.ResponseContentType = firstNonEmptyString(log.ResponseContentType, body.contentType)
+		log.ResponseSize = body.size
+		log.ResponseOmittedReason = ""
+		log.Redacted = log.Redacted || body.redacted
+		metadata["response_body_source"] = body.source
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if metadataJSON, err := common.Marshal(metadata); err == nil {
+		log.Metadata = APIRequestLogBody(metadataJSON)
+	}
 }
 
 func hydrateAPIRequestLogBodiesFromUsage(log *APIRequestLog, usage *APIRequestLogUsage) error {
@@ -869,10 +962,6 @@ func apiRequestUsageFromLog(log *Log, includeBody bool) *APIRequestLogUsage {
 
 func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 	status := &APIRequestLogStorageStatus{}
-	apiRequestLogEnsureMu.Lock()
-	status.LastWriteError = apiRequestLogLastWriteError
-	status.LastWriteErrorAt = apiRequestLogLastWriteErrorAt
-	apiRequestLogEnsureMu.Unlock()
 
 	if LOG_DB == nil {
 		status.LastWriteError = "log database is not initialized"
@@ -883,28 +972,17 @@ func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 		status.LogDBDialect = LOG_DB.Dialector.Name()
 	}
 
-	status.HasTable = LOG_DB.Migrator().HasTable(&APIRequestLog{})
-	if !status.HasTable {
-		if err := EnsureAPIRequestLogTable(); err != nil {
-			status.EnsureMigrationFailed = true
-			status.LastWriteError = err.Error()
-			status.LastWriteErrorAt = common.GetTimestamp()
-			return status, nil
-		}
-		status.HasTable = LOG_DB.Migrator().HasTable(&APIRequestLog{})
-	}
+	status.HasTable = LOG_DB.Migrator().HasTable(&Log{})
 	if !status.HasTable {
 		return status, nil
 	}
 
-	count, err := getAPIRequestLogFastTotal()
-	if err != nil {
+	if err := LOG_DB.Model(&Log{}).Where("type = ?", LogTypeConsume).Count(&status.Count).Error; err != nil {
 		return status, err
 	}
-	status.Count = count
 
-	var last APIRequestLog
-	result := LOG_DB.Select("created_at, request_id").Order("id desc").Limit(1).Find(&last)
+	var last Log
+	result := LOG_DB.Model(&Log{}).Select("created_at, request_id").Where("type = ?", LogTypeConsume).Order("id desc").Limit(1).Find(&last)
 	if result.Error != nil {
 		return status, result.Error
 	}
