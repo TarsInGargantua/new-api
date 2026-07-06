@@ -19,15 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useCallback, useMemo, useState, type KeyboardEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
-import {
-  Check,
-  Copy,
-  Database,
-  Eye,
-  RefreshCw,
-  Search,
-  ShieldCheck,
-} from 'lucide-react'
+import { Check, Copy, Database, Eye, RefreshCw, Search } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
@@ -117,19 +109,6 @@ type APIRequestLogUsage = {
   other?: string
 }
 
-type APIRequestLogStatus = {
-  enabled: boolean
-  redact_secrets: boolean
-  capture_response: boolean
-  has_table: boolean
-  count: number
-  last_created_at?: number
-  last_request_id?: string
-  last_write_error?: string
-  log_db_dialect?: string
-  ensure_migration_failed?: boolean
-}
-
 type PageData<T> = {
   items: T[]
   total: number
@@ -178,13 +157,6 @@ async function fetchRequestDataDetail(id: number) {
   return res.data
 }
 
-async function fetchRequestDataStatus() {
-  const res = await api.get<APIResponse<APIRequestLogStatus>>(
-    '/api/request-log/status'
-  )
-  return res.data
-}
-
 function formatDate(timestamp: number) {
   if (!timestamp) return '-'
   return new Date(timestamp * 1000).toLocaleString()
@@ -195,12 +167,6 @@ function formatBytes(size?: number) {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
   return `${(size / 1024 / 1024).toFixed(1)} MB`
-}
-
-function statusVariant(statusCode: number) {
-  if (statusCode >= 200 && statusCode < 300) return 'default'
-  if (statusCode >= 400) return 'destructive'
-  return 'outline'
 }
 
 function prettyText(value?: string) {
@@ -295,7 +261,9 @@ function UsagePanel(props: { usage?: APIRequestLogUsage }) {
         </div>
         <div className='bg-muted/30 rounded-md border p-2'>
           <div className='text-muted-foreground'>{t('Total tokens')}</div>
-          <div className='font-medium'>{formatTokens(usage.token_used || 0)}</div>
+          <div className='font-medium'>
+            {formatTokens(usage.token_used || 0)}
+          </div>
         </div>
         <div className='bg-muted/30 rounded-md border p-2'>
           <div className='text-muted-foreground'>{t('Cost')}</div>
@@ -303,15 +271,19 @@ function UsagePanel(props: { usage?: APIRequestLogUsage }) {
         </div>
         <div className='bg-muted/30 rounded-md border p-2'>
           <div className='text-muted-foreground'>{t('Duration')}</div>
-          <div className='font-medium'>{formatUseTime(usage.use_time || 0)}</div>
+          <div className='font-medium'>
+            {formatUseTime(usage.use_time || 0)}
+          </div>
         </div>
       </div>
-      <BodyPanel
-        title={t('Usage Content')}
-        contentType='text/plain'
-        size={usage.content?.length || 0}
-        body={usage.content || ''}
-      />
+      {usage.content && (
+        <BodyPanel
+          title={t('Usage Content')}
+          contentType='text/plain'
+          size={usage.content.length}
+          body={usage.content}
+        />
+      )}
       {usageOther && (
         <BodyPanel
           title={t('Usage Metadata')}
@@ -347,6 +319,14 @@ function DetailDialog(props: {
 
   const detail = data || props.log
   const metadata = data?.metadata ? prettyText(data.metadata) : ''
+  const hasRequestBody = !!data?.request_body
+  const hasResponseBody = !!data?.response_body
+  const hasMetadata = !!metadata
+  const defaultTab = hasRequestBody
+    ? 'request'
+    : hasResponseBody
+      ? 'response'
+      : 'usage'
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
@@ -358,7 +338,7 @@ function DetailDialog(props: {
           </DialogTitle>
           <DialogDescription>
             {detail
-              ? `${detail.method || '-'} ${detail.request_path || '-'}`
+              ? detail.request_id || detail.upstream_request_id || '-'
               : t('Loading...')}
           </DialogDescription>
         </DialogHeader>
@@ -369,7 +349,7 @@ function DetailDialog(props: {
           </div>
         ) : (
           <div className='space-y-3'>
-            <div className='grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4'>
+            <div className='grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-3'>
               <div className='bg-muted/30 rounded-md border p-2'>
                 <div className='text-muted-foreground'>{t('Token')}</div>
                 <div className='truncate font-medium'>
@@ -383,10 +363,6 @@ function DetailDialog(props: {
                 </div>
               </div>
               <div className='bg-muted/30 rounded-md border p-2'>
-                <div className='text-muted-foreground'>{t('Status Code')}</div>
-                <div className='font-medium'>{detail.status_code || '-'}</div>
-              </div>
-              <div className='bg-muted/30 rounded-md border p-2'>
                 <div className='text-muted-foreground'>{t('Request ID')}</div>
                 <div className='truncate font-mono'>
                   {detail.request_id || '-'}
@@ -394,42 +370,52 @@ function DetailDialog(props: {
               </div>
             </div>
 
-            <Tabs defaultValue='request'>
+            <Tabs key={`${id}-${defaultTab}`} defaultValue={defaultTab}>
               <TabsList>
-                <TabsTrigger value='request'>{t('Request')}</TabsTrigger>
-                <TabsTrigger value='response'>{t('Response')}</TabsTrigger>
+                {hasRequestBody && (
+                  <TabsTrigger value='request'>{t('Request')}</TabsTrigger>
+                )}
+                {hasResponseBody && (
+                  <TabsTrigger value='response'>{t('Response')}</TabsTrigger>
+                )}
                 <TabsTrigger value='usage'>{t('Usage')}</TabsTrigger>
-                <TabsTrigger value='metadata'>{t('Metadata')}</TabsTrigger>
+                {hasMetadata && (
+                  <TabsTrigger value='metadata'>{t('Metadata')}</TabsTrigger>
+                )}
               </TabsList>
-              <TabsContent value='request'>
-                <BodyPanel
-                  title={t('Request')}
-                  contentType={detail.request_content_type}
-                  size={detail.request_size}
-                  omittedReason={detail.request_omitted_reason}
-                  body={data?.request_body || ''}
-                />
-              </TabsContent>
-              <TabsContent value='response'>
-                <BodyPanel
-                  title={t('Response')}
-                  contentType={detail.response_content_type}
-                  size={detail.response_size}
-                  omittedReason={detail.response_omitted_reason}
-                  body={data?.response_body || ''}
-                />
-              </TabsContent>
+              {hasRequestBody && (
+                <TabsContent value='request'>
+                  <BodyPanel
+                    title={t('Request')}
+                    contentType={detail.request_content_type}
+                    size={detail.request_size}
+                    body={data?.request_body || ''}
+                  />
+                </TabsContent>
+              )}
+              {hasResponseBody && (
+                <TabsContent value='response'>
+                  <BodyPanel
+                    title={t('Response')}
+                    contentType={detail.response_content_type}
+                    size={detail.response_size}
+                    body={data?.response_body || ''}
+                  />
+                </TabsContent>
+              )}
               <TabsContent value='usage'>
                 <UsagePanel usage={data?.usage || props.log?.usage} />
               </TabsContent>
-              <TabsContent value='metadata'>
-                <BodyPanel
-                  title={t('Metadata')}
-                  contentType='application/json'
-                  size={metadata.length}
-                  body={metadata}
-                />
-              </TabsContent>
+              {hasMetadata && (
+                <TabsContent value='metadata'>
+                  <BodyPanel
+                    title={t('Metadata')}
+                    contentType='application/json'
+                    size={metadata.length}
+                    body={metadata}
+                  />
+                </TabsContent>
+              )}
             </Tabs>
           </div>
         )}
@@ -478,17 +464,12 @@ export function RequestData() {
       return result.data || { items: [], total: 0, page: 1, page_size: 20 }
     },
   })
-  const { data: statusResult } = useQuery({
-    queryKey: ['request-data-status'],
-    queryFn: fetchRequestDataStatus,
-  })
 
   const page = effectiveSearch.page || 1
   const pageSize = effectiveSearch.pageSize || 20
   const total = data?.total || 0
   const pageCount = Math.max(1, Math.ceil(total / pageSize))
   const logs = data?.items || []
-  const status = statusResult?.success ? statusResult.data : null
 
   const updateSearch = useCallback(
     (next: RequestDataSearch) => {
@@ -561,45 +542,6 @@ export function RequestData() {
         </SectionPageLayout.Actions>
         <SectionPageLayout.Content>
           <div className='space-y-3'>
-            {status && (
-              <div className='bg-muted/20 flex flex-wrap items-center gap-2 rounded-md border p-2 text-xs'>
-                <Badge
-                  variant={
-                    status.enabled && status.has_table ? 'default' : 'secondary'
-                  }
-                  className='rounded-md'
-                >
-                  {status.enabled ? t('Enabled') : t('Disabled')}
-                </Badge>
-                <Badge
-                  variant={status.has_table ? 'outline' : 'destructive'}
-                  className='rounded-md'
-                >
-                  {status.has_table
-                    ? `${t('Request log rows')}: ${status.count || 0}`
-                    : t('Request log table missing')}
-                </Badge>
-                <Badge variant='outline' className='rounded-md'>
-                  {t('Capture response')}:{' '}
-                  {status.capture_response ? t('Enabled') : t('Disabled')}
-                </Badge>
-                <Badge variant='outline' className='rounded-md'>
-                  {t('Redact secrets')}:{' '}
-                  {status.redact_secrets ? t('Enabled') : t('Disabled')}
-                </Badge>
-                {status.last_created_at ? (
-                  <Badge variant='outline' className='rounded-md'>
-                    {t('Last captured')}: {formatDate(status.last_created_at)}
-                  </Badge>
-                ) : null}
-                {status.last_write_error ? (
-                  <Badge variant='destructive' className='rounded-md'>
-                    {status.last_write_error}
-                  </Badge>
-                ) : null}
-              </div>
-            )}
-
             <div className='bg-muted/20 flex flex-wrap items-center gap-2 rounded-md border p-2'>
               <CompactDateTimeRangePicker
                 start={filters.startTime}
@@ -666,9 +608,6 @@ export function RequestData() {
                     <TableHead>{t('User')}</TableHead>
                     <TableHead>{t('Token')}</TableHead>
                     <TableHead>{t('Model')}</TableHead>
-                    <TableHead>{t('Path')}</TableHead>
-                    <TableHead>{t('Status')}</TableHead>
-                    <TableHead>{t('Body Size')}</TableHead>
                     <TableHead>{t('Token Usage')}</TableHead>
                     <TableHead>{t('Actions')}</TableHead>
                   </TableRow>
@@ -676,14 +615,14 @@ export function RequestData() {
                 <TableBody>
                   {isLoading ? (
                     <TableRow>
-                      <TableCell colSpan={9} className='h-28 text-center'>
+                      <TableCell colSpan={6} className='h-28 text-center'>
                         {t('Loading...')}
                       </TableCell>
                     </TableRow>
                   ) : logs.length === 0 ? (
                     <TableRow>
                       <TableCell
-                        colSpan={9}
+                        colSpan={6}
                         className='text-muted-foreground h-28 text-center'
                       >
                         {t('No request data found')}
@@ -711,30 +650,11 @@ export function RequestData() {
                           </div>
                         </TableCell>
                         <TableCell>
-                          <div className='max-w-[220px] truncate font-mono text-xs'>
-                            {log.method} {log.request_path || '-'}
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <Badge
-                            variant={statusVariant(log.status_code)}
-                            className='rounded-md font-mono'
-                          >
-                            {log.status_code || '-'}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <div className='flex flex-col gap-0.5 font-mono text-xs'>
-                            <span>{formatBytes(log.request_size)}</span>
-                            <span className='text-muted-foreground'>
-                              {formatBytes(log.response_size)}
-                            </span>
-                          </div>
-                        </TableCell>
-                        <TableCell>
                           {log.usage ? (
                             <div className='flex flex-col gap-0.5 font-mono text-xs'>
-                              <span>{formatTokens(log.usage.token_used || 0)}</span>
+                              <span>
+                                {formatTokens(log.usage.token_used || 0)}
+                              </span>
                               <span className='text-muted-foreground'>
                                 {formatLogQuota(log.usage.quota || 0)}
                               </span>
@@ -745,12 +665,6 @@ export function RequestData() {
                         </TableCell>
                         <TableCell>
                           <div className='flex items-center gap-1'>
-                            {log.redacted && (
-                              <Badge variant='outline' className='rounded-md'>
-                                <ShieldCheck className='size-3' />
-                                {t('Redacted')}
-                              </Badge>
-                            )}
                             <Button
                               variant='ghost'
                               size='icon-sm'

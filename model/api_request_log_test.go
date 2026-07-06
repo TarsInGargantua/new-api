@@ -140,13 +140,16 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 		Username:         "alice",
 		Type:             LogTypeConsume,
 		ModelName:        "gpt-test",
+		TokenId:          9,
 		TokenName:        "prod-token",
 		Quota:            1234,
 		PromptTokens:     100,
 		CompletionTokens: 20,
 		UseTime:          3,
+		CreatedAt:        100,
+		RequestId:        "req-1",
 		Content:          "consume detail",
-		Other:            `{"foo":"bar"}`,
+		Other:            `{"foo":"bar","message_capture":{"raw_request":{"content_type":"application/json","body":"{\"prompt\":\"hello\"}","size":18,"redacted":true},"raw_response":{"content_type":"text/event-stream","body":"data: {\"ok\":true}","size":32}}}`,
 	}
 	require.NoError(t, LOG_DB.Create(usageLog).Error)
 
@@ -206,7 +209,8 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 	require.Equal(t, APIRequestLogBody(`data: {"ok":true}`), detail.ResponseBody)
 	require.NotNil(t, detail.Usage)
 	require.Equal(t, "consume detail", detail.Usage.Content)
-	require.Equal(t, `{"foo":"bar"}`, detail.Usage.Other)
+	require.Contains(t, detail.Usage.Other, `"foo":"bar"`)
+	require.Contains(t, detail.Usage.Other, `"message_capture"`)
 }
 
 func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
@@ -298,8 +302,8 @@ func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
 
 	detail, err := GetAPIRequestLogById(requestLog.Id)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, detail.StatusCode)
-	require.Equal(t, APIRequestLogBody(`{"model":"gpt-sync"}`), detail.RequestBody)
+	require.Equal(t, 0, detail.StatusCode)
+	require.Empty(t, detail.RequestBody)
 	require.NotNil(t, detail.Usage)
 	require.Equal(t, 123, detail.Usage.Quota)
 	require.Equal(t, 18, detail.Usage.TokenUsed)
@@ -359,11 +363,7 @@ func TestGetAPIRequestLogByIdHydratesBodiesFromUsageRawCapture(t *testing.T) {
 	require.Empty(t, detail.ResponseOmittedReason)
 	require.True(t, detail.Redacted)
 
-	var stored APIRequestLog
-	require.NoError(t, LOG_DB.First(&stored, requestLog.Id).Error)
-	require.Equal(t, detail.RequestBody, stored.RequestBody)
-	require.Empty(t, stored.RequestOmittedReason)
-	require.Contains(t, string(stored.Metadata), "usage_log.message_capture.raw_request")
+	require.Contains(t, string(detail.Metadata), "usage_log.message_capture.raw_request")
 }
 
 func TestGetAPIRequestLogByIdHydratesRequestFromMessageCapture(t *testing.T) {
@@ -420,14 +420,8 @@ func TestGetAPIRequestLogByIdHydratesRequestFromMessageCapture(t *testing.T) {
 	require.Contains(t, string(detail.Metadata), "usage_log.message_capture")
 }
 
-func TestGetAPIRequestLogsBackfillsMissingUsageLogs(t *testing.T) {
+func TestGetAPIRequestLogsReadsUsageLogs(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
-
-	oldEnabled := common.APIRequestLogEnabled
-	common.APIRequestLogEnabled = true
-	t.Cleanup(func() {
-		common.APIRequestLogEnabled = oldEnabled
-	})
 
 	require.NoError(t, LOG_DB.Create(&Log{
 		UserId:           9,
@@ -485,9 +479,16 @@ func TestCreateAPIRequestLogEnsuresTable(t *testing.T) {
 		CreatedAt: 100,
 	}))
 	require.True(t, LOG_DB.Migrator().HasTable(&APIRequestLog{}))
+	require.NoError(t, LOG_DB.AutoMigrate(&Log{}))
+	require.NoError(t, LOG_DB.Create(&Log{
+		Type:      LogTypeConsume,
+		CreatedAt: 100,
+		RequestId: "req-status",
+	}).Error)
 
 	status, err := GetAPIRequestLogStorageStatus()
 	require.NoError(t, err)
 	require.True(t, status.HasTable)
 	require.Equal(t, int64(1), status.Count)
+	require.Equal(t, "req-status", status.LastRequestId)
 }
