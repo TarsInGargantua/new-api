@@ -91,6 +91,27 @@ func InitEnv() {
 	APIRequestLogEnabled = GetEnvOrDefaultBool("API_REQUEST_LOG_ENABLED", false)
 	APIRequestLogRedactSecrets = GetEnvOrDefaultBool("API_REQUEST_LOG_REDACT_SECRETS", true)
 	APIRequestLogCaptureResponse = GetEnvOrDefaultBool("API_REQUEST_LOG_CAPTURE_RESPONSE", true)
+	APIRequestLogAsyncWrite = GetEnvOrDefaultBool("API_REQUEST_LOG_ASYNC_WRITE", true)
+	APIRequestLogQueueSize = GetEnvOrDefault("API_REQUEST_LOG_QUEUE_SIZE", 128)
+	if APIRequestLogQueueSize < 1 {
+		APIRequestLogQueueSize = 1
+	}
+	APIRequestLogWorkers = GetEnvOrDefault("API_REQUEST_LOG_WORKERS", 2)
+	if APIRequestLogWorkers < 1 {
+		APIRequestLogWorkers = 1
+	}
+	APIRequestLogMaxBodyBytes = GetEnvOrDefault("API_REQUEST_LOG_MAX_BODY_BYTES", 4*1024*1024)
+	if APIRequestLogMaxBodyBytes < 0 {
+		APIRequestLogMaxBodyBytes = 0
+	}
+	APIRequestLogMaxItemBytes = GetEnvOrDefault("API_REQUEST_LOG_MAX_ITEM_BYTES", 1024*1024)
+	if APIRequestLogMaxItemBytes < 0 {
+		APIRequestLogMaxItemBytes = 0
+	}
+	APIRequestLogMaxQueueBytes = GetEnvOrDefault("API_REQUEST_LOG_MAX_QUEUE_BYTES", 64*1024*1024)
+	if APIRequestLogMaxQueueBytes < 0 {
+		APIRequestLogMaxQueueBytes = 0
+	}
 	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
 	NodeName = os.Getenv("NODE_NAME")
 	TLSInsecureSkipVerify = GetEnvOrDefaultBool("TLS_INSECURE_SKIP_VERIFY", false)

@@ -5,7 +5,9 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 
@@ -36,6 +38,10 @@ const (
 	APIRequestLogItemToolResult = "tool_result"
 	APIRequestLogItemError      = "error"
 	APIRequestLogItemRaw        = "raw_unparsed"
+	APIRequestLogItemsEmpty     = "empty"
+	APIRequestLogItemsPending   = "pending"
+	APIRequestLogItemsOK        = "ok"
+	APIRequestLogItemsFailed    = "failed"
 )
 
 type APIRequestLogBody string
@@ -86,6 +92,8 @@ type APIRequestLog struct {
 	SchemaVersion         int                 `json:"schema_version" gorm:"default:1"`
 	ParseStatus           string              `json:"parse_status" gorm:"type:varchar(16);index;default:'ok'"`
 	ParseError            string              `json:"parse_error,omitempty" gorm:"type:text"`
+	ItemsStatus           string              `json:"items_status" gorm:"type:varchar(16);index;default:''"`
+	ItemsError            string              `json:"items_error,omitempty" gorm:"type:text"`
 	Items                 []APIRequestLogItem `json:"items,omitempty" gorm:"foreignKey:LogId;constraint:OnDelete:CASCADE"`
 	Usage                 *APIRequestLogUsage `json:"usage,omitempty" gorm:"-"`
 
@@ -142,6 +150,8 @@ type APIRequestLogListItem struct {
 	SchemaVersion         int                 `json:"schema_version"`
 	ParseStatus           string              `json:"parse_status"`
 	ParseError            string              `json:"parse_error,omitempty"`
+	ItemsStatus           string              `json:"items_status"`
+	ItemsError            string              `json:"items_error,omitempty"`
 	Usage                 *APIRequestLogUsage `json:"usage,omitempty"`
 }
 
@@ -186,6 +196,11 @@ type APIRequestLogStorageStatus struct {
 	LogDBDialect          string `json:"log_db_dialect,omitempty"`
 	RequestLogDBDialect   string `json:"request_log_db_dialect,omitempty"`
 	EnsureMigrationFailed bool   `json:"ensure_migration_failed"`
+	AsyncWrite            bool   `json:"async_write"`
+	QueueDepth            int    `json:"queue_depth"`
+	QueueCapacity         int    `json:"queue_capacity"`
+	QueuedItemBytes       int64  `json:"queued_item_bytes"`
+	MaxQueueBytes         int64  `json:"max_queue_bytes"`
 }
 
 var REQUEST_LOG_DB *gorm.DB
@@ -195,6 +210,17 @@ var apiRequestLogEnsuredDB *gorm.DB
 var apiRequestLogEnsured bool
 var apiRequestLogLastWriteError string
 var apiRequestLogLastWriteErrorAt int64
+
+type apiRequestLogItemWriteJob struct {
+	DB    *gorm.DB
+	LogId int
+	Items []APIRequestLogItem
+	Bytes int64
+}
+
+var apiRequestLogItemQueueMu sync.Mutex
+var apiRequestLogItemQueue chan apiRequestLogItemWriteJob
+var apiRequestLogQueuedItemBytes int64
 
 func InitRequestLogDB() error {
 	if strings.TrimSpace(os.Getenv("REQUEST_LOG_SQL_DSN")) == "" {
@@ -230,7 +256,11 @@ func InitRequestLogDB() error {
 	if !common.IsMasterNode {
 		return nil
 	}
-	return EnsureAPIRequestLogTable()
+	if err := EnsureAPIRequestLogTable(); err != nil {
+		return err
+	}
+	startAPIRequestLogItemWriters()
+	return nil
 }
 
 func chooseDedicatedRequestLogDB() (*gorm.DB, error) {
@@ -309,6 +339,18 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 	items := log.Items
 	log.Items = nil
 	hasItems := len(items) > 0
+	asyncItems := shouldAsyncAPIRequestLogItems(log, hasItems)
+	if hasItems {
+		if asyncItems {
+			log.ItemsStatus = APIRequestLogItemsPending
+			log.ItemsError = ""
+		} else {
+			log.ItemsStatus = APIRequestLogItemsOK
+			log.ItemsError = ""
+		}
+	} else if log.ItemsStatus == "" {
+		log.ItemsStatus = APIRequestLogItemsEmpty
+	}
 
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		var existing APIRequestLog
@@ -343,7 +385,18 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 	if len(log.Items) == 0 {
 		return nil
 	}
-	return createAPIRequestLogItemsIfMissing(db, log.Id, log.Items)
+	if asyncItems {
+		return enqueueAPIRequestLogItems(db, log.Id, log.Items)
+	}
+	if err := createAPIRequestLogItemsIfMissing(db, log.Id, log.Items); err != nil {
+		_ = updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsFailed, err.Error())
+		return err
+	}
+	return updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsOK, "")
+}
+
+func shouldAsyncAPIRequestLogItems(log *APIRequestLog, hasItems bool) bool {
+	return hasItems && common.APIRequestLogAsyncWrite && log != nil && log.Source == APIRequestLogSourceLive
 }
 
 func createAPIRequestLogItemsIfMissing(db *gorm.DB, logId int, items []APIRequestLogItem) error {
@@ -359,6 +412,25 @@ func createAPIRequestLogItemsIfMissing(db *gorm.DB, logId int, items []APIReques
 		if count > 0 {
 			return nil
 		}
+		err := createAPIRequestLogItems(db, items)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isRetryableAPIRequestLogItemError(err) || attempt == apiRequestLogItemMaxRetry-1 {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+	}
+	return lastErr
+}
+
+func createAPIRequestLogItems(db *gorm.DB, items []APIRequestLogItem) error {
+	if db == nil || len(items) == 0 {
+		return nil
+	}
+	var lastErr error
+	for attempt := 0; attempt < apiRequestLogItemMaxRetry; attempt++ {
 		err := db.Session(&gorm.Session{SkipDefaultTransaction: true}).CreateInBatches(items, apiRequestLogItemBatchSize).Error
 		if err == nil {
 			return nil
@@ -370,6 +442,105 @@ func createAPIRequestLogItemsIfMissing(db *gorm.DB, logId int, items []APIReques
 		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
 	}
 	return lastErr
+}
+
+func enqueueAPIRequestLogItems(db *gorm.DB, logId int, items []APIRequestLogItem) error {
+	startAPIRequestLogItemWriters()
+	apiRequestLogItemQueueMu.Lock()
+	queue := apiRequestLogItemQueue
+	apiRequestLogItemQueueMu.Unlock()
+	if queue == nil {
+		return errors.New("request log item queue is not initialized")
+	}
+	itemBytes := apiRequestLogItemsByteSize(items)
+	if err := reserveAPIRequestLogQueueBytes(itemBytes); err != nil {
+		_ = updateAPIRequestLogItemsStatus(db, logId, APIRequestLogItemsFailed, err.Error())
+		return err
+	}
+	job := apiRequestLogItemWriteJob{DB: db, LogId: logId, Items: items, Bytes: itemBytes}
+	select {
+	case queue <- job:
+		return nil
+	default:
+		releaseAPIRequestLogQueueBytes(itemBytes)
+		err := errors.New("request log item queue is full")
+		_ = updateAPIRequestLogItemsStatus(db, logId, APIRequestLogItemsFailed, err.Error())
+		return err
+	}
+}
+
+func startAPIRequestLogItemWriters() {
+	if !common.APIRequestLogAsyncWrite || common.GetEnvOrDefaultBool("REQUEST_LOG_DB_READ_ONLY", false) {
+		return
+	}
+	apiRequestLogItemQueueMu.Lock()
+	defer apiRequestLogItemQueueMu.Unlock()
+	if apiRequestLogItemQueue != nil {
+		return
+	}
+	queueSize := common.APIRequestLogQueueSize
+	if queueSize < 1 {
+		queueSize = 1
+	}
+	workers := common.APIRequestLogWorkers
+	if workers < 1 {
+		workers = 1
+	}
+	apiRequestLogItemQueue = make(chan apiRequestLogItemWriteJob, queueSize)
+	for i := 0; i < workers; i++ {
+		go apiRequestLogItemWorker(apiRequestLogItemQueue)
+	}
+}
+
+func apiRequestLogItemWorker(queue <-chan apiRequestLogItemWriteJob) {
+	for job := range queue {
+		err := createAPIRequestLogItems(job.DB, job.Items)
+		releaseAPIRequestLogQueueBytes(job.Bytes)
+		if err != nil {
+			setAPIRequestLogLastWriteError(err)
+			_ = updateAPIRequestLogItemsStatus(job.DB, job.LogId, APIRequestLogItemsFailed, err.Error())
+			continue
+		}
+	}
+}
+
+func apiRequestLogItemsByteSize(items []APIRequestLogItem) int64 {
+	var size int64
+	for _, item := range items {
+		size += int64(len(item.Content))
+		size += int64(len(item.Phase) + len(item.ItemType) + len(item.Role) + len(item.ContentType))
+		size += int64(len(item.ToolCallId) + len(item.Name) + len(item.Source))
+	}
+	return size
+}
+
+func reserveAPIRequestLogQueueBytes(size int64) error {
+	if size <= 0 {
+		return nil
+	}
+	maxBytes := int64(common.APIRequestLogMaxQueueBytes)
+	next := atomic.AddInt64(&apiRequestLogQueuedItemBytes, size)
+	if maxBytes <= 0 || next <= maxBytes {
+		return nil
+	}
+	atomic.AddInt64(&apiRequestLogQueuedItemBytes, -size)
+	return errors.New("request log item queue byte limit exceeded")
+}
+
+func releaseAPIRequestLogQueueBytes(size int64) {
+	if size > 0 {
+		atomic.AddInt64(&apiRequestLogQueuedItemBytes, -size)
+	}
+}
+
+func updateAPIRequestLogItemsStatus(db *gorm.DB, logId int, status string, message string) error {
+	if db == nil || logId <= 0 {
+		return nil
+	}
+	return db.Model(&APIRequestLog{}).Where("id = ?", logId).Updates(map[string]interface{}{
+		"items_status": status,
+		"items_error":  message,
+	}).Error
 }
 
 func isRetryableAPIRequestLogItemError(err error) bool {
@@ -469,9 +640,25 @@ func normalizeAPIRequestLogItems(logId int, items []APIRequestLogItem) []APIRequ
 		if item.Seq <= 0 {
 			item.Seq = len(out) + 1
 		}
+		item.Content, item.Truncated = truncateAPIRequestLogItemContent(item.Content, item.Truncated)
 		out = append(out, item)
 	}
 	return out
+}
+
+func truncateAPIRequestLogItemContent(content APIRequestLogBody, alreadyTruncated bool) (APIRequestLogBody, bool) {
+	maxBytes := common.APIRequestLogMaxItemBytes
+	if maxBytes <= 0 || len(content) <= maxBytes {
+		return content, alreadyTruncated
+	}
+	text := string(content)
+	if len(text) > maxBytes {
+		text = text[:maxBytes]
+		for len(text) > 0 && !utf8.ValidString(text) {
+			text = text[:len(text)-1]
+		}
+	}
+	return APIRequestLogBody(text + "\n[TRUNCATED]"), true
 }
 
 func CreateAPIRequestLogFromConsumeLog(c *gin.Context, usageLog *Log) error {
@@ -625,6 +812,8 @@ func apiRequestLogListItemFromLog(log *APIRequestLog) *APIRequestLogListItem {
 		SchemaVersion:         log.SchemaVersion,
 		ParseStatus:           log.ParseStatus,
 		ParseError:            log.ParseError,
+		ItemsStatus:           log.ItemsStatus,
+		ItemsError:            log.ItemsError,
 		Usage:                 apiRequestUsageFromRequestLog(log),
 	}
 	return item
@@ -639,6 +828,9 @@ func GetAPIRequestLogById(id int) (*APIRequestLog, error) {
 		return db.Order("seq asc, id asc")
 	}).First(&log, id).Error; err != nil {
 		return nil, err
+	}
+	if log.ItemsStatus == APIRequestLogItemsPending && len(log.Items) > 0 {
+		log.ItemsStatus = APIRequestLogItemsOK
 	}
 	log.Usage = apiRequestUsageFromRequestLog(&log)
 	return &log, nil
@@ -722,7 +914,17 @@ func apiRequestUsageFromRequestLog(log *APIRequestLog) *APIRequestLogUsage {
 }
 
 func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
-	status := &APIRequestLogStorageStatus{}
+	status := &APIRequestLogStorageStatus{
+		AsyncWrite:      common.APIRequestLogAsyncWrite,
+		QueuedItemBytes: atomic.LoadInt64(&apiRequestLogQueuedItemBytes),
+		MaxQueueBytes:   int64(common.APIRequestLogMaxQueueBytes),
+	}
+	apiRequestLogItemQueueMu.Lock()
+	if apiRequestLogItemQueue != nil {
+		status.QueueDepth = len(apiRequestLogItemQueue)
+		status.QueueCapacity = cap(apiRequestLogItemQueue)
+	}
+	apiRequestLogItemQueueMu.Unlock()
 	db := requestLogDB()
 	if db == nil {
 		status.LastWriteError = "request log database is not initialized"

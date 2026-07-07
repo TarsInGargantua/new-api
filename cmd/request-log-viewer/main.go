@@ -781,6 +781,16 @@ const indexHTML = `<!doctype html>
       '</div>'
     ].join('')
     const detailErrorHTML = message => '<div class="empty">Failed to load request: ' + esc(message || 'unknown error') + '</div>'
+    const effectiveItemsStatus = log => {
+      if (log.items_status === 'pending' && (log.items || []).length) return 'ok'
+      return log.items_status || ''
+    }
+    const emptyItemsHTML = log => {
+      const status = effectiveItemsStatus(log)
+      if (status === 'pending') return '<div class="empty">Items are still being written.</div>'
+      if (status === 'failed') return '<div class="empty">Items write failed: ' + esc(log.items_error || 'unknown error') + '</div>'
+      return '<div class="empty">No parsed items.</div>'
+    }
     const timestampFromLocalInput = value => {
       if (!value) return 0
       const date = new Date(value)
@@ -949,7 +959,7 @@ const indexHTML = `<!doctype html>
           '</div>',
           '<pre>' + esc(pretty(item.content)) + '</pre>',
           '</article>'
-        ].join('')).join('') || '<div class="empty">No parsed items.</div>'
+        ].join('')).join('') || emptyItemsHTML(log)
         detailEl.innerHTML = [
           '<div class="detail-head">',
           '<div class="detail-title"><h2>' + esc(log.model_name || '-') + '</h2><div class="request-id">' + esc(log.request_id || '-') + '</div></div>',
@@ -957,9 +967,9 @@ const indexHTML = `<!doctype html>
           '</div>',
           '<div class="summary">',
           '<div class="metric"><span>Items</span><strong>' + esc((log.items || []).length) + '</strong></div>',
+          '<div class="metric"><span>Item status</span><strong>' + esc(effectiveItemsStatus(log) || '-') + '</strong></div>',
           '<div class="metric"><span>Tokens</span><strong>' + esc(log.token_used || 0) + '</strong></div>',
           '<div class="metric"><span>Cost</span><strong>' + esc(log.quota || 0) + '</strong></div>',
-          '<div class="metric"><span>Status</span><strong>' + esc(log.status_code || '-') + '</strong></div>',
           '</div>',
           '<div class="items">' + itemHtml + '</div>'
         ].join('')

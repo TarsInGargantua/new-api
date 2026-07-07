@@ -50,6 +50,55 @@ func TestAPIRequestLogNonTextContentTypeIsNotAuditable(t *testing.T) {
 	}
 }
 
+func TestAPIRequestLogBodyCaptureUsesConfiguredLimit(t *testing.T) {
+	oldEnabled := common.APIRequestLogEnabled
+	oldCaptureResponse := common.APIRequestLogCaptureResponse
+	oldRedactSecrets := common.APIRequestLogRedactSecrets
+	oldMaxBodyBytes := common.APIRequestLogMaxBodyBytes
+	common.APIRequestLogEnabled = true
+	common.APIRequestLogCaptureResponse = true
+	common.APIRequestLogRedactSecrets = false
+	common.APIRequestLogMaxBodyBytes = 12
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.APIRequestLogCaptureResponse = oldCaptureResponse
+		common.APIRequestLogRedactSecrets = oldRedactSecrets
+		common.APIRequestLogMaxBodyBytes = oldMaxBodyBytes
+	})
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"messages":[{"role":"user","content":"this body is intentionally long"}]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	requestLog := buildRequestLogBody(ctx)
+	if requestLog.omittedReason != "truncated" {
+		t.Fatalf("expected truncated request body, got %+v", requestLog)
+	}
+	if requestLog.size <= int64(common.APIRequestLogMaxBodyBytes) {
+		t.Fatalf("expected original request size to be recorded, got %d", requestLog.size)
+	}
+	if len(requestLog.body) > common.APIRequestLogMaxBodyBytes {
+		t.Fatalf("expected captured request body to be limited, got %d", len(requestLog.body))
+	}
+
+	StartAPIRequestLogCapture(ctx)
+	if _, err := ctx.Writer.Write([]byte("1234567890abcdef")); err != nil {
+		t.Fatal(err)
+	}
+	responseLog := buildResponseLogBody(ctx)
+	if responseLog.omittedReason != "truncated" {
+		t.Fatalf("expected truncated response body, got %+v", responseLog)
+	}
+	if responseLog.size != 16 {
+		t.Fatalf("expected full response size to be tracked, got %d", responseLog.size)
+	}
+	if len(responseLog.body) > common.APIRequestLogMaxBodyBytes {
+		t.Fatalf("expected captured response body to be limited, got %d", len(responseLog.body))
+	}
+}
+
 func TestAPIRequestLogCaptureRecordsOnce(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

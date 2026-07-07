@@ -120,6 +120,12 @@ var AuditContentRedactSecrets = true
 var APIRequestLogEnabled = false
 var APIRequestLogRedactSecrets = true
 var APIRequestLogCaptureResponse = true
+var APIRequestLogAsyncWrite = false
+var APIRequestLogQueueSize = 128
+var APIRequestLogWorkers = 2
+var APIRequestLogMaxBodyBytes = 4 * 1024 * 1024
+var APIRequestLogMaxItemBytes = 1024 * 1024
+var APIRequestLogMaxQueueBytes = 64 * 1024 * 1024
 
 var TLSInsecureSkipVerify bool
 var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}

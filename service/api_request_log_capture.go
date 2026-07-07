@@ -1,8 +1,7 @@
 package service
 
 import (
-	"bytes"
-	"sync"
+	"io"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -22,9 +21,7 @@ const APIRequestLogOriginalPathKey = "api_request_log_original_path"
 
 type apiRequestLogWriter struct {
 	gin.ResponseWriter
-	mu   sync.Mutex
-	buf  bytes.Buffer
-	seen int64
+	buffer *limitedAuditBuffer
 }
 
 func (w *apiRequestLogWriter) Write(data []byte) (int, error) {
@@ -41,18 +38,16 @@ func (w *apiRequestLogWriter) capture(data []byte) {
 	if len(data) == 0 || !common.APIRequestLogCaptureResponse {
 		return
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.seen += int64(len(data))
-	_, _ = w.buf.Write(data)
+	if w.buffer != nil {
+		w.buffer.Write(data)
+	}
 }
 
-func (w *apiRequestLogWriter) snapshot() ([]byte, int64) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	data := make([]byte, w.buf.Len())
-	copy(data, w.buf.Bytes())
-	return data, w.seen
+func (w *apiRequestLogWriter) snapshot() ([]byte, int64, bool) {
+	if w.buffer == nil {
+		return nil, 0, false
+	}
+	return w.buffer.Snapshot()
 }
 
 type apiRequestLogBody struct {
@@ -70,7 +65,10 @@ func StartAPIRequestLogCapture(c *gin.Context) {
 	if _, exists := c.Get(apiRequestLogWriterKey); exists {
 		return
 	}
-	writer := &apiRequestLogWriter{ResponseWriter: c.Writer}
+	writer := &apiRequestLogWriter{
+		ResponseWriter: c.Writer,
+		buffer:         newLimitedAuditBuffer(common.APIRequestLogMaxBodyBytes),
+	}
 	c.Writer = writer
 	c.Set(apiRequestLogWriterKey, writer)
 	common.SetContextKey(c, constant.ContextKeyAPIRequestLogDeferConsumeSync, true)
@@ -239,7 +237,7 @@ func buildRequestLogBody(c *gin.Context) apiRequestLogBody {
 			omittedReason: "read_failed",
 		}
 	}
-	body, err := storage.Bytes()
+	body, size, truncated, err := readAPIRequestLogBodyStorage(storage)
 	if err != nil {
 		return apiRequestLogBody{
 			contentType:   contentType,
@@ -249,10 +247,11 @@ func buildRequestLogBody(c *gin.Context) apiRequestLogBody {
 	}
 	text, redacted := auditBodyToStringWithRedact(body, contentType, common.APIRequestLogRedactSecrets)
 	return apiRequestLogBody{
-		body:        text,
-		contentType: contentType,
-		size:        int64(len(body)),
-		redacted:    redacted,
+		body:          text,
+		contentType:   contentType,
+		size:          size,
+		omittedReason: truncatedReason(truncated),
+		redacted:      redacted,
 	}
 }
 
@@ -278,7 +277,7 @@ func buildResponseLogBody(c *gin.Context) apiRequestLogBody {
 			omittedReason: "capture_unavailable",
 		}
 	}
-	body, seen := writer.snapshot()
+	body, seen, truncated := writer.snapshot()
 	if !isAuditableContentType(contentType) {
 		return apiRequestLogBody{
 			contentType:   contentType,
@@ -288,11 +287,39 @@ func buildResponseLogBody(c *gin.Context) apiRequestLogBody {
 	}
 	text, redacted := auditBodyToStringWithRedact(body, contentType, common.APIRequestLogRedactSecrets)
 	return apiRequestLogBody{
-		body:        text,
-		contentType: contentType,
-		size:        seen,
-		redacted:    redacted,
+		body:          text,
+		contentType:   contentType,
+		size:          seen,
+		omittedReason: truncatedReason(truncated),
+		redacted:      redacted,
 	}
+}
+
+func readAPIRequestLogBodyStorage(storage common.BodyStorage) ([]byte, int64, bool, error) {
+	size := storage.Size()
+	limit := common.APIRequestLogMaxBodyBytes
+	if limit <= 0 {
+		return []byte{}, size, size > 0, nil
+	}
+	if size <= int64(limit) {
+		body, err := storage.Bytes()
+		return body, size, false, err
+	}
+	if _, err := storage.Seek(0, io.SeekStart); err != nil {
+		return nil, size, false, err
+	}
+	body, err := io.ReadAll(io.LimitReader(storage, int64(limit)))
+	if _, seekErr := storage.Seek(0, io.SeekStart); err == nil {
+		err = seekErr
+	}
+	return body, size, true, err
+}
+
+func truncatedReason(truncated bool) string {
+	if truncated {
+		return "truncated"
+	}
+	return ""
 }
 
 func buildAPIRequestLogMetadata(c *gin.Context, relayInfo *relaycommon.RelayInfo, relayErr *types.NewAPIError, requestLog apiRequestLogBody, responseLog apiRequestLogBody) map[string]interface{} {
