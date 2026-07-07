@@ -368,6 +368,36 @@ const indexHTML = `<!doctype html>
       backdrop-filter:blur(10px);
     }
     .filter-field { position:relative; min-width:0; }
+    .time-range {
+      grid-column:1 / -1;
+      display:grid;
+      grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;
+      gap:8px;
+      align-items:end;
+    }
+    .time-field {
+      display:flex;
+      flex-direction:column;
+      gap:5px;
+      min-width:0;
+    }
+    .time-field span {
+      color:var(--faint);
+      font-size:11px;
+      font-weight:700;
+      line-height:1;
+      text-transform:uppercase;
+      letter-spacing:.07em;
+    }
+    .time-field input {
+      width:100%;
+      min-height:39px;
+      color-scheme:dark;
+    }
+    .clear-time {
+      min-height:39px;
+      white-space:nowrap;
+    }
     .select-button {
       width:100%;
       display:flex;
@@ -613,7 +643,9 @@ const indexHTML = `<!doctype html>
       main { grid-template-columns:1fr; overflow:visible; }
       aside { border-right:0; border-bottom:1px solid var(--line); max-height:46vh; }
       .filters { grid-template-columns:1fr; }
-      .list-scroll { max-height:calc(46vh - 116px); }
+      .time-range { grid-template-columns:1fr 1fr; }
+      .clear-time { grid-column:1 / -1; }
+      .list-scroll { max-height:none; }
       .detail { overflow:visible; }
       .summary { grid-template-columns:1fr 1fr; }
       .detail-head { grid-template-columns:1fr; }
@@ -643,6 +675,11 @@ const indexHTML = `<!doctype html>
           <button class="select-button" id="userFilter" type="button"><strong>All users</strong><span>User</span></button>
           <div class="select-menu" id="userMenu"></div>
         </div>
+        <div class="time-range">
+          <label class="time-field" for="startTime"><span>Start</span><input id="startTime" type="datetime-local"></label>
+          <label class="time-field" for="endTime"><span>End</span><input id="endTime" type="datetime-local"></label>
+          <button id="clearTime" class="clear-time" type="button">Clear time</button>
+        </div>
       </div>
       <div class="list-scroll">
         <table>
@@ -667,11 +704,18 @@ const indexHTML = `<!doctype html>
     const pageInfoEl = document.getElementById('pageInfo')
     const prevPageEl = document.getElementById('prevPage')
     const nextPageEl = document.getElementById('nextPage')
+    const startTimeEl = document.getElementById('startTime')
+    const endTimeEl = document.getElementById('endTime')
+    const clearTimeEl = document.getElementById('clearTime')
     const selectFields = Array.from(document.querySelectorAll('.filter-field'))
     const state = {
       page: 1,
       pageSize: 50,
       total: 0,
+      time: {
+        start: '',
+        end: ''
+      },
       selected: {
         model_name: new Set(),
         username: new Set()
@@ -681,10 +725,20 @@ const indexHTML = `<!doctype html>
 
     const esc = value => String(value ?? '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]))
     const pretty = value => { try { return JSON.stringify(JSON.parse(value), null, 2) } catch { return value || '' } }
+    const timestampFromLocalInput = value => {
+      if (!value) return 0
+      const date = new Date(value)
+      if (Number.isNaN(date.getTime())) return 0
+      return Math.floor(date.getTime() / 1000)
+    }
     const qs = () => {
       const p = new URLSearchParams({ p:String(state.page), page_size:String(state.pageSize) })
       state.selected.model_name.forEach(value => p.append('model_name', value))
       state.selected.username.forEach(value => p.append('username', value))
+      const startTimestamp = timestampFromLocalInput(state.time.start)
+      const endTimestamp = timestampFromLocalInput(state.time.end)
+      if (startTimestamp > 0) p.set('start_timestamp', String(startTimestamp))
+      if (endTimestamp > 0) p.set('end_timestamp', String(endTimestamp))
       return p
     }
     async function api(path) {
@@ -863,6 +917,19 @@ const indexHTML = `<!doctype html>
       if (state.page >= totalPages) return
       state.page++
       loadRows()
+    }
+    function applyTimeFilter() {
+      state.time.start = startTimeEl.value
+      state.time.end = endTimeEl.value
+      state.page = 1
+      loadRows()
+    }
+    startTimeEl.onchange = applyTimeFilter
+    endTimeEl.onchange = applyTimeFilter
+    clearTimeEl.onclick = () => {
+      startTimeEl.value = ''
+      endTimeEl.value = ''
+      applyTimeFilter()
     }
     loadStatus().catch(err => statusEl.textContent = err.message)
     loadFilterOptions().catch(err => statusEl.textContent = err.message)
