@@ -238,6 +238,96 @@ func TestRecordAPIRequestLogForConsumeUsesConsumeLogFields(t *testing.T) {
 	}
 }
 
+func TestRecordAPIRequestLogMergesConsumeParentWithCapturedItems(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.APIRequestLog{}, &model.APIRequestLogItem{}, &model.Log{}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLogDB := model.LOG_DB
+	oldRequestLogDB := model.REQUEST_LOG_DB
+	oldEnabled := common.APIRequestLogEnabled
+	oldCaptureResponse := common.APIRequestLogCaptureResponse
+	oldRedactSecrets := common.APIRequestLogRedactSecrets
+	model.LOG_DB = db
+	model.REQUEST_LOG_DB = db
+	common.APIRequestLogEnabled = true
+	common.APIRequestLogCaptureResponse = true
+	common.APIRequestLogRedactSecrets = true
+	t.Cleanup(func() {
+		model.LOG_DB = oldLogDB
+		model.REQUEST_LOG_DB = oldRequestLogDB
+		common.APIRequestLogEnabled = oldEnabled
+		common.APIRequestLogCaptureResponse = oldCaptureResponse
+		common.APIRequestLogRedactSecrets = oldRedactSecrets
+	})
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-merge","messages":[{"role":"user","content":"merge-input"}]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Set(common.RequestIdKey, "req-merge")
+	ctx.Set(common.UpstreamRequestIdKey, "upstream-merge")
+	ctx.Set("id", 7000)
+	ctx.Set("username", "context-user")
+	ctx.Set("token_id", 11000)
+	ctx.Set("token_name", "context-token")
+	ctx.Set("channel_id", 13000)
+	ctx.Set("group", "context-group")
+	ctx.Set("original_model", "gpt-merge")
+	StartAPIRequestLogCapture(ctx)
+	if _, err := ctx.Writer.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"merge-output"}}]}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	consumeLog := &model.Log{
+		UserId:            17,
+		Username:          "consume-user",
+		TokenId:           21,
+		TokenName:         "consume-token",
+		ModelName:         "gpt-merge",
+		CreatedAt:         123,
+		RequestId:         "req-merge",
+		UpstreamRequestId: "upstream-merge",
+		ChannelId:         23,
+		Group:             "consume-group",
+		Type:              model.LogTypeConsume,
+		Quota:             99,
+		PromptTokens:      8,
+		CompletionTokens:  9,
+	}
+	if err := db.Create(consumeLog).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := model.CreateAPIRequestLogFromConsumeLog(ctx, consumeLog); err != nil {
+		t.Fatal(err)
+	}
+	RecordAPIRequestLog(ctx, nil, nil)
+
+	var logs []model.APIRequestLog
+	if err := db.Find(&logs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected one merged request log, got %d", len(logs))
+	}
+	if logs[0].UsageLogId != consumeLog.Id {
+		t.Fatalf("expected merged log to keep usage log id %d, got %d", consumeLog.Id, logs[0].UsageLogId)
+	}
+	var items []model.APIRequestLogItem
+	if err := db.Where("log_id = ?", logs[0].Id).Order("seq asc").Find(&items).Error; err != nil {
+		t.Fatal(err)
+	}
+	joined := requestLogItemText(items)
+	if !strings.Contains(joined, "merge-input") || !strings.Contains(joined, "merge-output") {
+		t.Fatalf("expected merged log items to include request and response, got %s", joined)
+	}
+}
+
 func requestLogItemText(items []model.APIRequestLogItem) string {
 	parts := make([]string, 0, len(items))
 	for _, item := range items {

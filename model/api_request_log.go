@@ -341,7 +341,22 @@ func findExistingAPIRequestLog(tx *gorm.DB, log *APIRequestLog, out *APIRequestL
 		return tx.Where("source = ? AND source_id = ?", log.Source, log.SourceId).Order("id asc").First(out).Error
 	}
 	if log.UsageLogId > 0 {
-		return tx.Where("usage_log_id = ?", log.UsageLogId).Order("id asc").First(out).Error
+		err := tx.Where("usage_log_id = ?", log.UsageLogId).Order("id asc").First(out).Error
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+	}
+	if log.Source == APIRequestLogSourceLive && (log.RequestId != "" || log.UpstreamRequestId != "") {
+		query := tx.Where("source = ?", log.Source)
+		switch {
+		case log.RequestId != "" && log.UpstreamRequestId != "":
+			query = query.Where("(request_id = ? OR upstream_request_id = ?)", log.RequestId, log.UpstreamRequestId)
+		case log.RequestId != "":
+			query = query.Where("request_id = ?", log.RequestId)
+		default:
+			query = query.Where("upstream_request_id = ?", log.UpstreamRequestId)
+		}
+		return query.Order("usage_log_id desc, id asc").First(out).Error
 	}
 	if log.Id > 0 {
 		return tx.First(out, log.Id).Error
