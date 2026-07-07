@@ -68,6 +68,18 @@ REQUEST_LOG_SQL_DSN='<new-request-log-dsn>' \
   ./request-log-migrate -dry-run -batch-size 500
 ```
 
+For large legacy tables, count first and start with a bounded sample:
+
+```bash
+SOURCE_REQUEST_LOG_SQL_DSN='<old-zeabur-dsn>' \
+REQUEST_LOG_SQL_DSN='<new-request-log-dsn>' \
+  ./request-log-migrate -count-only
+
+SOURCE_REQUEST_LOG_SQL_DSN='<old-zeabur-dsn>' \
+REQUEST_LOG_SQL_DSN='<new-request-log-dsn>' \
+  ./request-log-migrate -dry-run -batch-size 1 -max-rows 20
+```
+
 Then migrate:
 
 ```bash
@@ -76,11 +88,11 @@ REQUEST_LOG_SQL_DSN='<new-request-log-dsn>' \
   ./request-log-migrate -batch-size 500
 ```
 
-The migrator uses `source=legacy_api_request_logs` and `source_id=<old id>` for idempotent updates. It also hydrates usage fields from the old `logs` table by `usage_log_id` when available.
+Use `-after-id <legacy id>` to resume from a known legacy id. The migrator uses `source=legacy_api_request_logs` and `source_id=<old id>` for idempotent updates. It also hydrates usage fields from the old `logs` table by `usage_log_id` when available.
 
 ## Standalone Viewer
 
-The viewer serves both static UI and APIs on `:3001`.
+The viewer serves both static UI and APIs on `:3001`. It can stay private on the request-log host or an internal network; a public HTTP endpoint is not required for the main service to write request-log data.
 
 Required env:
 
@@ -120,13 +132,13 @@ Viewer endpoints:
 
 ## Firewall
 
-Only enable restrictive UFW rules after the Zeabur egress CIDR and admin CIDR are confirmed:
+Only enable restrictive UFW rules after the Zeabur egress CIDR is confirmed. Open `3001` only to the internal/admin network if the viewer must be reached from another host.
 
 ```bash
 sudo ufw default deny incoming
 sudo ufw allow OpenSSH
 sudo ufw allow from <ZEABUR_EGRESS_CIDR> to any port 3306 proto tcp
-sudo ufw allow from <ADMIN_CIDR> to any port 3001 proto tcp
+sudo ufw allow from <ADMIN_OR_INTERNAL_CIDR> to any port 3001 proto tcp
 sudo ufw enable
 sudo ufw status verbose
 ```
@@ -139,4 +151,4 @@ mysql --protocol=tcp -h <PUBLIC_MYSQL_HOST> -P <PUBLIC_MYSQL_PORT> -u newapi_req
 curl -u "$REQUEST_LOG_VIEWER_USERNAME:$REQUEST_LOG_VIEWER_PASSWORD" http://127.0.0.1:3001/api/status
 ```
 
-External validation must return a MySQL handshake on `3306` and HTTP 401/200 from the viewer on `3001`. If TCP connects but returns zero bytes, fix the cloud firewall, router NAT, or port forwarding before configuring Zeabur with the public DSN.
+External validation is only required for the MySQL endpoint used by Zeabur, such as a public router mapping to the remote MySQL service. If TCP connects but returns zero bytes, fix the cloud firewall, router NAT, or port forwarding before configuring Zeabur with the public DSN.

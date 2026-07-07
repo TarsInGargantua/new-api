@@ -18,6 +18,7 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type legacyAPIRequestLog struct {
@@ -80,6 +81,9 @@ func main() {
 	sourceDSN := flag.String("source-dsn", firstNonEmpty(os.Getenv("SOURCE_REQUEST_LOG_SQL_DSN"), os.Getenv("SOURCE_SQL_DSN")), "legacy api_request_logs database DSN")
 	targetDSN := flag.String("target-dsn", os.Getenv("REQUEST_LOG_SQL_DSN"), "normalized request log database DSN")
 	batchSize := flag.Int("batch-size", 500, "number of rows per batch")
+	maxRows := flag.Int("max-rows", 0, "maximum number of legacy rows to process, 0 means all rows")
+	afterId := flag.Int("after-id", 0, "only process legacy rows with id greater than this value")
+	countOnly := flag.Bool("count-only", false, "only count source legacy rows without parsing or writing")
 	dryRun := flag.Bool("dry-run", false, "parse and count rows without writing target database")
 	initOnly := flag.Bool("init-only", false, "only initialize normalized target tables")
 	flag.Parse()
@@ -87,11 +91,23 @@ func main() {
 	if strings.TrimSpace(*sourceDSN) == "" && !*initOnly {
 		log.Fatal("source DSN is required: set SOURCE_REQUEST_LOG_SQL_DSN or pass -source-dsn")
 	}
-	if strings.TrimSpace(*targetDSN) == "" && (!*dryRun || *initOnly) {
+	if strings.TrimSpace(*targetDSN) == "" && (!*dryRun || *initOnly) && !*countOnly {
 		log.Fatal("target DSN is required: set REQUEST_LOG_SQL_DSN or pass -target-dsn")
 	}
+	if *batchSize <= 0 {
+		log.Fatal("batch-size must be greater than 0")
+	}
+	if *maxRows < 0 {
+		log.Fatal("max-rows must be greater than or equal to 0")
+	}
+	if *afterId < 0 {
+		log.Fatal("after-id must be greater than or equal to 0")
+	}
+	if *countOnly && *initOnly {
+		log.Fatal("count-only and init-only cannot be used together")
+	}
 
-	if !*dryRun {
+	if !*dryRun && !*countOnly {
 		targetDB, err := openDB(*targetDSN)
 		if err != nil {
 			log.Fatalf("open target database: %v", err)
@@ -110,12 +126,29 @@ func main() {
 	if err != nil {
 		log.Fatalf("open source database: %v", err)
 	}
+	if *countOnly {
+		var total int64
+		if err := sourceDB.Model(&legacyAPIRequestLog{}).Where("id > ?", *afterId).Count(&total).Error; err != nil {
+			log.Fatalf("count legacy rows after id %d: %v", *afterId, err)
+		}
+		log.Printf("source rows after id %d: %d", *afterId, total)
+		return
+	}
 
 	var migrated, failed int
-	lastId := 0
+	lastId := *afterId
 	for {
+		processed := migrated + failed
+		if *maxRows > 0 && processed >= *maxRows {
+			log.Printf("stopped at max-rows=%d", *maxRows)
+			break
+		}
+		limit := *batchSize
+		if *maxRows > 0 && *maxRows-processed < limit {
+			limit = *maxRows - processed
+		}
 		var rows []legacyAPIRequestLog
-		if err := sourceDB.Where("id > ?", lastId).Order("id asc").Limit(*batchSize).Find(&rows).Error; err != nil {
+		if err := sourceDB.Where("id > ?", lastId).Order("id asc").Limit(limit).Find(&rows).Error; err != nil {
 			log.Fatalf("read legacy rows after id %d: %v", lastId, err)
 		}
 		if len(rows) == 0 {
@@ -287,10 +320,10 @@ func openDB(dsn string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("empty dsn")
 	}
 	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		return gorm.Open(postgres.New(postgres.Config{DSN: dsn, PreferSimpleProtocol: true}), &gorm.Config{PrepareStmt: true})
+		return gorm.Open(postgres.New(postgres.Config{DSN: dsn, PreferSimpleProtocol: true}), migrationGormConfig())
 	}
 	if strings.HasPrefix(dsn, "local") || strings.HasSuffix(dsn, ".db") || strings.HasSuffix(dsn, ".sqlite") {
-		return gorm.Open(sqlite.Open(strings.TrimPrefix(dsn, "local:")), &gorm.Config{PrepareStmt: true})
+		return gorm.Open(sqlite.Open(strings.TrimPrefix(dsn, "local:")), migrationGormConfig())
 	}
 	if strings.HasPrefix(strings.ToLower(dsn), "mysql://") {
 		converted, err := mysqlURLToDriverDSN(dsn)
@@ -299,7 +332,14 @@ func openDB(dsn string) (*gorm.DB, error) {
 		}
 		dsn = converted
 	}
-	return gorm.Open(mysql.Open(ensureMySQLDefaults(dsn)), &gorm.Config{PrepareStmt: true})
+	return gorm.Open(mysql.Open(ensureMySQLDefaults(dsn)), migrationGormConfig())
+}
+
+func migrationGormConfig() *gorm.Config {
+	return &gorm.Config{
+		PrepareStmt: true,
+		Logger:      logger.Default.LogMode(logger.Silent),
+	}
 }
 
 func mysqlURLToDriverDSN(raw string) (string, error) {
