@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/types"
 
@@ -253,8 +254,10 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		logger.LogError(c, "failed to record log: "+err.Error())
 		return nil
 	}
-	if err := CreateAPIRequestLogFromConsumeLog(c, log); err != nil {
-		logger.LogError(c, "failed to sync consume log to api request log: "+err.Error())
+	if c == nil || !common.GetContextKeyBool(c, constant.ContextKeyAPIRequestLogDeferConsumeSync) {
+		if err := CreateAPIRequestLogFromConsumeLog(c, log); err != nil {
+			logger.LogError(c, "failed to sync consume log to api request log: "+err.Error())
+		}
 	}
 	if common.DataExportEnabled {
 		gopool.Go(func() {

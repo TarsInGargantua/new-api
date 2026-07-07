@@ -14,12 +14,26 @@ Set these on the main new-api deployment:
 API_REQUEST_LOG_ENABLED=true
 API_REQUEST_LOG_CAPTURE_RESPONSE=true
 API_REQUEST_LOG_REDACT_SECRETS=true
+API_REQUEST_LOG_ASYNC_WRITE=true
+API_REQUEST_LOG_QUEUE_SIZE=128
+API_REQUEST_LOG_WORKERS=2
+API_REQUEST_LOG_MAX_BODY_BYTES=4194304
+API_REQUEST_LOG_MAX_ITEM_BYTES=1048576
+API_REQUEST_LOG_MAX_QUEUE_BYTES=67108864
 REQUEST_LOG_SQL_DSN=newapi_request_log_app:<password>@tcp(<REMOTE_PUBLIC_HOST>:3306)/newapi_request_logs?charset=utf8mb4&parseTime=true&loc=Local
 ```
 
 If the public router maps MySQL to a non-3306 external port, use that external host and port in `REQUEST_LOG_SQL_DSN`, for example `@tcp(<PUBLIC_MYSQL_HOST>:9008)`.
 
 Do not change `SQL_DSN` or `LOG_SQL_DSN` for this migration unless the main application database is also being moved.
+
+For high-concurrency or very large requests:
+
+- `API_REQUEST_LOG_ASYNC_WRITE=true` writes parent rows synchronously and queues item inserts in background workers.
+- `API_REQUEST_LOG_MAX_BODY_BYTES` limits captured request/response bytes before parsing. `0` disables body capture.
+- `API_REQUEST_LOG_MAX_ITEM_BYTES` truncates each parsed item before database insert. `0` disables item truncation.
+- `API_REQUEST_LOG_MAX_QUEUE_BYTES` caps queued item payload bytes in process memory. `0` disables this byte cap.
+- Increase `API_REQUEST_LOG_WORKERS` only if MySQL can handle the extra insert concurrency.
 
 ## Schema
 

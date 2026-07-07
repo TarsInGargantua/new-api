@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 
@@ -16,7 +19,8 @@ import (
 
 func setupAPIRequestLogTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	resetAPIRequestLogItemQueueForTest()
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "test.db")), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&APIRequestLog{}, &APIRequestLogItem{}, &Log{}, &Ability{}, &Channel{}, &Model{}, &User{}, &QuotaData{}))
 
@@ -31,6 +35,7 @@ func setupAPIRequestLogTestDB(t *testing.T) *gorm.DB {
 	logGroupCol = "`group`"
 	commonGroupCol = "`group`"
 	t.Cleanup(func() {
+		resetAPIRequestLogItemQueueForTest()
 		DB = oldDB
 		LOG_DB = oldLogDB
 		REQUEST_LOG_DB = oldRequestLogDB
@@ -38,6 +43,16 @@ func setupAPIRequestLogTestDB(t *testing.T) *gorm.DB {
 		commonGroupCol = oldCommonGroupCol
 	})
 	return db
+}
+
+func resetAPIRequestLogItemQueueForTest() {
+	apiRequestLogItemQueueMu.Lock()
+	if apiRequestLogItemQueue != nil {
+		close(apiRequestLogItemQueue)
+		apiRequestLogItemQueue = nil
+	}
+	apiRequestLogItemQueueMu.Unlock()
+	atomic.StoreInt64(&apiRequestLogQueuedItemBytes, 0)
 }
 
 func TestGetLogModelNames(t *testing.T) {
@@ -203,6 +218,131 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 	require.Equal(t, APIRequestLogBody("ok"), detail.Items[1].Content)
 	require.NotNil(t, detail.Usage)
 	require.Equal(t, 1234, detail.Usage.Quota)
+}
+
+func TestCreateAPIRequestLogAsyncItems(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	oldAsync := common.APIRequestLogAsyncWrite
+	oldQueueSize := common.APIRequestLogQueueSize
+	oldWorkers := common.APIRequestLogWorkers
+	oldMaxItemBytes := common.APIRequestLogMaxItemBytes
+	oldMaxQueueBytes := common.APIRequestLogMaxQueueBytes
+	common.APIRequestLogAsyncWrite = true
+	common.APIRequestLogQueueSize = 4
+	common.APIRequestLogWorkers = 1
+	common.APIRequestLogMaxItemBytes = 1024
+	common.APIRequestLogMaxQueueBytes = 1024 * 1024
+	t.Cleanup(func() {
+		common.APIRequestLogAsyncWrite = oldAsync
+		common.APIRequestLogQueueSize = oldQueueSize
+		common.APIRequestLogWorkers = oldWorkers
+		common.APIRequestLogMaxItemBytes = oldMaxItemBytes
+		common.APIRequestLogMaxQueueBytes = oldMaxQueueBytes
+	})
+
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		Source:      APIRequestLogSourceLive,
+		UsageLogId:  11,
+		Username:    "async-user",
+		TokenName:   "async-token",
+		ModelName:   "gpt-async",
+		CreatedAt:   101,
+		RequestId:   "req-async",
+		ParseStatus: APIRequestLogParseOK,
+		Items: []APIRequestLogItem{
+			{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody("async hello")},
+		},
+	}))
+
+	var logs []APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.Find(&logs).Error)
+	require.Len(t, logs, 1)
+	require.Equal(t, APIRequestLogItemsPending, logs[0].ItemsStatus)
+
+	var detail *APIRequestLog
+	require.Eventually(t, func() bool {
+		var err error
+		detail, err = GetAPIRequestLogById(logs[0].Id)
+		return err == nil && len(detail.Items) == 1 && detail.ItemsStatus == APIRequestLogItemsOK
+	}, 2*time.Second, 20*time.Millisecond)
+	require.Equal(t, APIRequestLogBody("async hello"), detail.Items[0].Content)
+
+	var stored APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.First(&stored, logs[0].Id).Error)
+	require.Equal(t, APIRequestLogItemsPending, stored.ItemsStatus)
+}
+
+func TestCreateAPIRequestLogAsyncItemsQueueByteLimit(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	oldAsync := common.APIRequestLogAsyncWrite
+	oldQueueSize := common.APIRequestLogQueueSize
+	oldWorkers := common.APIRequestLogWorkers
+	oldMaxItemBytes := common.APIRequestLogMaxItemBytes
+	oldMaxQueueBytes := common.APIRequestLogMaxQueueBytes
+	common.APIRequestLogAsyncWrite = true
+	common.APIRequestLogQueueSize = 4
+	common.APIRequestLogWorkers = 1
+	common.APIRequestLogMaxItemBytes = 1024
+	common.APIRequestLogMaxQueueBytes = 8
+	t.Cleanup(func() {
+		common.APIRequestLogAsyncWrite = oldAsync
+		common.APIRequestLogQueueSize = oldQueueSize
+		common.APIRequestLogWorkers = oldWorkers
+		common.APIRequestLogMaxItemBytes = oldMaxItemBytes
+		common.APIRequestLogMaxQueueBytes = oldMaxQueueBytes
+	})
+
+	err := CreateAPIRequestLog(&APIRequestLog{
+		Source:      APIRequestLogSourceLive,
+		UsageLogId:  13,
+		Username:    "queue-user",
+		ModelName:   "gpt-queue",
+		CreatedAt:   103,
+		RequestId:   "req-queue-limit",
+		ParseStatus: APIRequestLogParseOK,
+		Items: []APIRequestLogItem{
+			{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody("123456789abcdef")},
+		},
+	})
+	require.Error(t, err)
+
+	var log APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.First(&log, "usage_log_id = ?", 13).Error)
+	require.Equal(t, APIRequestLogItemsFailed, log.ItemsStatus)
+	require.Contains(t, log.ItemsError, "byte limit")
+
+	var count int64
+	require.NoError(t, REQUEST_LOG_DB.Model(&APIRequestLogItem{}).Where("log_id = ?", log.Id).Count(&count).Error)
+	require.Equal(t, int64(0), count)
+}
+
+func TestCreateAPIRequestLogTruncatesLargeItems(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	oldMaxItemBytes := common.APIRequestLogMaxItemBytes
+	common.APIRequestLogMaxItemBytes = 8
+	t.Cleanup(func() {
+		common.APIRequestLogMaxItemBytes = oldMaxItemBytes
+	})
+
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		UsageLogId:  12,
+		Username:    "truncate-user",
+		ModelName:   "gpt-truncate",
+		CreatedAt:   102,
+		ParseStatus: APIRequestLogParseOK,
+		Items: []APIRequestLogItem{
+			{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody("123456789abcdef")},
+		},
+	}))
+
+	var log APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.Preload("Items").First(&log, "usage_log_id = ?", 12).Error)
+	require.Len(t, log.Items, 1)
+	require.True(t, log.Items[0].Truncated)
+	require.Contains(t, string(log.Items[0].Content), "[TRUNCATED]")
 }
 
 func TestCreateAPIRequestLogUsageOnlyUpdatePreservesItems(t *testing.T) {

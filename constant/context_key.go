@@ -66,4 +66,6 @@ const (
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage ContextKey = "language"
 	ContextKeyIsStream ContextKey = "is_stream"
+
+	ContextKeyAPIRequestLogDeferConsumeSync ContextKey = "api_request_log_defer_consume_sync"
 )
