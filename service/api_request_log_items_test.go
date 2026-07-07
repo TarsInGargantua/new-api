@@ -28,6 +28,27 @@ func TestBuildAPIRequestLogTrainingItemsResponsesInputDoesNotDuplicate(t *testin
 	}
 }
 
+func TestBuildAPIRequestLogTrainingItemsChatMessagesDoNotDuplicate(t *testing.T) {
+	requestBody := `{"messages":[{"role":"user","content":"hello chat"}]}`
+	items, status, parseError := BuildAPIRequestLogTrainingItems(requestBody, "")
+	if status != model.APIRequestLogParseOK {
+		t.Fatalf("expected ok parse status, got %s: %s", status, parseError)
+	}
+
+	count := 0
+	for _, item := range items {
+		if item.Phase == model.APIRequestLogPhaseInput &&
+			item.ItemType == model.APIRequestLogItemMessage &&
+			item.Role == "user" &&
+			strings.Contains(string(item.Content), "hello chat") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected one chat user item, got %d: %+v", count, items)
+	}
+}
+
 func TestBuildAPIRequestLogTrainingItemsCapturesReasoningToolAndEncrypted(t *testing.T) {
 	requestBody := `{
 		"messages":[
