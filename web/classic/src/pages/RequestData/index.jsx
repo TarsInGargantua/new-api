@@ -199,6 +199,103 @@ const UsagePanel = ({ usage, t }) => {
   );
 };
 
+const RequestLogItemsPanel = ({ items, t }) => {
+  const list = Array.isArray(items) ? items : [];
+  if (list.length === 0) {
+    return (
+      <div
+        className='rounded-lg border p-4 text-sm'
+        style={{
+          borderColor: 'var(--semi-color-border)',
+          background: 'var(--semi-color-fill-0)',
+        }}
+      >
+        {t('未解析到训练条目')}
+      </div>
+    );
+  }
+
+  return (
+    <div className='flex max-h-[58vh] flex-col gap-2 overflow-auto pr-1'>
+      {list.map((item) => {
+        const content = prettyText(item.content);
+        const handleCopy = async () => {
+          if (await copy(content)) {
+            showSuccess(t('复制成功'));
+          } else {
+            showError(t('复制失败'));
+          }
+        };
+
+        return (
+          <div
+            key={item.id || item.seq}
+            className='rounded-lg border p-3'
+            style={{
+              borderColor: 'var(--semi-color-border)',
+              background: 'var(--semi-color-fill-0)',
+            }}
+          >
+            <div className='mb-2 flex flex-wrap items-center gap-2 text-xs'>
+              <Tag color={item.phase === 'output' ? 'green' : 'white'} shape='circle'>
+                {item.seq}
+              </Tag>
+              <Tag color='white' shape='circle'>
+                {item.phase || '-'}
+              </Tag>
+              <Tag color='white' shape='circle'>
+                {item.item_type || '-'}
+              </Tag>
+              {item.role && (
+                <Tag color='white' shape='circle'>
+                  {item.role}
+                </Tag>
+              )}
+              {item.content_type && (
+                <Tag color='white' shape='circle'>
+                  {item.content_type}
+                </Tag>
+              )}
+              {item.name && (
+                <Typography.Text size='small' type='tertiary'>
+                  {item.name}
+                </Typography.Text>
+              )}
+              {item.tool_call_id && (
+                <Typography.Text size='small' type='tertiary' code>
+                  {item.tool_call_id}
+                </Typography.Text>
+              )}
+              {item.source && (
+                <Typography.Text size='small' type='tertiary'>
+                  {item.source}
+                </Typography.Text>
+              )}
+              <Button
+                type='tertiary'
+                size='small'
+                icon={<Copy size={14} />}
+                onClick={handleCopy}
+              >
+                {t('复制')}
+              </Button>
+            </div>
+            <pre
+              className='max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border p-3 text-xs leading-relaxed'
+              style={{
+                borderColor: 'var(--semi-color-border)',
+                background: 'var(--semi-color-bg-0)',
+              }}
+            >
+              {content || '-'}
+            </pre>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 const RequestData = () => {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
@@ -440,8 +537,6 @@ const RequestData = () => {
     loadStatus();
   }, []);
 
-  const metadata = detail?.metadata ? prettyText(detail.metadata) : '';
-
   return (
     <div className='mt-[60px] px-2'>
       <CardPro
@@ -612,37 +707,11 @@ const RequestData = () => {
               </Tag>
             </div>
             <Tabs type='line' size='small'>
-              <TabPane tab={t('请求内容')} itemKey='request'>
-                <BodyPanel
-                  title={t('请求内容')}
-                  contentType={detail?.request_content_type}
-                  size={detail?.request_size}
-                  omittedReason={detail?.request_omitted_reason}
-                  body={detail?.request_body}
-                  t={t}
-                />
-              </TabPane>
-              <TabPane tab={t('响应内容')} itemKey='response'>
-                <BodyPanel
-                  title={t('响应内容')}
-                  contentType={detail?.response_content_type}
-                  size={detail?.response_size}
-                  omittedReason={detail?.response_omitted_reason}
-                  body={detail?.response_body}
-                  t={t}
-                />
+              <TabPane tab={t('训练条目')} itemKey='items'>
+                <RequestLogItemsPanel items={detail?.items} t={t} />
               </TabPane>
               <TabPane tab={t('用量')} itemKey='usage'>
                 <UsagePanel usage={detail?.usage} t={t} />
-              </TabPane>
-              <TabPane tab={t('元数据')} itemKey='metadata'>
-                <BodyPanel
-                  title={t('元数据')}
-                  contentType='application/json'
-                  size={metadata.length}
-                  body={metadata}
-                  t={t}
-                />
               </TabPane>
             </Tabs>
           </div>

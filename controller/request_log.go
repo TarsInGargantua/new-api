@@ -59,9 +59,9 @@ func GetAPIRequestLogStatus(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, apiRequestLogStatusResponse{
-		Enabled:                    common.LogConsumeEnabled,
-		RedactSecrets:              common.AuditContentRedactSecrets,
-		CaptureResponse:            common.AuditContentCaptureResponse,
+		Enabled:                    common.APIRequestLogEnabled,
+		RedactSecrets:              common.APIRequestLogRedactSecrets,
+		CaptureResponse:            common.APIRequestLogCaptureResponse,
 		APIRequestLogStorageStatus: storageStatus,
 	})
 }

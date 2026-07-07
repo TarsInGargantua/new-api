@@ -4514,6 +4514,8 @@
     "Usage Content": "Usage Content",
     "Usage Metadata": "Usage Metadata",
     "No matching usage log": "No matching usage log",
+    "Training Items": "Training Items",
+    "No training items parsed": "No training items parsed",
     "Request log rows": "Request log rows",
     "Request log table missing": "Request log table missing",
     "Capture response": "Capture response",

@@ -3715,6 +3715,8 @@
     "脱敏": "Masquage",
     "最后捕获": "Dernière capture",
     "用量": "Utilisation",
-    "全部时间": "Toute la période"
+    "全部时间": "Toute la période",
+    "训练条目": "Éléments d’entraînement",
+    "未解析到训练条目": "Aucun élément d’entraînement analysé"
   }
 }

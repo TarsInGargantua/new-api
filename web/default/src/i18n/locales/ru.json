@@ -4514,6 +4514,8 @@
     "Usage Content": "Содержимое журнала использования",
     "Usage Metadata": "Метаданные использования",
     "No matching usage log": "Нет соответствующего журнала использования",
+    "Training Items": "Элементы обучения",
+    "No training items parsed": "Элементы обучения не разобраны",
     "Request log rows": "Строки журнала запросов",
     "Request log table missing": "Таблица журнала запросов отсутствует",
     "Capture response": "Записывать ответ",

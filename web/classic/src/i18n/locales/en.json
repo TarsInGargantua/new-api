@@ -3860,6 +3860,8 @@
     "脱敏": "Redaction",
     "最后捕获": "Last captured",
     "用量": "Usage",
-    "全部时间": "All time"
+    "全部时间": "All time",
+    "训练条目": "Training Items",
+    "未解析到训练条目": "No training items parsed"
   }
 }

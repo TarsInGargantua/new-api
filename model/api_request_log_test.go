@@ -18,19 +18,22 @@ func setupAPIRequestLogTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&APIRequestLog{}, &Log{}, &Ability{}, &Channel{}, &Model{}, &User{}, &QuotaData{}))
+	require.NoError(t, db.AutoMigrate(&APIRequestLog{}, &APIRequestLogItem{}, &Log{}, &Ability{}, &Channel{}, &Model{}, &User{}, &QuotaData{}))
 
 	oldDB := DB
 	oldLogDB := LOG_DB
+	oldRequestLogDB := REQUEST_LOG_DB
 	oldLogGroupCol := logGroupCol
 	oldCommonGroupCol := commonGroupCol
 	DB = db
 	LOG_DB = db
+	REQUEST_LOG_DB = db
 	logGroupCol = "`group`"
 	commonGroupCol = "`group`"
 	t.Cleanup(func() {
 		DB = oldDB
 		LOG_DB = oldLogDB
+		REQUEST_LOG_DB = oldRequestLogDB
 		logGroupCol = oldLogGroupCol
 		commonGroupCol = oldCommonGroupCol
 	})
@@ -135,26 +138,8 @@ func TestGetUserUsageStatsPage(t *testing.T) {
 func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
 
-	usageLog := &Log{
-		UserId:           2,
-		Username:         "alice",
-		Type:             LogTypeConsume,
-		ModelName:        "gpt-test",
-		TokenId:          9,
-		TokenName:        "prod-token",
-		Quota:            1234,
-		PromptTokens:     100,
-		CompletionTokens: 20,
-		UseTime:          3,
-		CreatedAt:        100,
-		RequestId:        "req-1",
-		Content:          "consume detail",
-		Other:            `{"foo":"bar","message_capture":{"raw_request":{"content_type":"application/json","body":"{\"prompt\":\"hello\"}","size":18,"redacted":true},"raw_response":{"content_type":"text/event-stream","body":"data: {\"ok\":true}","size":32}}}`,
-	}
-	require.NoError(t, LOG_DB.Create(usageLog).Error)
-
 	err := CreateAPIRequestLog(&APIRequestLog{
-		UsageLogId:          usageLog.Id,
+		UsageLogId:          10,
 		UserId:              2,
 		Username:            "alice",
 		TokenId:             9,
@@ -170,9 +155,15 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 		RequestSize:         18,
 		ResponseSize:        32,
 		Redacted:            true,
-		RequestBody:         APIRequestLogBody(`{"prompt":"hello"}`),
-		ResponseBody:        APIRequestLogBody(`data: {"ok":true}`),
-		Metadata:            APIRequestLogBody(`{"relay_format":"openai"}`),
+		Quota:               1234,
+		PromptTokens:        100,
+		CompletionTokens:    20,
+		TokenUsed:           120,
+		UseTime:             3,
+		Items: []APIRequestLogItem{
+			{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody("hello")},
+			{Seq: 2, Phase: APIRequestLogPhaseOutput, ItemType: APIRequestLogItemMessage, Role: "assistant", ContentType: "text", Content: APIRequestLogBody("ok")},
+		},
 	})
 	require.NoError(t, err)
 	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
@@ -196,7 +187,7 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 	require.Equal(t, int64(1), total)
 	require.Len(t, items, 1)
 	require.Equal(t, "prod-token", items[0].TokenName)
-	require.Equal(t, usageLog.Id, items[0].UsageLogId)
+	require.Equal(t, 10, items[0].UsageLogId)
 	require.Equal(t, int64(18), items[0].RequestSize)
 	require.NotNil(t, items[0].Usage)
 	require.Equal(t, 1234, items[0].Usage.Quota)
@@ -205,12 +196,50 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 
 	detail, err := GetAPIRequestLogById(items[0].Id)
 	require.NoError(t, err)
-	require.Equal(t, APIRequestLogBody(`{"prompt":"hello"}`), detail.RequestBody)
-	require.Equal(t, APIRequestLogBody(`data: {"ok":true}`), detail.ResponseBody)
+	require.Empty(t, detail.RequestBody)
+	require.Empty(t, detail.ResponseBody)
+	require.Len(t, detail.Items, 2)
+	require.Equal(t, APIRequestLogBody("hello"), detail.Items[0].Content)
+	require.Equal(t, APIRequestLogBody("ok"), detail.Items[1].Content)
 	require.NotNil(t, detail.Usage)
-	require.Equal(t, "consume detail", detail.Usage.Content)
-	require.Contains(t, detail.Usage.Other, `"foo":"bar"`)
-	require.Contains(t, detail.Usage.Other, `"message_capture"`)
+	require.Equal(t, 1234, detail.Usage.Quota)
+}
+
+func TestCreateAPIRequestLogUsageOnlyUpdatePreservesItems(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		UsageLogId:  10,
+		Username:    "alice",
+		TokenName:   "prod-token",
+		ModelName:   "gpt-test",
+		Quota:       1,
+		TokenUsed:   2,
+		ParseStatus: APIRequestLogParseOK,
+		Items: []APIRequestLogItem{
+			{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody("hello")},
+			{Seq: 2, Phase: APIRequestLogPhaseOutput, ItemType: APIRequestLogItemMessage, Role: "assistant", ContentType: "text", Content: APIRequestLogBody("ok")},
+		},
+	}))
+
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		UsageLogId: 10,
+		Username:   "alice-renamed",
+		Quota:      10,
+		TokenUsed:  20,
+	}))
+
+	var logs []APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.Find(&logs).Error)
+	require.Len(t, logs, 1)
+	require.Equal(t, "alice-renamed", logs[0].Username)
+	require.Equal(t, 10, logs[0].Quota)
+
+	detail, err := GetAPIRequestLogById(logs[0].Id)
+	require.NoError(t, err)
+	require.Len(t, detail.Items, 2)
+	require.Equal(t, APIRequestLogBody("hello"), detail.Items[0].Content)
+	require.Equal(t, APIRequestLogBody("ok"), detail.Items[1].Content)
 }
 
 func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
@@ -269,10 +298,11 @@ func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
 	require.Equal(t, consumeLog.Group, requestLog.Group)
 	require.Equal(t, http.StatusCreated, requestLog.StatusCode)
 	require.Equal(t, "/v1/chat/completions", requestLog.RequestPath)
-	require.Empty(t, requestLog.RequestOmittedReason)
-	require.Contains(t, string(requestLog.RequestBody), "gpt-sync")
 	require.Positive(t, requestLog.RequestSize)
-	require.Equal(t, "capture_pending", requestLog.ResponseOmittedReason)
+	require.Empty(t, requestLog.RequestBody)
+	require.Empty(t, requestLog.ResponseBody)
+	require.Equal(t, consumeLog.Quota, requestLog.Quota)
+	require.Equal(t, consumeLog.PromptTokens+consumeLog.CompletionTokens, requestLog.TokenUsed)
 
 	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
 		UsageLogId:            consumeLog.Id,
@@ -292,8 +322,10 @@ func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
 		Group:                 consumeLog.Group,
 		RequestContentType:    "application/json",
 		RequestSize:           18,
-		RequestBody:           APIRequestLogBody(`{"model":"gpt-sync"}`),
 		ResponseOmittedReason: "capture_disabled",
+		Items: []APIRequestLogItem{
+			{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody("hello")},
+		},
 	}))
 
 	var count int64
@@ -302,131 +334,21 @@ func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
 
 	detail, err := GetAPIRequestLogById(requestLog.Id)
 	require.NoError(t, err)
-	require.Equal(t, 0, detail.StatusCode)
+	require.Equal(t, http.StatusOK, detail.StatusCode)
 	require.Empty(t, detail.RequestBody)
+	require.Len(t, detail.Items, 1)
 	require.NotNil(t, detail.Usage)
 	require.Equal(t, 123, detail.Usage.Quota)
 	require.Equal(t, 18, detail.Usage.TokenUsed)
 }
 
-func TestGetAPIRequestLogByIdHydratesBodiesFromUsageRawCapture(t *testing.T) {
+func TestGetAPIRequestLogsReadsRequestLogs(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
 
-	other := map[string]interface{}{
-		"message_capture": map[string]interface{}{
-			"raw_request": map[string]interface{}{
-				"content_type": "application/json",
-				"body":         `{"model":"gpt-hydrate","messages":[{"role":"user","content":"raw context"}]}`,
-				"size":         76,
-				"redacted":     true,
-			},
-			"raw_response": map[string]interface{}{
-				"content_type": "application/json",
-				"body":         `{"choices":[{"message":{"content":"raw answer"}}]}`,
-				"size":         50,
-			},
-		},
-	}
-	otherJSON, err := common.Marshal(other)
-	require.NoError(t, err)
-	usageLog := &Log{
-		UserId:    2,
-		Username:  "alice",
-		Type:      LogTypeConsume,
-		ModelName: "gpt-hydrate",
-		TokenName: "prod-token",
-		CreatedAt: 100,
-		Other:     string(otherJSON),
-	}
-	require.NoError(t, LOG_DB.Create(usageLog).Error)
-
-	requestLog := &APIRequestLog{
-		UsageLogId:            usageLog.Id,
-		UserId:                usageLog.UserId,
-		Username:              usageLog.Username,
-		TokenName:             usageLog.TokenName,
-		ModelName:             usageLog.ModelName,
-		CreatedAt:             usageLog.CreatedAt,
-		RequestOmittedReason:  apiRequestLogCapturePending,
-		ResponseOmittedReason: apiRequestLogCapturePending,
-		Metadata:              APIRequestLogBody(`{"request_omitted_reason":"capture_pending"}`),
-	}
-	require.NoError(t, LOG_DB.Create(requestLog).Error)
-
-	detail, err := GetAPIRequestLogById(requestLog.Id)
-	require.NoError(t, err)
-	require.Equal(t, APIRequestLogBody(`{"model":"gpt-hydrate","messages":[{"role":"user","content":"raw context"}]}`), detail.RequestBody)
-	require.Equal(t, APIRequestLogBody(`{"choices":[{"message":{"content":"raw answer"}}]}`), detail.ResponseBody)
-	require.Equal(t, "application/json", detail.RequestContentType)
-	require.Equal(t, int64(76), detail.RequestSize)
-	require.Empty(t, detail.RequestOmittedReason)
-	require.Empty(t, detail.ResponseOmittedReason)
-	require.True(t, detail.Redacted)
-
-	require.Contains(t, string(detail.Metadata), "usage_log.message_capture.raw_request")
-}
-
-func TestGetAPIRequestLogByIdHydratesRequestFromMessageCapture(t *testing.T) {
-	setupAPIRequestLogTestDB(t)
-
-	other := map[string]interface{}{
-		"message_capture": map[string]interface{}{
-			"conversation_id": "conv-1",
-			"question":        "hello context",
-			"answer":          "hello answer",
-			"messages": []interface{}{
-				map[string]interface{}{"role": "system", "content": "be concise"},
-				map[string]interface{}{"role": "user", "content": "hello context"},
-			},
-			"meta": map[string]interface{}{
-				"model":        "gpt-message",
-				"request_path": "/v1/chat/completions",
-			},
-		},
-	}
-	otherJSON, err := common.Marshal(other)
-	require.NoError(t, err)
-	usageLog := &Log{
-		UserId:    3,
-		Username:  "bob",
-		Type:      LogTypeConsume,
-		ModelName: "gpt-message",
-		TokenName: "context-token",
-		CreatedAt: 200,
-		Other:     string(otherJSON),
-	}
-	require.NoError(t, LOG_DB.Create(usageLog).Error)
-
-	requestLog := &APIRequestLog{
-		UsageLogId:            usageLog.Id,
-		UserId:                usageLog.UserId,
-		Username:              usageLog.Username,
-		TokenName:             usageLog.TokenName,
-		ModelName:             usageLog.ModelName,
-		CreatedAt:             usageLog.CreatedAt,
-		RequestOmittedReason:  apiRequestLogCapturePending,
-		ResponseOmittedReason: apiRequestLogCapturePending,
-	}
-	require.NoError(t, LOG_DB.Create(requestLog).Error)
-
-	detail, err := GetAPIRequestLogById(requestLog.Id)
-	require.NoError(t, err)
-	require.Equal(t, "application/json", detail.RequestContentType)
-	require.Contains(t, string(detail.RequestBody), "hello context")
-	require.Contains(t, string(detail.RequestBody), "messages")
-	require.Contains(t, string(detail.ResponseBody), "hello answer")
-	require.Empty(t, detail.RequestOmittedReason)
-	require.Empty(t, detail.ResponseOmittedReason)
-	require.Contains(t, string(detail.Metadata), "usage_log.message_capture")
-}
-
-func TestGetAPIRequestLogsReadsUsageLogs(t *testing.T) {
-	setupAPIRequestLogTestDB(t)
-
-	require.NoError(t, LOG_DB.Create(&Log{
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		UsageLogId:       55,
 		UserId:           9,
 		Username:         "backfill-user",
-		Type:             LogTypeConsume,
 		ModelName:        "gpt-backfill",
 		TokenName:        "backfill-token",
 		TokenId:          12,
@@ -435,10 +357,10 @@ func TestGetAPIRequestLogsReadsUsageLogs(t *testing.T) {
 		Quota:            456,
 		PromptTokens:     20,
 		CompletionTokens: 30,
+		TokenUsed:        50,
 		CreatedAt:        200,
 		RequestId:        "req-backfill",
-		Content:          "backfill content",
-	}).Error)
+	}))
 
 	items, total, err := GetAPIRequestLogs(APIRequestLogQueryParams{
 		StartTimestamp: 100,
@@ -452,7 +374,7 @@ func TestGetAPIRequestLogsReadsUsageLogs(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), total)
 	require.Len(t, items, 1)
-	require.NotZero(t, items[0].UsageLogId)
+	require.Equal(t, 55, items[0].UsageLogId)
 	require.Equal(t, "backfill-user", items[0].Username)
 	require.Equal(t, "backfill-token", items[0].TokenName)
 	require.Equal(t, "gpt-backfill", items[0].ModelName)
@@ -466,29 +388,45 @@ func TestCreateAPIRequestLogEnsuresTable(t *testing.T) {
 	require.NoError(t, err)
 
 	oldLogDB := LOG_DB
+	oldRequestLogDB := REQUEST_LOG_DB
 	LOG_DB = db
+	REQUEST_LOG_DB = db
 	t.Cleanup(func() {
 		LOG_DB = oldLogDB
+		REQUEST_LOG_DB = oldRequestLogDB
 	})
 
-	require.False(t, LOG_DB.Migrator().HasTable(&APIRequestLog{}))
+	require.False(t, REQUEST_LOG_DB.Migrator().HasTable(&APIRequestLog{}))
 	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
 		Username:  "alice",
 		TokenName: "prod-token",
 		ModelName: "gpt-test",
 		CreatedAt: 100,
 	}))
-	require.True(t, LOG_DB.Migrator().HasTable(&APIRequestLog{}))
-	require.NoError(t, LOG_DB.AutoMigrate(&Log{}))
-	require.NoError(t, LOG_DB.Create(&Log{
-		Type:      LogTypeConsume,
-		CreatedAt: 100,
+	require.True(t, REQUEST_LOG_DB.Migrator().HasTable(&APIRequestLog{}))
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		CreatedAt: 101,
 		RequestId: "req-status",
-	}).Error)
+	}))
 
 	status, err := GetAPIRequestLogStorageStatus()
 	require.NoError(t, err)
 	require.True(t, status.HasTable)
-	require.Equal(t, int64(1), status.Count)
+	require.Equal(t, int64(2), status.Count)
 	require.Equal(t, "req-status", status.LastRequestId)
+}
+
+func TestInitRequestLogDBRequiresDSNWhenEnabled(t *testing.T) {
+	oldEnabled := common.APIRequestLogEnabled
+	oldRequestLogDB := REQUEST_LOG_DB
+	common.APIRequestLogEnabled = true
+	REQUEST_LOG_DB = nil
+	t.Setenv("REQUEST_LOG_SQL_DSN", "")
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		REQUEST_LOG_DB = oldRequestLogDB
+	})
+
+	require.Error(t, InitRequestLogDB())
+	require.Nil(t, REQUEST_LOG_DB)
 }

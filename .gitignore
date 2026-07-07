@@ -13,6 +13,9 @@ web/classic/dist
 web/node_modules
 web/dist
 .env
+remote/.env
+remote/id_ed25519
+remote/id_ed25519.pub
 one-api
 new-api
 /__debug_bin*
