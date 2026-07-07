@@ -19,6 +19,8 @@ import (
 
 const (
 	APIRequestLogSchemaVersion = 1
+	apiRequestLogItemBatchSize = 20
+	apiRequestLogItemMaxRetry  = 3
 
 	APIRequestLogSourceLive     = "live"
 	APIRequestLogSourceLegacy   = "legacy_api_request_logs"
@@ -304,11 +306,11 @@ func CreateAPIRequestLog(log *APIRequestLog) error {
 
 func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 	db := requestLogDB()
-	return db.Transaction(func(tx *gorm.DB) error {
-		items := log.Items
-		log.Items = nil
-		replaceItems := len(items) > 0
+	items := log.Items
+	log.Items = nil
+	hasItems := len(items) > 0
 
+	if err := db.Transaction(func(tx *gorm.DB) error {
 		var existing APIRequestLog
 		err := findExistingAPIRequestLog(tx, log, &existing)
 		switch {
@@ -326,24 +328,59 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 			if err := tx.Model(&APIRequestLog{}).Where("id = ?", log.Id).Updates(log).Error; err != nil {
 				return err
 			}
-			if replaceItems {
-				if err := tx.Where("log_id = ?", log.Id).Delete(&APIRequestLogItem{}).Error; err != nil {
-					return err
-				}
-			}
 		}
+		return nil
+	}); err != nil {
+		return err
+	}
 
-		if !replaceItems {
-			log.Items = nil
+	if !hasItems {
+		log.Items = nil
+		return nil
+	}
+
+	log.Items = normalizeAPIRequestLogItems(log.Id, items)
+	if len(log.Items) == 0 {
+		return nil
+	}
+	return createAPIRequestLogItemsIfMissing(db, log.Id, log.Items)
+}
+
+func createAPIRequestLogItemsIfMissing(db *gorm.DB, logId int, items []APIRequestLogItem) error {
+	if db == nil || logId <= 0 || len(items) == 0 {
+		return nil
+	}
+	var lastErr error
+	for attempt := 0; attempt < apiRequestLogItemMaxRetry; attempt++ {
+		var count int64
+		if err := db.Model(&APIRequestLogItem{}).Where("log_id = ?", logId).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
 			return nil
 		}
-
-		log.Items = normalizeAPIRequestLogItems(log.Id, items)
-		if len(log.Items) == 0 {
+		err := db.Session(&gorm.Session{SkipDefaultTransaction: true}).CreateInBatches(items, apiRequestLogItemBatchSize).Error
+		if err == nil {
 			return nil
 		}
-		return tx.CreateInBatches(log.Items, 20).Error
-	})
+		lastErr = err
+		if !isRetryableAPIRequestLogItemError(err) || attempt == apiRequestLogItemMaxRetry-1 {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+	}
+	return lastErr
+}
+
+func isRetryableAPIRequestLogItemError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "deadlock") ||
+		strings.Contains(text, "lock wait timeout") ||
+		strings.Contains(text, "error 1205") ||
+		strings.Contains(text, "error 1213")
 }
 
 func preserveAPIRequestLogUsageFields(log *APIRequestLog, existing *APIRequestLog) {

@@ -330,6 +330,98 @@ func TestRecordAPIRequestLogForConsumeDoesNotBlockFinalCapture(t *testing.T) {
 	}
 }
 
+func TestRecordConsumeLogDefersAPIRequestLogUntilFinalCapture(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.APIRequestLog{}, &model.APIRequestLogItem{}, &model.Log{}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLogDB := model.LOG_DB
+	oldRequestLogDB := model.REQUEST_LOG_DB
+	oldEnabled := common.APIRequestLogEnabled
+	oldLogConsumeEnabled := common.LogConsumeEnabled
+	oldCaptureResponse := common.APIRequestLogCaptureResponse
+	oldRedactSecrets := common.APIRequestLogRedactSecrets
+	model.LOG_DB = db
+	model.REQUEST_LOG_DB = db
+	common.APIRequestLogEnabled = true
+	common.LogConsumeEnabled = true
+	common.APIRequestLogCaptureResponse = true
+	common.APIRequestLogRedactSecrets = true
+	t.Cleanup(func() {
+		model.LOG_DB = oldLogDB
+		model.REQUEST_LOG_DB = oldRequestLogDB
+		common.APIRequestLogEnabled = oldEnabled
+		common.LogConsumeEnabled = oldLogConsumeEnabled
+		common.APIRequestLogCaptureResponse = oldCaptureResponse
+		common.APIRequestLogRedactSecrets = oldRedactSecrets
+	})
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-single-write","messages":[{"role":"user","content":"single-write-input"}]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Set(common.RequestIdKey, "req-single-write")
+	ctx.Set(common.UpstreamRequestIdKey, "upstream-single-write")
+	ctx.Set("id", 2)
+	ctx.Set("username", "single-user")
+	ctx.Set("token_id", 3)
+	ctx.Set("token_name", "single-token")
+	ctx.Set("original_model", "gpt-single-write")
+	StartAPIRequestLogCapture(ctx)
+
+	consumeLog := model.RecordConsumeLog(ctx, 2, model.RecordConsumeLogParams{
+		ChannelId:        4,
+		PromptTokens:     5,
+		CompletionTokens: 6,
+		ModelName:        "gpt-single-write",
+		TokenName:        "single-token",
+		Quota:            7,
+		TokenId:          3,
+		Group:            "default",
+	})
+	if consumeLog == nil {
+		t.Fatal("expected consume log")
+	}
+	RecordAPIRequestLogForConsume(ctx, nil, consumeLog)
+
+	var count int64
+	if err := db.Model(&model.APIRequestLog{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expected request log to be deferred until final capture, got %d", count)
+	}
+
+	if _, err := ctx.Writer.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"single-write-output"}}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	RecordAPIRequestLog(ctx, nil, nil)
+
+	var logs []model.APIRequestLog
+	if err := db.Find(&logs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected one request log, got %d", len(logs))
+	}
+	if logs[0].UsageLogId != consumeLog.Id || logs[0].Quota != consumeLog.Quota {
+		t.Fatalf("expected final request log to include consume fields, got %+v", logs[0])
+	}
+	var items []model.APIRequestLogItem
+	if err := db.Where("log_id = ?", logs[0].Id).Order("seq asc").Find(&items).Error; err != nil {
+		t.Fatal(err)
+	}
+	joined := requestLogItemText(items)
+	if !strings.Contains(joined, "single-write-input") || !strings.Contains(joined, "single-write-output") {
+		t.Fatalf("expected final items to include request and response, got %s", joined)
+	}
+}
+
 func TestRecordAPIRequestLogMergesConsumeParentWithCapturedItems(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 const apiRequestLogWriterKey = "api_request_log_writer"
 const apiRequestLogRecordedKey = "api_request_log_recorded"
 const apiRequestLogRecordedUsageIdsKey = "api_request_log_recorded_usage_ids"
+const apiRequestLogPendingUsageKey = "api_request_log_pending_usage"
 const APIRequestLogOriginalPathKey = "api_request_log_original_path"
 
 type apiRequestLogWriter struct {
@@ -72,6 +73,7 @@ func StartAPIRequestLogCapture(c *gin.Context) {
 	writer := &apiRequestLogWriter{ResponseWriter: c.Writer}
 	c.Writer = writer
 	c.Set(apiRequestLogWriterKey, writer)
+	common.SetContextKey(c, constant.ContextKeyAPIRequestLogDeferConsumeSync, true)
 }
 
 func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relayErr *types.NewAPIError) {
@@ -82,10 +84,12 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 	if c == nil || c.Request == nil || !common.APIRequestLogEnabled {
 		return
 	}
+	directUsageLog := usageLog != nil
 	if usageLog == nil {
 		if recorded, exists := c.Get(apiRequestLogRecordedKey); exists && recorded == true {
 			return
 		}
+		usageLog = pendingAPIRequestLogUsage(c)
 	} else if isAPIRequestLogUsageRecorded(c, usageLog.Id) {
 		return
 	}
@@ -133,6 +137,9 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 	}
 	if usageLog != nil {
 		markAPIRequestLogUsageRecorded(c, usageLog.Id)
+		if !directUsageLog {
+			c.Set(apiRequestLogRecordedKey, true)
+		}
 		return
 	}
 	c.Set(apiRequestLogRecordedKey, true)
@@ -143,6 +150,10 @@ func RecordAPIRequestLogForConsume(c *gin.Context, relayInfo *relaycommon.RelayI
 		return
 	}
 	rememberAPIRequestLogUsageContext(c, usageLog)
+	if common.GetContextKeyBool(c, constant.ContextKeyAPIRequestLogDeferConsumeSync) {
+		rememberAPIRequestLogPendingUsage(c, usageLog)
+		return
+	}
 	if isAPIRequestLogUsageRecorded(c, usageLog.Id) {
 		return
 	}
@@ -151,6 +162,25 @@ func RecordAPIRequestLogForConsume(c *gin.Context, relayInfo *relaycommon.RelayI
 		return
 	}
 	markAPIRequestLogUsageRecorded(c, usageLog.Id)
+}
+
+func rememberAPIRequestLogPendingUsage(c *gin.Context, usageLog *model.Log) {
+	if c == nil || usageLog == nil || usageLog.Id <= 0 {
+		return
+	}
+	c.Set(apiRequestLogPendingUsageKey, usageLog)
+}
+
+func pendingAPIRequestLogUsage(c *gin.Context) *model.Log {
+	if c == nil {
+		return nil
+	}
+	raw, exists := c.Get(apiRequestLogPendingUsageKey)
+	if !exists {
+		return nil
+	}
+	usageLog, _ := raw.(*model.Log)
+	return usageLog
 }
 
 func rememberAPIRequestLogUsageContext(c *gin.Context, usageLog *model.Log) {
