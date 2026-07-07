@@ -147,10 +147,17 @@ type APIRequestLogQueryParams struct {
 	StartTimestamp int64
 	EndTimestamp   int64
 	ModelName      string
+	ModelNames     []string
 	Username       string
+	Usernames      []string
 	TokenName      string
 	StartIdx       int
 	Num            int
+}
+
+type APIRequestLogFilterOptions struct {
+	ModelNames []string `json:"model_names"`
+	Usernames  []string `json:"usernames"`
 }
 
 type APIRequestLogUsage struct {
@@ -474,8 +481,16 @@ func GetAPIRequestLogs(params APIRequestLogQueryParams) (logs []*APIRequestLogLi
 
 func buildAPIRequestLogsQuery(params APIRequestLogQueryParams) *gorm.DB {
 	tx := requestLogDB().Model(&APIRequestLog{})
-	tx = applyLogContainsFilter(tx, "model_name", params.ModelName)
-	tx = applyLogContainsFilter(tx, "username", params.Username)
+	if len(params.ModelNames) > 0 {
+		tx = tx.Where("model_name IN ?", params.ModelNames)
+	} else {
+		tx = applyLogContainsFilter(tx, "model_name", params.ModelName)
+	}
+	if len(params.Usernames) > 0 {
+		tx = tx.Where("username IN ?", params.Usernames)
+	} else {
+		tx = applyLogContainsFilter(tx, "username", params.Username)
+	}
 	tx = applyLogContainsFilter(tx, "token_name", params.TokenName)
 	if params.StartTimestamp != 0 {
 		tx = tx.Where("created_at >= ?", params.StartTimestamp)
@@ -484,6 +499,33 @@ func buildAPIRequestLogsQuery(params APIRequestLogQueryParams) *gorm.DB {
 		tx = tx.Where("created_at <= ?", params.EndTimestamp)
 	}
 	return tx
+}
+
+func GetAPIRequestLogFilterOptions(limit int) (*APIRequestLogFilterOptions, error) {
+	if err := EnsureAPIRequestLogTable(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	options := &APIRequestLogFilterOptions{}
+	if err := requestLogDB().Model(&APIRequestLog{}).
+		Distinct("model_name").
+		Where("model_name <> ?", "").
+		Order("model_name asc").
+		Limit(limit).
+		Pluck("model_name", &options.ModelNames).Error; err != nil {
+		return nil, err
+	}
+	if err := requestLogDB().Model(&APIRequestLog{}).
+		Distinct("username").
+		Where("username <> ?", "").
+		Order("username asc").
+		Limit(limit).
+		Pluck("username", &options.Usernames).Error; err != nil {
+		return nil, err
+	}
+	return options, nil
 }
 
 func apiRequestLogListItemFromLog(log *APIRequestLog) *APIRequestLogListItem {
