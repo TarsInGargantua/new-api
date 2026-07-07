@@ -342,7 +342,7 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 		if len(log.Items) == 0 {
 			return nil
 		}
-		return tx.CreateInBatches(log.Items, 100).Error
+		return tx.CreateInBatches(log.Items, 20).Error
 	})
 }
 

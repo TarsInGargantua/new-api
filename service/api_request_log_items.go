@@ -94,7 +94,6 @@ func (b *apiRequestLogItemBuilder) appendRequestItems(body string) error {
 	b.appendTextLikeInput(root, "prompt")
 	b.appendTextLikeInput(root, "input")
 	b.appendMessages(root["messages"], "messages")
-	b.appendClaudeMessages(root)
 	b.appendGeminiContents(root)
 	b.appendToolSpecs(root)
 	return nil

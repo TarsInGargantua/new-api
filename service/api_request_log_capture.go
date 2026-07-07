@@ -143,7 +143,14 @@ func RecordAPIRequestLogForConsume(c *gin.Context, relayInfo *relaycommon.RelayI
 		return
 	}
 	rememberAPIRequestLogUsageContext(c, usageLog)
-	recordAPIRequestLog(c, relayInfo, nil, usageLog)
+	if isAPIRequestLogUsageRecorded(c, usageLog.Id) {
+		return
+	}
+	if err := model.CreateAPIRequestLogFromConsumeLog(c, usageLog); err != nil {
+		logger.LogError(c, "failed to sync consume log to api request log: "+err.Error())
+		return
+	}
+	markAPIRequestLogUsageRecorded(c, usageLog.Id)
 }
 
 func rememberAPIRequestLogUsageContext(c *gin.Context, usageLog *model.Log) {
