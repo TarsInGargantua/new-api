@@ -320,6 +320,9 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 			return err
 		default:
 			log.Id = existing.Id
+			if existing.UsageLogId > 0 && log.UsageLogId == 0 {
+				preserveAPIRequestLogUsageFields(log, &existing)
+			}
 			if err := tx.Model(&APIRequestLog{}).Where("id = ?", log.Id).Updates(log).Error; err != nil {
 				return err
 			}
@@ -341,6 +344,29 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 		}
 		return tx.CreateInBatches(log.Items, 100).Error
 	})
+}
+
+func preserveAPIRequestLogUsageFields(log *APIRequestLog, existing *APIRequestLog) {
+	if log == nil || existing == nil {
+		return
+	}
+	log.UsageLogId = existing.UsageLogId
+	log.UserId = existing.UserId
+	log.Username = existing.Username
+	log.TokenId = existing.TokenId
+	log.TokenName = existing.TokenName
+	log.ModelName = existing.ModelName
+	log.CreatedAt = existing.CreatedAt
+	log.RequestId = existing.RequestId
+	log.UpstreamRequestId = existing.UpstreamRequestId
+	log.IsStream = existing.IsStream
+	log.ChannelId = existing.ChannelId
+	log.Group = existing.Group
+	log.Quota = existing.Quota
+	log.PromptTokens = existing.PromptTokens
+	log.CompletionTokens = existing.CompletionTokens
+	log.TokenUsed = existing.TokenUsed
+	log.UseTime = existing.UseTime
 }
 
 func findExistingAPIRequestLog(tx *gorm.DB, log *APIRequestLog, out *APIRequestLog) error {

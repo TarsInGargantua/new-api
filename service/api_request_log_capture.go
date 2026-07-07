@@ -133,6 +133,7 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 	}
 	if usageLog != nil {
 		markAPIRequestLogUsageRecorded(c, usageLog.Id)
+		return
 	}
 	c.Set(apiRequestLogRecordedKey, true)
 }
@@ -141,7 +142,20 @@ func RecordAPIRequestLogForConsume(c *gin.Context, relayInfo *relaycommon.RelayI
 	if c == nil || usageLog == nil || usageLog.Id <= 0 || !common.APIRequestLogEnabled {
 		return
 	}
+	rememberAPIRequestLogUsageContext(c, usageLog)
 	recordAPIRequestLog(c, relayInfo, nil, usageLog)
+}
+
+func rememberAPIRequestLogUsageContext(c *gin.Context, usageLog *model.Log) {
+	if c == nil || usageLog == nil {
+		return
+	}
+	if c.GetString(common.RequestIdKey) == "" && usageLog.RequestId != "" {
+		c.Set(common.RequestIdKey, usageLog.RequestId)
+	}
+	if c.GetString(common.UpstreamRequestIdKey) == "" && usageLog.UpstreamRequestId != "" {
+		c.Set(common.UpstreamRequestIdKey, usageLog.UpstreamRequestId)
+	}
 }
 
 func isAPIRequestLogUsageRecorded(c *gin.Context, usageLogId int) bool {

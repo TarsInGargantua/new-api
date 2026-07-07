@@ -637,6 +637,54 @@ const indexHTML = `<!doctype html>
       color:var(--muted);
       background:rgba(23,25,19,.55);
     }
+    .loading-card {
+      display:grid;
+      place-items:center;
+      gap:18px;
+      min-height:220px;
+      border:1px solid var(--line);
+      border-radius:8px;
+      color:var(--muted);
+      background:rgba(23,25,19,.55);
+    }
+    .loading-copy {
+      display:flex;
+      align-items:center;
+      gap:10px;
+      color:var(--text);
+      font-weight:700;
+    }
+    .loader {
+      width:16px;
+      height:16px;
+      border:2px solid var(--line);
+      border-top-color:var(--accent);
+      border-radius:50%;
+      animation:spin .8s linear infinite;
+    }
+    .loading-lines {
+      display:grid;
+      gap:8px;
+      width:min(420px, 72%);
+    }
+    .loading-lines i {
+      display:block;
+      height:8px;
+      border-radius:999px;
+      background:linear-gradient(90deg, var(--panel-2), var(--line), var(--panel-2));
+      background-size:200% 100%;
+      animation:scan 1.2s ease-in-out infinite;
+    }
+    .loading-lines i:nth-child(2) { width:78%; animation-delay:.12s; }
+    .loading-lines i:nth-child(3) { width:56%; animation-delay:.24s; }
+    @keyframes spin {
+      to { transform:rotate(360deg); }
+    }
+    @keyframes scan {
+      0% { background-position:100% 0; opacity:.42; }
+      50% { opacity:.85; }
+      100% { background-position:-100% 0; opacity:.42; }
+    }
     @media (max-width: 980px) {
       header { grid-template-columns:1fr; align-items:start; }
       body { overflow:auto; }
@@ -722,9 +770,17 @@ const indexHTML = `<!doctype html>
       }
     }
     let selectedId = 0
+    let detailRequestToken = 0
 
     const esc = value => String(value ?? '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]))
     const pretty = value => { try { return JSON.stringify(JSON.parse(value), null, 2) } catch { return value || '' } }
+    const detailLoadingHTML = () => [
+      '<div class="loading-card" aria-live="polite">',
+      '<div class="loading-copy"><span class="loader"></span><span>Loading request</span></div>',
+      '<div class="loading-lines"><i></i><i></i><i></i></div>',
+      '</div>'
+    ].join('')
+    const detailErrorHTML = message => '<div class="empty">Failed to load request: ' + esc(message || 'unknown error') + '</div>'
     const timestampFromLocalInput = value => {
       if (!value) return 0
       const date = new Date(value)
@@ -874,35 +930,43 @@ const indexHTML = `<!doctype html>
       rowsEl.querySelectorAll('tr').forEach(row => row.onclick = () => loadDetail(Number(row.dataset.id)))
     }
     async function loadDetail(id) {
+      const requestToken = ++detailRequestToken
       selectedId = id
-      await loadRows()
-      const log = await api('/api/logs/' + id)
-      const itemHtml = (log.items || []).map(item => [
-        '<article class="item" data-phase="' + esc(item.phase || '') + '">',
-        '<div class="item-head">',
-        '<div class="item-title">' + esc(item.item_type || 'item') + '</div>',
-        '<span class="pill">' + esc(item.seq) + '</span>',
-        '<span class="pill">' + esc(item.phase) + '</span>',
-        item.role ? '<span class="pill">' + esc(item.role) + '</span>' : '',
-        item.name ? '<span class="muted">' + esc(item.name) + '</span>' : '',
-        item.source ? '<span class="muted">' + esc(item.source) + '</span>' : '',
-        '</div>',
-        '<pre>' + esc(pretty(item.content)) + '</pre>',
-        '</article>'
-      ].join('')).join('') || '<div class="empty">No parsed items.</div>'
-      detailEl.innerHTML = [
-        '<div class="detail-head">',
-        '<div class="detail-title"><h2>' + esc(log.model_name || '-') + '</h2><div class="request-id">' + esc(log.request_id || '-') + '</div></div>',
-        '<span class="pill ' + esc(log.parse_status || 'ok') + '">' + esc(log.parse_status || 'ok') + '</span>',
-        '</div>',
-        '<div class="summary">',
-        '<div class="metric"><span>Items</span><strong>' + esc((log.items || []).length) + '</strong></div>',
-        '<div class="metric"><span>Tokens</span><strong>' + esc(log.token_used || 0) + '</strong></div>',
-        '<div class="metric"><span>Cost</span><strong>' + esc(log.quota || 0) + '</strong></div>',
-        '<div class="metric"><span>Status</span><strong>' + esc(log.status_code || '-') + '</strong></div>',
-        '</div>',
-        '<div class="items">' + itemHtml + '</div>'
-      ].join('')
+      detailEl.innerHTML = detailLoadingHTML()
+      try {
+        await loadRows()
+        const log = await api('/api/logs/' + id)
+        if (requestToken !== detailRequestToken) return
+        const itemHtml = (log.items || []).map(item => [
+          '<article class="item" data-phase="' + esc(item.phase || '') + '">',
+          '<div class="item-head">',
+          '<div class="item-title">' + esc(item.item_type || 'item') + '</div>',
+          '<span class="pill">' + esc(item.seq) + '</span>',
+          '<span class="pill">' + esc(item.phase) + '</span>',
+          item.role ? '<span class="pill">' + esc(item.role) + '</span>' : '',
+          item.name ? '<span class="muted">' + esc(item.name) + '</span>' : '',
+          item.source ? '<span class="muted">' + esc(item.source) + '</span>' : '',
+          '</div>',
+          '<pre>' + esc(pretty(item.content)) + '</pre>',
+          '</article>'
+        ].join('')).join('') || '<div class="empty">No parsed items.</div>'
+        detailEl.innerHTML = [
+          '<div class="detail-head">',
+          '<div class="detail-title"><h2>' + esc(log.model_name || '-') + '</h2><div class="request-id">' + esc(log.request_id || '-') + '</div></div>',
+          '<span class="pill ' + esc(log.parse_status || 'ok') + '">' + esc(log.parse_status || 'ok') + '</span>',
+          '</div>',
+          '<div class="summary">',
+          '<div class="metric"><span>Items</span><strong>' + esc((log.items || []).length) + '</strong></div>',
+          '<div class="metric"><span>Tokens</span><strong>' + esc(log.token_used || 0) + '</strong></div>',
+          '<div class="metric"><span>Cost</span><strong>' + esc(log.quota || 0) + '</strong></div>',
+          '<div class="metric"><span>Status</span><strong>' + esc(log.status_code || '-') + '</strong></div>',
+          '</div>',
+          '<div class="items">' + itemHtml + '</div>'
+        ].join('')
+      } catch (err) {
+        if (requestToken !== detailRequestToken) return
+        detailEl.innerHTML = detailErrorHTML(err.message)
+      }
     }
     document.addEventListener('click', () => closeMenus())
     document.getElementById('refresh').onclick = () => { loadStatus(); loadFilterOptions(); loadRows() }
