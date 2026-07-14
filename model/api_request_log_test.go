@@ -420,6 +420,7 @@ func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
 		Other:            map[string]interface{}{"foo": "bar"},
 	})
 	require.NotNil(t, consumeLog)
+	require.JSONEq(t, `{"foo":"bar"}`, consumeLog.Other)
 
 	var requestLogs []APIRequestLog
 	require.NoError(t, LOG_DB.Find(&requestLogs).Error)

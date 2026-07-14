@@ -133,15 +133,11 @@ func buildRequestAudit(c *gin.Context) map[string]interface{} {
 			"error":          err.Error(),
 		}
 	}
-	body, err := storage.Bytes()
-	if err != nil {
-		return map[string]interface{}{
-			"content_type":   contentType,
-			"omitted_reason": "read_failed",
-			"error":          err.Error(),
-		}
+	return map[string]interface{}{
+		"content_type":   contentType,
+		"size":           storage.Size(),
+		"omitted_reason": "request_body_not_stored",
 	}
-	return buildBodyAudit(contentType, body, int64(len(body)))
 }
 
 func buildResponseAudit(c *gin.Context) map[string]interface{} {

@@ -72,7 +72,6 @@ func buildMessageCapture(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, oth
 		capture.Meta["model"] = relayInfo.OriginModelName
 		capture.Meta["is_stream"] = relayInfo.IsStream
 		capture.Meta["request_path"] = relayInfo.RequestURLPath
-		capture.Messages = append(capture.Messages, capturedMessagesFromRelayRequest(relayInfo)...)
 	}
 
 	if audit, ok := other["audit_content"].(map[string]interface{}); ok {
@@ -82,16 +81,6 @@ func buildMessageCapture(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, oth
 			answer, reasoning := extractResponseSummary(capture.RawResponse.Body)
 			capture.Answer = firstNonEmpty(capture.Answer, answer)
 			capture.ModelReasoning = firstNonEmpty(capture.ModelReasoning, reasoning)
-		}
-	}
-
-	for _, message := range capture.Messages {
-		if message.Role == captureRoleUser {
-			capture.Question = message.Content
-		}
-		if message.Role == captureRoleAssistant {
-			capture.Answer = firstNonEmpty(capture.Answer, message.Content)
-			capture.ModelReasoning = firstNonEmpty(capture.ModelReasoning, message.Reasoning)
 		}
 	}
 
@@ -116,38 +105,11 @@ func (c *messageCapture) toMap() map[string]interface{} {
 	if c.ConversationID != "" {
 		out["conversation_id"] = c.ConversationID
 	}
-	if c.Question != "" {
-		out["question"] = c.Question
-	}
 	if c.ModelReasoning != "" {
 		out["model_reasoning"] = c.ModelReasoning
 	}
 	if c.Answer != "" {
 		out["answer"] = c.Answer
-	}
-	if len(c.Messages) > 0 {
-		messages := make([]map[string]interface{}, 0, len(c.Messages))
-		for _, message := range c.Messages {
-			item := make(map[string]interface{})
-			if message.Role != "" {
-				item["role"] = message.Role
-			}
-			if message.Content != "" {
-				item["content"] = message.Content
-			}
-			if message.Reasoning != "" {
-				item["reasoning"] = message.Reasoning
-			}
-			if message.Source != "" {
-				item["source"] = message.Source
-			}
-			if len(item) > 0 {
-				messages = append(messages, item)
-			}
-		}
-		if len(messages) > 0 {
-			out["messages"] = messages
-		}
 	}
 	if c.RawRequest != nil {
 		out["raw_request"] = c.RawRequest.toMap()
