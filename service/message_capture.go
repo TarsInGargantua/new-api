@@ -77,17 +77,32 @@ func buildMessageCapture(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, oth
 	if audit, ok := other["audit_content"].(map[string]interface{}); ok {
 		capture.RawRequest = capturedBodyFromAudit(auditMap(audit, "request"))
 		capture.RawResponse = capturedBodyFromAudit(auditMap(audit, "response"))
-		if capture.RawResponse != nil {
-			answer, reasoning := extractResponseSummary(capture.RawResponse.Body)
-			capture.Answer = firstNonEmpty(capture.Answer, answer)
-			capture.ModelReasoning = firstNonEmpty(capture.ModelReasoning, reasoning)
-		}
+	}
+	if summary, ok := contentAuditResponseSummaryFromContext(ctx); ok {
+		capture.Answer = firstNonEmpty(capture.Answer, summary.Answer)
+		capture.ModelReasoning = firstNonEmpty(capture.ModelReasoning, summary.Reasoning)
+	} else if capture.RawResponse != nil && capture.RawResponse.Body != "" {
+		answer, reasoning := extractResponseSummary(capture.RawResponse.Body)
+		capture.Answer = firstNonEmpty(capture.Answer, answer)
+		capture.ModelReasoning = firstNonEmpty(capture.ModelReasoning, reasoning)
 	}
 
 	if len(capture.Meta) == 0 {
 		capture.Meta = nil
 	}
 	return capture
+}
+
+func contentAuditResponseSummaryFromContext(ctx *gin.Context) (contentAuditResponseSummary, bool) {
+	if ctx == nil {
+		return contentAuditResponseSummary{}, false
+	}
+	raw, exists := ctx.Get(contentAuditResponseSummaryKey)
+	if !exists {
+		return contentAuditResponseSummary{}, false
+	}
+	summary, ok := raw.(contentAuditResponseSummary)
+	return summary, ok
 }
 
 func (c *messageCapture) isEmpty() bool {
@@ -485,18 +500,24 @@ func capturedBodyFromAudit(audit map[string]interface{}) *capturedBody {
 	}
 	body := common.Interface2String(audit["body"])
 	omittedReason := common.Interface2String(audit["omitted_reason"])
-	if body == "" && omittedReason == "" {
+	contentType := common.Interface2String(audit["content_type"])
+	size := interfaceToInt(audit["size"])
+	capturedBytes := interfaceToInt(audit["captured_bytes"])
+	status := interfaceToInt(audit["status"])
+	truncated := interfaceToBool(audit["truncated"])
+	redacted := interfaceToBool(audit["redacted"])
+	if body == "" && omittedReason == "" && contentType == "" && size == 0 && capturedBytes == 0 && status == 0 && !truncated && !redacted {
 		return nil
 	}
 	return &capturedBody{
-		ContentType:   common.Interface2String(audit["content_type"]),
+		ContentType:   contentType,
 		Body:          body,
 		OmittedReason: omittedReason,
-		Size:          int64(interfaceToInt(audit["size"])),
-		CapturedBytes: interfaceToInt(audit["captured_bytes"]),
-		Truncated:     interfaceToBool(audit["truncated"]),
-		Redacted:      interfaceToBool(audit["redacted"]),
-		Status:        interfaceToInt(audit["status"]),
+		Size:          int64(size),
+		CapturedBytes: capturedBytes,
+		Truncated:     truncated,
+		Redacted:      redacted,
+		Status:        status,
 	}
 }
 
