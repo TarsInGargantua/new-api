@@ -75,3 +75,42 @@ func TestMessageCaptureDoesNotSerializeRequestMessages(t *testing.T) {
 	require.NotContains(t, encoded, "question")
 	require.NotContains(t, encoded, "messages")
 }
+
+func TestAppendContentAuditOmitsResponseBodiesButKeepsSummary(t *testing.T) {
+	oldEnabled := common.AuditContentEnabled
+	oldCaptureResponse := common.AuditContentCaptureResponse
+	common.AuditContentEnabled = true
+	common.AuditContentCaptureResponse = true
+	t.Cleanup(func() {
+		common.AuditContentEnabled = oldEnabled
+		common.AuditContentCaptureResponse = oldCaptureResponse
+	})
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"messages":[]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Writer.Header().Set("Content-Type", "application/json")
+	StartContentAuditCapture(ctx)
+	responseBody := `{"choices":[{"message":{"content":"answer","reasoning_content":"reasoning"}}]}`
+	_, err := ctx.Writer.Write([]byte(responseBody))
+	require.NoError(t, err)
+
+	other := map[string]interface{}{}
+	AppendContentAudit(ctx, other)
+	appendMessageCapture(ctx, nil, other)
+
+	audit := other["audit_content"].(map[string]interface{})
+	responseAudit := audit["response"].(map[string]interface{})
+	require.NotContains(t, responseAudit, "body")
+	require.Equal(t, int64(len(responseBody)), responseAudit["size"])
+	require.Equal(t, http.StatusOK, responseAudit["status"])
+
+	capture := other[messageCaptureKey].(map[string]interface{})
+	require.Equal(t, "answer", capture["answer"])
+	require.Equal(t, "reasoning", capture["model_reasoning"])
+	rawResponse := capture["raw_response"].(map[string]interface{})
+	require.NotContains(t, rawResponse, "body")
+	require.Equal(t, int64(len(responseBody)), rawResponse["size"])
+}

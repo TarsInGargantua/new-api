@@ -10,6 +10,12 @@ import (
 )
 
 const contentAuditWriterKey = "content_audit_writer"
+const contentAuditResponseSummaryKey = "content_audit_response_summary"
+
+type contentAuditResponseSummary struct {
+	Answer    string
+	Reasoning string
+}
 
 type contentAuditWriter struct {
 	gin.ResponseWriter
@@ -105,6 +111,14 @@ func AppendContentAudit(c *gin.Context, other map[string]interface{}) {
 	}
 	if common.AuditContentCaptureResponse {
 		if responseAudit := buildResponseAudit(c); responseAudit != nil {
+			if body, ok := responseAudit["body"].(string); ok && body != "" {
+				answer, reasoning := extractResponseSummary(body)
+				c.Set(contentAuditResponseSummaryKey, contentAuditResponseSummary{
+					Answer:    answer,
+					Reasoning: reasoning,
+				})
+			}
+			delete(responseAudit, "body")
 			audit["response"] = responseAudit
 		}
 	}
