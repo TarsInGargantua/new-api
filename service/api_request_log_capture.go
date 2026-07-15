@@ -62,6 +62,9 @@ func StartAPIRequestLogCapture(c *gin.Context) {
 	if c == nil || c.Writer == nil || !common.APIRequestLogEnabled {
 		return
 	}
+	if common.IsCallLogExcludedUsername(c.GetString("username")) {
+		return
+	}
 	if _, exists := c.Get(apiRequestLogWriterKey); exists {
 		return
 	}
@@ -82,6 +85,9 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 	if c == nil || c.Request == nil || !common.APIRequestLogEnabled {
 		return
 	}
+	if common.IsCallLogExcludedUsername(c.GetString("username")) {
+		return
+	}
 	directUsageLog := usageLog != nil
 	if usageLog == nil {
 		if recorded, exists := c.Get(apiRequestLogRecordedKey); exists && recorded == true {
@@ -89,6 +95,9 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 		}
 		usageLog = pendingAPIRequestLogUsage(c)
 	} else if isAPIRequestLogUsageRecorded(c, usageLog.Id) {
+		return
+	}
+	if usageLog != nil && common.IsCallLogExcludedUsername(usageLog.Username) {
 		return
 	}
 
@@ -145,6 +154,9 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 
 func RecordAPIRequestLogForConsume(c *gin.Context, relayInfo *relaycommon.RelayInfo, usageLog *model.Log) {
 	if c == nil || usageLog == nil || usageLog.Id <= 0 || !common.APIRequestLogEnabled {
+		return
+	}
+	if common.IsCallLogExcludedUsername(c.GetString("username")) || common.IsCallLogExcludedUsername(usageLog.Username) {
 		return
 	}
 	rememberAPIRequestLogUsageContext(c, usageLog)

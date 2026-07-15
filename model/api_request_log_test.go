@@ -483,6 +483,68 @@ func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {
 	require.Equal(t, 18, detail.Usage.TokenUsed)
 }
 
+func TestExcludedCallLogUsernameSkipsNewLogs(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	oldEnabled := common.APIRequestLogEnabled
+	oldLogConsumeEnabled := common.LogConsumeEnabled
+	common.APIRequestLogEnabled = true
+	common.LogConsumeEnabled = true
+	common.SetCallLogExcludedUsernames("ryan")
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.LogConsumeEnabled = oldLogConsumeEnabled
+		common.SetCallLogExcludedUsernames("ryan")
+	})
+
+	require.NoError(t, DB.Create(&User{
+		Id:       77,
+		Username: "ryan",
+		Status:   common.UserStatusEnabled,
+		Group:    "default",
+	}).Error)
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"messages":[]}`))
+	ctx.Set("username", "Ryan")
+
+	require.Nil(t, RecordConsumeLog(ctx, 77, RecordConsumeLogParams{
+		ModelName: "gpt-excluded",
+		Quota:     10,
+	}))
+	RecordErrorLog(ctx, 77, 1, "gpt-excluded", "token", "error", 1, 1, false, "default", map[string]interface{}{"status": 500})
+	RecordLog(77, LogTypeConsume, "generic consume")
+	RecordLogWithAdminInfo(77, LogTypeConsume, "generic consume", map[string]interface{}{"admin": true})
+	require.Nil(t, RecordTaskBillingLog(RecordTaskBillingLogParams{
+		UserId:    77,
+		LogType:   LogTypeConsume,
+		ModelName: "task-excluded",
+		Quota:     10,
+	}))
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		Username:  "ryan",
+		ModelName: "gpt-excluded",
+		CreatedAt: 100,
+		RequestId: "req-excluded",
+		Items: []APIRequestLogItem{{
+			Seq:         1,
+			Phase:       APIRequestLogPhaseInput,
+			ItemType:    APIRequestLogItemMessage,
+			Role:        "user",
+			ContentType: "text",
+			Content:     APIRequestLogBody("private"),
+		}},
+	}))
+
+	var logCount int64
+	require.NoError(t, LOG_DB.Model(&Log{}).Count(&logCount).Error)
+	require.Zero(t, logCount)
+	var requestLogCount int64
+	require.NoError(t, REQUEST_LOG_DB.Model(&APIRequestLog{}).Count(&requestLogCount).Error)
+	require.Zero(t, requestLogCount)
+}
+
 func TestGetAPIRequestLogsReadsRequestLogs(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
 

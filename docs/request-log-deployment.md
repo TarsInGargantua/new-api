@@ -20,6 +20,7 @@ API_REQUEST_LOG_WORKERS=2
 API_REQUEST_LOG_MAX_BODY_BYTES=4194304
 API_REQUEST_LOG_MAX_ITEM_BYTES=1048576
 API_REQUEST_LOG_MAX_QUEUE_BYTES=67108864
+CALL_LOG_EXCLUDED_USERNAMES=ryan
 REQUEST_LOG_SQL_DSN=newapi_request_log_app:<password>@tcp(<REMOTE_PUBLIC_HOST>:3306)/newapi_request_logs?charset=utf8mb4&parseTime=true&loc=Local
 ```
 
@@ -34,6 +35,7 @@ For high-concurrency or very large requests:
 - `API_REQUEST_LOG_MAX_ITEM_BYTES` truncates each parsed item before database insert. `0` disables item truncation.
 - `API_REQUEST_LOG_MAX_QUEUE_BYTES` caps queued item payload bytes in process memory. `0` disables this byte cap.
 - Increase `API_REQUEST_LOG_WORKERS` only if MySQL can handle the extra insert concurrency.
+- `CALL_LOG_EXCLUDED_USERNAMES` is a case-insensitive comma-separated list. Matching users do not create consume/error/task rows in `logs` or rows in `api_request_logs`; existing rows and non-call management/top-up logs are unchanged.
 
 ## Schema
 

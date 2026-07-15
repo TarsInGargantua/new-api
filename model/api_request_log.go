@@ -322,7 +322,7 @@ func EnsureAPIRequestLogTable() error {
 }
 
 func CreateAPIRequestLog(log *APIRequestLog) error {
-	if log == nil {
+	if log == nil || common.IsCallLogExcludedUsername(log.Username) {
 		return nil
 	}
 	if err := EnsureAPIRequestLogTable(); err != nil {
