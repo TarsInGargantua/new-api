@@ -81,6 +81,9 @@ func RecordLog(userId int, logType int, content string) {
 		return
 	}
 	username, _ := GetUsernameById(userId, false)
+	if logType == LogTypeConsume && common.IsCallLogExcludedUsername(username) {
+		return
+	}
 	log := &Log{
 		UserId:    userId,
 		Username:  username,
@@ -100,6 +103,9 @@ func RecordLogWithAdminInfo(userId int, logType int, content string, adminInfo m
 		return
 	}
 	username, _ := GetUsernameById(userId, false)
+	if logType == LogTypeConsume && common.IsCallLogExcludedUsername(username) {
+		return
+	}
 	log := &Log{
 		UserId:    userId,
 		Username:  username,
@@ -148,8 +154,11 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 
 func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
 	isStream bool, group string, other map[string]interface{}) {
-	logger.LogInfo(c, fmt.Sprintf("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, content))
 	username := c.GetString("username")
+	if common.IsCallLogExcludedUsername(username) {
+		return
+	}
+	logger.LogInfo(c, fmt.Sprintf("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, content))
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	otherStr := common.MapToJsonStr(other)
@@ -211,8 +220,11 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	if !common.LogConsumeEnabled {
 		return nil
 	}
-	logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
 	username := c.GetString("username")
+	if common.IsCallLogExcludedUsername(username) {
+		return nil
+	}
+	logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	otherStr := common.MapToJsonStr(params.Other)
@@ -284,6 +296,9 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) *Log {
 		return nil
 	}
 	username, _ := GetUsernameById(params.UserId, false)
+	if common.IsCallLogExcludedUsername(username) {
+		return nil
+	}
 	tokenName := ""
 	if params.TokenId > 0 {
 		if token, err := GetTokenById(params.TokenId); err == nil {

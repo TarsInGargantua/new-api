@@ -50,6 +50,27 @@ func TestAPIRequestLogNonTextContentTypeIsNotAuditable(t *testing.T) {
 	}
 }
 
+func TestAPIRequestLogCaptureSkipsExcludedUsername(t *testing.T) {
+	oldEnabled := common.APIRequestLogEnabled
+	common.APIRequestLogEnabled = true
+	common.SetCallLogExcludedUsernames("ryan")
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.SetCallLogExcludedUsernames("ryan")
+	})
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"messages":[]}`))
+	ctx.Set("username", "RYAN")
+
+	StartAPIRequestLogCapture(ctx)
+	if _, exists := ctx.Get(apiRequestLogWriterKey); exists {
+		t.Fatal("excluded username should not start request log capture")
+	}
+	RecordAPIRequestLog(ctx, nil, nil)
+}
+
 func TestAPIRequestLogBodyCaptureUsesConfiguredLimit(t *testing.T) {
 	oldEnabled := common.APIRequestLogEnabled
 	oldCaptureResponse := common.APIRequestLogCaptureResponse

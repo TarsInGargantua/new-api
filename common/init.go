@@ -112,6 +112,7 @@ func InitEnv() {
 	if APIRequestLogMaxQueueBytes < 0 {
 		APIRequestLogMaxQueueBytes = 0
 	}
+	SetCallLogExcludedUsernames(GetEnvOrDefaultString("CALL_LOG_EXCLUDED_USERNAMES", "ryan"))
 	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
 	NodeName = os.Getenv("NODE_NAME")
 	TLSInsecureSkipVerify = GetEnvOrDefaultBool("TLS_INSECURE_SKIP_VERIFY", false)
