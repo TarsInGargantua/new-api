@@ -2,6 +2,8 @@ package service
 
 import (
 	"io"
+	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -22,6 +24,7 @@ const APIRequestLogOriginalPathKey = "api_request_log_original_path"
 type apiRequestLogWriter struct {
 	gin.ResponseWriter
 	buffer *limitedAuditBuffer
+	stream *apiRequestLogSSECollector
 }
 
 func (w *apiRequestLogWriter) Write(data []byte) (int, error) {
@@ -41,6 +44,9 @@ func (w *apiRequestLogWriter) capture(data []byte) {
 	if w.buffer != nil {
 		w.buffer.Write(data)
 	}
+	if w.stream != nil {
+		w.stream.Feed(data)
+	}
 }
 
 func (w *apiRequestLogWriter) snapshot() ([]byte, int64, bool) {
@@ -50,12 +56,49 @@ func (w *apiRequestLogWriter) snapshot() ([]byte, int64, bool) {
 	return w.buffer.Snapshot()
 }
 
+func (w *apiRequestLogWriter) streamSnapshot() apiRequestLogSSESnapshot {
+	if w == nil || w.stream == nil {
+		return apiRequestLogSSESnapshot{}
+	}
+	return w.stream.Snapshot()
+}
+
 type apiRequestLogBody struct {
 	body          string
 	contentType   string
 	size          int64
 	omittedReason string
 	redacted      bool
+}
+
+// APIRequestLogTurnMeta contains only the identifiers needed to materialize a
+// conversation turn. Raw client metadata and headers are intentionally omitted.
+type APIRequestLogTurnMeta struct {
+	SessionID           string
+	TurnID              string
+	WindowID            string
+	RequestKind         string
+	TurnStartedAtUnixMS int64
+	Completed           bool
+	CompletionSignal    string
+	Items               []APIRequestLogTurnItemMeta
+}
+
+type APIRequestLogTurnItemMeta struct {
+	Seq            int
+	ProviderItemID string
+	TurnID         string
+	MessagePhase   string
+	Status         string
+}
+
+type codexTurnMetadataHeader struct {
+	SessionID           string      `json:"session_id"`
+	ThreadID            string      `json:"thread_id"`
+	TurnID              string      `json:"turn_id"`
+	WindowID            string      `json:"window_id"`
+	RequestKind         string      `json:"request_kind"`
+	TurnStartedAtUnixMS interface{} `json:"turn_started_at_unix_ms"`
 }
 
 func StartAPIRequestLogCapture(c *gin.Context) {
@@ -71,10 +114,50 @@ func StartAPIRequestLogCapture(c *gin.Context) {
 	writer := &apiRequestLogWriter{
 		ResponseWriter: c.Writer,
 		buffer:         newLimitedAuditBuffer(common.APIRequestLogMaxBodyBytes),
+		stream:         newAPIRequestLogSSECollector(common.APIRequestLogRedactSecrets),
 	}
 	c.Writer = writer
 	c.Set(apiRequestLogWriterKey, writer)
 	common.SetContextKey(c, constant.ContextKeyAPIRequestLogDeferConsumeSync, true)
+}
+
+func apiRequestLogTurnMetaFromRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo) APIRequestLogTurnMeta {
+	meta := APIRequestLogTurnMeta{}
+	if c != nil && c.Request != nil {
+		raw := strings.TrimSpace(c.Request.Header.Get("X-Codex-Turn-Metadata"))
+		if raw != "" {
+			var header codexTurnMetadataHeader
+			if common.UnmarshalJsonStr(raw, &header) == nil {
+				meta.SessionID = firstNonEmpty(strings.TrimSpace(header.SessionID), strings.TrimSpace(header.ThreadID))
+				meta.TurnID = strings.TrimSpace(header.TurnID)
+				meta.WindowID = strings.TrimSpace(header.WindowID)
+				meta.RequestKind = strings.TrimSpace(header.RequestKind)
+				meta.TurnStartedAtUnixMS = apiRequestLogInt64(header.TurnStartedAtUnixMS)
+			}
+		}
+	}
+	if meta.SessionID == "" {
+		meta.SessionID = conversationIDFromRelay(c, relayInfo)
+	}
+	return meta
+}
+
+func apiRequestLogInt64(value interface{}) int64 {
+	switch v := value.(type) {
+	case float64:
+		return int64(v)
+	case float32:
+		return int64(v)
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case string:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		return parsed
+	default:
+		return 0
+	}
 }
 
 func RecordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relayErr *types.NewAPIError) {
@@ -138,6 +221,7 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 	if log.StatusCode == 0 {
 		log.StatusCode = 200
 	}
+	log.TurnMeta = apiRequestLogMaterializationMeta(log, itemBuild)
 	if err := model.CreateAPIRequestLog(log); err != nil {
 		logger.LogError(c, "failed to record api request log: "+err.Error())
 		return
@@ -150,6 +234,48 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 		return
 	}
 	c.Set(apiRequestLogRecordedKey, true)
+}
+
+func apiRequestLogMaterializationMeta(log *model.APIRequestLog, itemBuild apiRequestLogItemBuildResult) *model.APIRequestLogTurnMeta {
+	turnMeta := itemBuild.turnMeta
+	meta := &model.APIRequestLogTurnMeta{
+		SessionId:        strings.TrimSpace(turnMeta.SessionID),
+		TurnId:           strings.TrimSpace(turnMeta.TurnID),
+		Protocol:         itemBuild.apiFormat,
+		StartedAt:        turnMeta.TurnStartedAtUnixMS,
+		CompletionSignal: strings.TrimSpace(turnMeta.CompletionSignal),
+		WindowId:         strings.TrimSpace(turnMeta.WindowID),
+		RequestKind:      strings.TrimSpace(turnMeta.RequestKind),
+	}
+	if meta.SessionId != "" {
+		meta.CompletionStatus = model.APIRequestLogTurnStatusOpen
+		meta.Attribution = model.APIRequestLogTurnAttributionInferred
+	}
+	if meta.SessionId != "" && meta.TurnId != "" {
+		meta.Attribution = model.APIRequestLogTurnAttributionExact
+	}
+	if turnMeta.Completed && meta.SessionId != "" {
+		meta.CompletionStatus = model.APIRequestLogTurnStatusCompleted
+		meta.CompletedAt = common.GetTimestamp()
+	}
+	if meta.SessionId == "" {
+		meta.CompletionStatus = model.APIRequestLogTurnStatusUnknown
+		meta.Attribution = model.APIRequestLogTurnAttributionUnknown
+	}
+	meta.Items = make([]model.APIRequestLogTurnItemMeta, 0, len(turnMeta.Items))
+	for _, item := range turnMeta.Items {
+		meta.Items = append(meta.Items, model.APIRequestLogTurnItemMeta{
+			Seq:            item.Seq,
+			ProviderItemId: strings.TrimSpace(item.ProviderItemID),
+			TurnId:         strings.TrimSpace(item.TurnID),
+			MessagePhase:   strings.TrimSpace(item.MessagePhase),
+			ItemStatus:     strings.TrimSpace(item.Status),
+		})
+	}
+	if log != nil && meta.StartedAt == 0 {
+		meta.StartedAt = log.CreatedAt
+	}
+	return meta
 }
 
 func RecordAPIRequestLogForConsume(c *gin.Context, relayInfo *relaycommon.RelayInfo, usageLog *model.Log) {
