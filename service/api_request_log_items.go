@@ -1,9 +1,12 @@
 package service
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -17,19 +20,411 @@ type apiRequestLogItemBuildResult struct {
 	apiFormat   string
 	parseStatus string
 	parseError  string
+	turnMeta    APIRequestLogTurnMeta
 }
 
 type apiRequestLogItemBuilder struct {
-	items []model.APIRequestLogItem
+	items            []model.APIRequestLogItem
+	itemMeta         []APIRequestLogTurnItemMeta
+	completed        bool
+	completionSignal string
+}
+
+type apiRequestLogSSESnapshot struct {
+	items            []model.APIRequestLogItem
+	itemMeta         []APIRequestLogTurnItemMeta
+	completed        bool
+	completionSignal string
+	sawSSE           bool
+	parseErrors      []string
+}
+
+type apiRequestLogSSECollector struct {
+	mu                  sync.Mutex
+	redactSecrets       bool
+	eventLimit          int
+	pending             []byte
+	discardLine         bool
+	eventData           []string
+	eventBytes          int
+	eventOverflow       bool
+	limitErrorRecorded  bool
+	aggregateLimit      int
+	aggregateWarning    bool
+	sawSSE              bool
+	parseErrors         []string
+	seenItems           map[string]bool
+	seenFallbackItems   map[string]bool
+	queuedFallbackItems map[string]bool
+	doneContentKeys     map[string]bool
+	fallbackItems       []map[string]interface{}
+	fallbackBytes       int
+	fallbackWarning     bool
+	encryptedSeen       map[string]bool
+	answer              strings.Builder
+	answerTruncated     bool
+	reasoning           strings.Builder
+	reasoningTruncated  bool
+	genericFlushed      bool
+	builder             apiRequestLogItemBuilder
+}
+
+func newAPIRequestLogSSECollector(redactSecrets bool) *apiRequestLogSSECollector {
+	limit := common.APIRequestLogMaxItemBytes
+	if limit <= 0 {
+		limit = 4 * 1024 * 1024
+	}
+	return &apiRequestLogSSECollector{
+		redactSecrets:       redactSecrets,
+		eventLimit:          limit,
+		aggregateLimit:      limit,
+		seenItems:           make(map[string]bool),
+		seenFallbackItems:   make(map[string]bool),
+		queuedFallbackItems: make(map[string]bool),
+		doneContentKeys:     make(map[string]bool),
+		encryptedSeen:       make(map[string]bool),
+	}
+}
+
+func (c *apiRequestLogSSECollector) Feed(data []byte) {
+	if c == nil || len(data) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for len(data) > 0 {
+		idx := bytes.IndexByte(data, '\n')
+		if idx < 0 {
+			c.consumeLineFragment(data)
+			return
+		}
+		c.consumeLineFragment(data[:idx])
+		if c.discardLine {
+			c.discardLine = false
+			c.pending = nil
+		} else {
+			line := string(c.pending)
+			c.pending = nil
+			c.consumeLine(line)
+		}
+		data = data[idx+1:]
+	}
+}
+
+func (c *apiRequestLogSSECollector) Snapshot() apiRequestLogSSESnapshot {
+	if c == nil {
+		return apiRequestLogSSESnapshot{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pending) > 0 && !c.discardLine {
+		c.consumeLine(string(c.pending))
+	}
+	c.pending = nil
+	c.discardLine = false
+	c.consumeEvent()
+	for _, item := range c.fallbackItems {
+		c.appendCompletedResponseItem(item, true)
+	}
+	c.fallbackItems = nil
+	return apiRequestLogSSESnapshot{
+		items:            append([]model.APIRequestLogItem(nil), c.builder.items...),
+		itemMeta:         append([]APIRequestLogTurnItemMeta(nil), c.builder.itemMeta...),
+		completed:        c.builder.completed,
+		completionSignal: c.builder.completionSignal,
+		sawSSE:           c.sawSSE,
+		parseErrors:      append([]string(nil), c.parseErrors...),
+	}
+}
+
+func (c *apiRequestLogSSECollector) consumeLineFragment(fragment []byte) {
+	if c.discardLine || len(fragment) == 0 {
+		return
+	}
+	if len(c.pending)+len(fragment) > c.eventLimit {
+		prefixBytes := make([]byte, 0, 16)
+		pendingLength := len(c.pending)
+		if pendingLength > cap(prefixBytes) {
+			pendingLength = cap(prefixBytes)
+		}
+		prefixBytes = append(prefixBytes, c.pending[:pendingLength]...)
+		remaining := cap(prefixBytes) - len(prefixBytes)
+		if remaining > len(fragment) {
+			remaining = len(fragment)
+		}
+		prefixBytes = append(prefixBytes, fragment[:remaining]...)
+		prefix := strings.TrimSpace(string(prefixBytes))
+		if strings.HasPrefix(prefix, "data:") || strings.HasPrefix(prefix, "event:") {
+			c.sawSSE = true
+		}
+		c.pending = nil
+		c.discardLine = true
+		c.markEventTooLarge()
+		return
+	}
+	c.pending = append(c.pending, fragment...)
+}
+
+func (c *apiRequestLogSSECollector) consumeLine(line string) {
+	line = strings.TrimSuffix(line, "\r")
+	if line == "" {
+		c.consumeEvent()
+		return
+	}
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, ":") {
+		return
+	}
+	if strings.HasPrefix(trimmed, "event:") {
+		c.sawSSE = true
+		return
+	}
+	if strings.HasPrefix(trimmed, "data:") {
+		c.sawSSE = true
+		data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if c.eventBytes+len(data) > c.eventLimit {
+			c.markEventTooLarge()
+			return
+		}
+		c.eventData = append(c.eventData, data)
+		c.eventBytes += len(data)
+	}
+}
+
+func (c *apiRequestLogSSECollector) consumeEvent() {
+	if c.eventOverflow {
+		c.eventData = nil
+		c.eventBytes = 0
+		c.eventOverflow = false
+		return
+	}
+	if len(c.eventData) == 0 {
+		return
+	}
+	data := strings.TrimSpace(strings.Join(c.eventData, "\n"))
+	c.eventData = nil
+	c.eventBytes = 0
+	if data == "" || data == "[DONE]" {
+		return
+	}
+	if c.redactSecrets {
+		if redacted, _ := auditBodyToStringWithRedact(common.StringToByteSlice(data), "application/json", true); redacted != "" {
+			data = redacted
+		}
+	}
+	var root map[string]interface{}
+	if err := common.UnmarshalJsonStr(data, &root); err != nil {
+		if len(c.parseErrors) < 20 {
+			c.parseErrors = append(c.parseErrors, err.Error())
+		}
+		return
+	}
+	typ := strings.ToLower(strings.TrimSpace(common.Interface2String(root["type"])))
+	if typ == "response.output_item.done" {
+		if item, ok := root["item"].(map[string]interface{}); ok {
+			c.appendCompletedResponseItem(item, false)
+		}
+		return
+	}
+	if typ == "response.completed" {
+		c.collectResponseCompletedFallback(root)
+		return
+	}
+	if strings.HasPrefix(typ, "response.") {
+		// response.completed ends one upstream request, not the full agent turn.
+		return
+	}
+	partAnswer, partReasoning := extractJSONResponseSummary(data)
+	c.appendGenericDelta(&c.answer, partAnswer, &c.answerTruncated)
+	c.appendGenericDelta(&c.reasoning, partReasoning, &c.reasoningTruncated)
+	if signal := apiRequestLogProtocolCompletionSignal(root); signal != "" {
+		c.builder.markCompleted(signal)
+		c.flushGenericOutput(signal)
+	}
+}
+
+func (c *apiRequestLogSSECollector) markEventTooLarge() {
+	c.eventData = nil
+	c.eventBytes = 0
+	c.eventOverflow = true
+	if !c.limitErrorRecorded {
+		c.limitErrorRecorded = true
+		c.parseErrors = append(c.parseErrors, fmt.Sprintf("SSE event exceeds %d bytes", c.eventLimit))
+	}
+}
+
+func (c *apiRequestLogSSECollector) collectResponseCompletedFallback(root map[string]interface{}) {
+	response, ok := root["response"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	output, ok := response["output"].([]interface{})
+	if !ok {
+		return
+	}
+	for _, itemAny := range output {
+		item, ok := itemAny.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		key := firstNonEmpty(
+			common.Interface2String(item["id"]),
+			common.Interface2String(item["call_id"]),
+		)
+		contentKey := apiRequestLogResponseItemContentKey(item)
+		if (key != "" && c.seenItems[key]) || c.doneContentKeys[contentKey] {
+			continue
+		}
+		fallbackKey := key
+		if fallbackKey == "" {
+			fallbackKey = contentKey
+		}
+		if c.queuedFallbackItems[fallbackKey] || c.seenFallbackItems[fallbackKey] {
+			continue
+		}
+		itemBytes := len(valueToJSON(item))
+		if itemBytes == 0 {
+			continue
+		}
+		if itemBytes > c.aggregateLimit-c.fallbackBytes {
+			c.markFallbackTooLarge()
+			continue
+		}
+		c.queuedFallbackItems[fallbackKey] = true
+		c.fallbackBytes += itemBytes
+		c.fallbackItems = append(c.fallbackItems, item)
+	}
+}
+
+func (c *apiRequestLogSSECollector) appendGenericDelta(builder *strings.Builder, value string, truncated *bool) {
+	if value == "" || *truncated {
+		return
+	}
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	remaining := c.aggregateLimit - builder.Len()
+	if len(value) <= remaining {
+		builder.WriteString(value)
+		return
+	}
+	if remaining > 0 {
+		builder.WriteString(apiRequestLogUTF8Prefix(value, remaining))
+	}
+	*truncated = true
+	c.markAggregateTooLarge()
+}
+
+func apiRequestLogUTF8Prefix(value string, maxBytes int) string {
+	if maxBytes <= 0 || value == "" {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end]
+}
+
+func (c *apiRequestLogSSECollector) markAggregateTooLarge() {
+	if c.aggregateWarning {
+		return
+	}
+	c.aggregateWarning = true
+	c.parseErrors = append(c.parseErrors, fmt.Sprintf("SSE generic output exceeds %d bytes and was truncated", c.aggregateLimit))
+}
+
+func (c *apiRequestLogSSECollector) markFallbackTooLarge() {
+	if c.fallbackWarning {
+		return
+	}
+	c.fallbackWarning = true
+	c.parseErrors = append(c.parseErrors, fmt.Sprintf("SSE response.completed fallback exceeds %d cumulative bytes", c.aggregateLimit))
+}
+
+func (c *apiRequestLogSSECollector) appendCompletedResponseItem(item map[string]interface{}, fallback bool) {
+	key := firstNonEmpty(
+		common.Interface2String(item["id"]),
+		common.Interface2String(item["call_id"]),
+	)
+	contentKey := apiRequestLogResponseItemContentKey(item)
+	if fallback {
+		if (key != "" && c.seenItems[key]) || c.doneContentKeys[contentKey] {
+			return
+		}
+		fallbackKey := key
+		if fallbackKey == "" {
+			fallbackKey = contentKey
+		}
+		if c.seenFallbackItems[fallbackKey] {
+			return
+		}
+		c.seenFallbackItems[fallbackKey] = true
+		c.builder.appendResponsesOutputItem(item, "sse.response.completed.output", c.encryptedSeen)
+		return
+	}
+	if key != "" && c.seenItems[key] {
+		return
+	}
+	if key == "" && c.doneContentKeys[contentKey] {
+		return
+	}
+	if key != "" {
+		c.seenItems[key] = true
+	}
+	c.doneContentKeys[contentKey] = true
+	c.builder.appendResponsesOutputItem(item, "sse.output_item.done", c.encryptedSeen)
+}
+
+func apiRequestLogResponseItemContentKey(item map[string]interface{}) string {
+	identity := map[string]interface{}{
+		"type":              item["type"],
+		"call_id":           item["call_id"],
+		"name":              item["name"],
+		"arguments":         item["arguments"],
+		"content":           item["content"],
+		"summary":           item["summary"],
+		"output":            item["output"],
+		"text":              item["text"],
+		"encrypted_content": item["encrypted_content"],
+	}
+	return "content:" + common.Sha1(common.StringToByteSlice(valueToJSON(identity)))
+}
+
+func (c *apiRequestLogSSECollector) flushGenericOutput(signal string) {
+	if c.genericFlushed {
+		return
+	}
+	c.genericFlushed = true
+	statusMeta := map[string]interface{}{"status": "completed"}
+	if text := strings.TrimSpace(c.answer.String()); text != "" {
+		start := len(c.builder.items)
+		c.builder.addItem(model.APIRequestLogPhaseOutput, model.APIRequestLogItemMessage, "assistant", "text", text, "", "", "sse."+signal, false, c.answerTruncated)
+		c.builder.annotateAddedItems(start, statusMeta)
+	}
+	if text := strings.TrimSpace(c.reasoning.String()); text != "" {
+		start := len(c.builder.items)
+		c.builder.addItem(model.APIRequestLogPhaseOutput, model.APIRequestLogItemReasoning, "assistant", "text", text, "", "", "sse."+signal+".reasoning", false, c.reasoningTruncated)
+		c.builder.annotateAddedItems(start, statusMeta)
+	}
 }
 
 func BuildAPIRequestLogTrainingItems(requestBody string, responseBody string) ([]model.APIRequestLogItem, string, string) {
+	builder, parseStatus, parseError := buildAPIRequestLogTrainingItems(requestBody, responseBody, nil)
+	return builder.items, parseStatus, parseError
+}
+
+func buildAPIRequestLogTrainingItems(requestBody string, responseBody string, streamSnapshot *apiRequestLogSSESnapshot) (*apiRequestLogItemBuilder, string, string) {
 	builder := &apiRequestLogItemBuilder{}
 	var parseErrors []string
 	if err := builder.appendRequestItems(requestBody); err != nil {
 		parseErrors = append(parseErrors, "request: "+err.Error())
 	}
-	if err := builder.appendResponseItems(responseBody); err != nil {
+	if streamSnapshot != nil && streamSnapshot.sawSSE {
+		builder.appendSSESnapshot(*streamSnapshot)
+		parseErrors = append(parseErrors, streamSnapshot.parseErrors...)
+	} else if err := builder.appendResponseItems(responseBody); err != nil {
 		parseErrors = append(parseErrors, "response: "+err.Error())
 	}
 	parseStatus := model.APIRequestLogParseOK
@@ -38,18 +433,51 @@ func BuildAPIRequestLogTrainingItems(requestBody string, responseBody string) ([
 	} else if len(parseErrors) > 0 {
 		parseStatus = model.APIRequestLogParsePartial
 	}
-	return builder.items, parseStatus, strings.Join(parseErrors, "; ")
+	return builder, parseStatus, strings.Join(parseErrors, "; ")
 }
 
 func buildAPIRequestLogItems(c *gin.Context, relayInfo *relaycommon.RelayInfo, requestLog apiRequestLogBody, responseLog apiRequestLogBody) apiRequestLogItemBuildResult {
-	items, parseStatus, parseError := BuildAPIRequestLogTrainingItems(requestLog.body, responseLog.body)
+	var streamSnapshot *apiRequestLogSSESnapshot
+	if c != nil {
+		if rawWriter, exists := c.Get(apiRequestLogWriterKey); exists {
+			if writer, ok := rawWriter.(*apiRequestLogWriter); ok && writer != nil {
+				snapshot := writer.streamSnapshot()
+				if snapshot.sawSSE {
+					streamSnapshot = &snapshot
+				}
+			}
+		}
+	}
+	builder, parseStatus, parseError := buildAPIRequestLogTrainingItems(requestLog.body, responseLog.body, streamSnapshot)
+	turnMeta := apiRequestLogTurnMetaFromRequest(c, relayInfo)
+	turnMeta.Completed = builder.completed
+	turnMeta.CompletionSignal = builder.completionSignal
+	turnMeta.Items = append([]APIRequestLogTurnItemMeta(nil), builder.itemMeta...)
+	if turnMeta.TurnID == "" {
+		turnMeta.TurnID = preferredAPIRequestLogTurnID(builder.itemMeta)
+	}
 	result := apiRequestLogItemBuildResult{
 		apiFormat:   apiRequestLogAPIFormat(c, relayInfo),
 		parseStatus: parseStatus,
 		parseError:  parseError,
-		items:       items,
+		items:       builder.items,
+		turnMeta:    turnMeta,
 	}
 	return result
+}
+
+func preferredAPIRequestLogTurnID(items []APIRequestLogTurnItemMeta) string {
+	for _, item := range items {
+		if item.MessagePhase == "final" && item.Status == "completed" && item.TurnID != "" {
+			return item.TurnID
+		}
+	}
+	for idx := len(items) - 1; idx >= 0; idx-- {
+		if items[idx].TurnID != "" {
+			return items[idx].TurnID
+		}
+	}
+	return ""
 }
 
 func apiRequestLogAPIFormat(c *gin.Context, relayInfo *relaycommon.RelayInfo) string {
@@ -112,6 +540,7 @@ func (b *apiRequestLogItemBuilder) appendResponseItems(body string) error {
 		b.addRaw(model.APIRequestLogPhaseOutput, body, "response_body")
 		return err
 	}
+	b.observeCompletion(root)
 	b.appendJSONResponseItems(root, "response")
 	return nil
 }
@@ -150,6 +579,7 @@ func (b *apiRequestLogItemBuilder) appendTextLikeInput(root map[string]interface
 }
 
 func (b *apiRequestLogItemBuilder) appendInputObject(m map[string]interface{}, source string) {
+	start := len(b.items)
 	role := normalizeTrainingRole(common.Interface2String(m["role"]))
 	if role == "" {
 		role = "user"
@@ -169,6 +599,7 @@ func (b *apiRequestLogItemBuilder) appendInputObject(m map[string]interface{}, s
 	if output := valueToText(m["output"]); output != "" {
 		b.addText(model.APIRequestLogPhaseInput, model.APIRequestLogItemToolResult, "tool", output, common.Interface2String(m["call_id"]), common.Interface2String(m["name"]), source+".output")
 	}
+	b.annotateAddedItems(start, m)
 }
 
 func (b *apiRequestLogItemBuilder) appendMessages(value interface{}, source string) {
@@ -181,6 +612,7 @@ func (b *apiRequestLogItemBuilder) appendMessages(value interface{}, source stri
 		if !ok {
 			continue
 		}
+		start := len(b.items)
 		role := normalizeTrainingRole(common.Interface2String(msg["role"]))
 		itemSource := fmt.Sprintf("%s[%d]", source, idx)
 		toolCallId := common.Interface2String(msg["tool_call_id"])
@@ -196,6 +628,7 @@ func (b *apiRequestLogItemBuilder) appendMessages(value interface{}, source stri
 			b.addText(model.APIRequestLogPhaseInput, model.APIRequestLogItemReasoning, role, reasoning, "", "", itemSource+".reasoning")
 		}
 		b.appendToolCalls(model.APIRequestLogPhaseInput, msg["tool_calls"], itemSource+".tool_calls")
+		b.annotateAddedItems(start, msg)
 	}
 }
 
@@ -246,47 +679,31 @@ func (b *apiRequestLogItemBuilder) appendToolSpecs(root map[string]interface{}) 
 }
 
 func (b *apiRequestLogItemBuilder) appendSSEResponseItems(body string) error {
-	var answer strings.Builder
-	var reasoning strings.Builder
-	var parseErrors []string
-	encryptedSeen := map[string]bool{}
-	for _, data := range splitSSEDataLines(body) {
-		if data == "" || data == "[DONE]" {
-			continue
-		}
-		var root map[string]interface{}
-		if err := common.UnmarshalJsonStr(data, &root); err != nil {
-			parseErrors = append(parseErrors, err.Error())
-			continue
-		}
-		partAnswer, partReasoning := extractJSONResponseSummary(data)
-		answer.WriteString(partAnswer)
-		reasoning.WriteString(partReasoning)
-		b.appendResponseEventItems(root, encryptedSeen)
-	}
-	if text := strings.TrimSpace(answer.String()); text != "" {
-		b.addText(model.APIRequestLogPhaseOutput, model.APIRequestLogItemMessage, "assistant", text, "", "", "sse.output_text")
-	}
-	if text := strings.TrimSpace(reasoning.String()); text != "" {
-		b.addText(model.APIRequestLogPhaseOutput, model.APIRequestLogItemReasoning, "assistant", text, "", "", "sse.reasoning")
-	}
-	if len(parseErrors) > 0 {
-		return errors.New(strings.Join(parseErrors, "; "))
+	collector := newAPIRequestLogSSECollector(false)
+	collector.Feed(common.StringToByteSlice(body))
+	snapshot := collector.Snapshot()
+	b.appendSSESnapshot(snapshot)
+	if len(snapshot.parseErrors) > 0 {
+		return errors.New(strings.Join(snapshot.parseErrors, "; "))
 	}
 	return nil
 }
 
-func (b *apiRequestLogItemBuilder) appendResponseEventItems(root map[string]interface{}, encryptedSeen map[string]bool) {
-	if item, ok := root["item"].(map[string]interface{}); ok {
-		b.appendResponsesOutputItem(item, "sse.item", encryptedSeen)
-	}
-	if response, ok := root["response"].(map[string]interface{}); ok {
-		if tools := valueToJSON(response["tools"]); tools != "" {
-			b.addJSON(model.APIRequestLogPhaseOutput, model.APIRequestLogItemToolSpec, "", tools, "", "", "response.created.tools")
+func (b *apiRequestLogItemBuilder) appendSSESnapshot(snapshot apiRequestLogSSESnapshot) {
+	for idx, item := range snapshot.items {
+		item.Id = 0
+		item.LogId = 0
+		item.Seq = len(b.items) + 1
+		b.items = append(b.items, item)
+		meta := APIRequestLogTurnItemMeta{Seq: item.Seq}
+		if idx < len(snapshot.itemMeta) {
+			meta = snapshot.itemMeta[idx]
+			meta.Seq = item.Seq
 		}
+		b.itemMeta = append(b.itemMeta, meta)
 	}
-	if typ := common.Interface2String(root["type"]); strings.Contains(typ, "tool_call") {
-		b.addJSON(model.APIRequestLogPhaseOutput, model.APIRequestLogItemToolCall, "assistant", valueToJSON(root), common.Interface2String(root["call_id"]), common.Interface2String(root["name"]), "sse."+typ)
+	if snapshot.completed {
+		b.markCompleted(snapshot.completionSignal)
 	}
 }
 
@@ -345,12 +762,14 @@ func (b *apiRequestLogItemBuilder) appendToolCalls(phase string, value interface
 		if !ok {
 			continue
 		}
+		start := len(b.items)
 		callSource := fmt.Sprintf("%s[%d]", source, idx)
 		name := common.Interface2String(call["name"])
 		if fn, ok := call["function"].(map[string]interface{}); ok {
 			name = firstNonEmpty(name, common.Interface2String(fn["name"]))
 		}
 		b.addJSON(phase, model.APIRequestLogItemToolCall, "assistant", valueToJSON(call), firstNonEmpty(common.Interface2String(call["id"]), common.Interface2String(call["call_id"])), name, callSource)
+		b.annotateAddedItems(start, call)
 	}
 }
 
@@ -366,6 +785,11 @@ func (b *apiRequestLogItemBuilder) appendResponsesOutput(output []interface{}, s
 }
 
 func (b *apiRequestLogItemBuilder) appendResponsesOutputItem(item map[string]interface{}, source string, encryptedSeen map[string]bool) {
+	start := len(b.items)
+	defer b.annotateAddedItems(start, item)
+	if apiRequestLogResponseItemCompleted(item) {
+		b.markCompleted("responses.message.final.completed")
+	}
 	itemType := common.Interface2String(item["type"])
 	switch {
 	case strings.Contains(itemType, "reasoning"):
@@ -497,7 +921,7 @@ func (b *apiRequestLogItemBuilder) addItem(phase string, itemType string, role s
 	if strings.TrimSpace(content) == "" {
 		return
 	}
-	b.items = append(b.items, model.APIRequestLogItem{
+	item := model.APIRequestLogItem{
 		Seq:         len(b.items) + 1,
 		Phase:       phase,
 		ItemType:    itemType,
@@ -509,13 +933,144 @@ func (b *apiRequestLogItemBuilder) addItem(phase string, itemType string, role s
 		Source:      source,
 		Redacted:    redacted,
 		Truncated:   truncated,
-	})
+	}
+	b.items = append(b.items, item)
+	b.itemMeta = append(b.itemMeta, APIRequestLogTurnItemMeta{Seq: item.Seq})
+}
+
+func (b *apiRequestLogItemBuilder) annotateAddedItems(start int, source map[string]interface{}) {
+	if start < 0 || start >= len(b.itemMeta) || source == nil {
+		return
+	}
+	meta := apiRequestLogTurnItemMetaFromMap(source)
+	for idx := start; idx < len(b.itemMeta); idx++ {
+		if b.itemMeta[idx].ProviderItemID == "" {
+			b.itemMeta[idx].ProviderItemID = meta.ProviderItemID
+		}
+		if b.itemMeta[idx].TurnID == "" {
+			b.itemMeta[idx].TurnID = meta.TurnID
+		}
+		if b.itemMeta[idx].MessagePhase == "" {
+			b.itemMeta[idx].MessagePhase = meta.MessagePhase
+		}
+		if b.itemMeta[idx].Status == "" {
+			b.itemMeta[idx].Status = meta.Status
+		}
+	}
+}
+
+func apiRequestLogTurnItemMetaFromMap(item map[string]interface{}) APIRequestLogTurnItemMeta {
+	return APIRequestLogTurnItemMeta{
+		ProviderItemID: firstNonEmpty(
+			common.Interface2String(item["id"]),
+			common.Interface2String(item["item_id"]),
+			common.Interface2String(item["call_id"]),
+		),
+		TurnID:       apiRequestLogTurnIDFromItem(item),
+		MessagePhase: strings.TrimSpace(common.Interface2String(item["phase"])),
+		Status:       strings.TrimSpace(common.Interface2String(item["status"])),
+	}
+}
+
+func apiRequestLogTurnIDFromItem(item map[string]interface{}) string {
+	if item == nil {
+		return ""
+	}
+	if turnID := strings.TrimSpace(common.Interface2String(item["turn_id"])); turnID != "" {
+		return turnID
+	}
+	for _, key := range []string{"metadata", "internal_chat_message_metadata_passthrough"} {
+		value := item[key]
+		if metadata, ok := value.(map[string]interface{}); ok {
+			if turnID := strings.TrimSpace(common.Interface2String(metadata["turn_id"])); turnID != "" {
+				return turnID
+			}
+			continue
+		}
+		if raw := strings.TrimSpace(common.Interface2String(value)); raw != "" {
+			var metadata map[string]interface{}
+			if common.UnmarshalJsonStr(raw, &metadata) == nil {
+				if turnID := strings.TrimSpace(common.Interface2String(metadata["turn_id"])); turnID != "" {
+					return turnID
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (b *apiRequestLogItemBuilder) observeCompletion(root map[string]interface{}) {
+	if root == nil {
+		return
+	}
+	if item, ok := root["item"].(map[string]interface{}); ok && apiRequestLogResponseItemCompleted(item) {
+		b.markCompleted("responses.message.final.completed")
+	}
+	if signal := apiRequestLogProtocolCompletionSignal(root); signal != "" {
+		b.markCompleted(signal)
+	}
+}
+
+func (b *apiRequestLogItemBuilder) markCompleted(signal string) {
+	if strings.TrimSpace(signal) == "" {
+		return
+	}
+	if !b.completed || signal == "responses.message.final.completed" {
+		b.completed = true
+		b.completionSignal = signal
+	}
+}
+
+func apiRequestLogResponseItemCompleted(item map[string]interface{}) bool {
+	if item == nil || !strings.Contains(strings.ToLower(common.Interface2String(item["type"])), "message") {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(common.Interface2String(item["phase"])), "final") &&
+		strings.EqualFold(strings.TrimSpace(common.Interface2String(item["status"])), "completed")
+}
+
+func apiRequestLogProtocolCompletionSignal(root map[string]interface{}) string {
+	if root == nil {
+		return ""
+	}
+	typ := strings.ToLower(strings.TrimSpace(common.Interface2String(root["type"])))
+	if typ == "message_stop" {
+		return "claude.message_stop"
+	}
+	if reason := strings.TrimSpace(common.Interface2String(root["stop_reason"])); reason != "" {
+		return "claude.stop_reason:" + reason
+	}
+	if choices, ok := root["choices"].([]interface{}); ok {
+		for _, choiceAny := range choices {
+			choice, ok := choiceAny.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if reason := strings.TrimSpace(firstNonEmpty(common.Interface2String(choice["finish_reason"]), common.Interface2String(choice["finishReason"]))); reason != "" {
+				return "chat.finish_reason:" + reason
+			}
+		}
+	}
+	if candidates, ok := root["candidates"].([]interface{}); ok {
+		for _, candidateAny := range candidates {
+			candidate, ok := candidateAny.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if reason := strings.TrimSpace(firstNonEmpty(common.Interface2String(candidate["finishReason"]), common.Interface2String(candidate["finish_reason"]))); reason != "" {
+				return "gemini.finish_reason:" + reason
+			}
+		}
+	}
+	return ""
 }
 
 func normalizeTrainingRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
-	case "system", "developer":
+	case "system":
 		return "system"
+	case "developer":
+		return "developer"
 	case "user", "human":
 		return "user"
 	case "assistant", "model":

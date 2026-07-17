@@ -120,6 +120,90 @@ func TestAPIRequestLogBodyCaptureUsesConfiguredLimit(t *testing.T) {
 	}
 }
 
+func TestAPIRequestLogTurnMetaParsesCodexAllowlistWithThreadFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ctx.Request.Header.Set("X-Codex-Turn-Metadata", `{"session_id":"","thread_id":"thread_1","turn_id":"turn_1","window_id":"window_1","request_kind":"user","turn_started_at_unix_ms":"1784275200123","opaque_secret":"must-not-be-retained"}`)
+
+	meta := apiRequestLogTurnMetaFromRequest(ctx, nil)
+	if meta.SessionID != "thread_1" || meta.TurnID != "turn_1" || meta.WindowID != "window_1" || meta.RequestKind != "user" {
+		t.Fatalf("unexpected codex turn metadata: %+v", meta)
+	}
+	if meta.TurnStartedAtUnixMS != 1784275200123 {
+		t.Fatalf("unexpected turn start timestamp: %d", meta.TurnStartedAtUnixMS)
+	}
+}
+
+func TestAPIRequestLogIncrementalSSECapturesFinalPastBodyLimit(t *testing.T) {
+	oldEnabled := common.APIRequestLogEnabled
+	oldCaptureResponse := common.APIRequestLogCaptureResponse
+	oldRedactSecrets := common.APIRequestLogRedactSecrets
+	oldMaxBodyBytes := common.APIRequestLogMaxBodyBytes
+	common.APIRequestLogEnabled = true
+	common.APIRequestLogCaptureResponse = true
+	common.APIRequestLogRedactSecrets = false
+	common.APIRequestLogMaxBodyBytes = 64
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.APIRequestLogCaptureResponse = oldCaptureResponse
+		common.APIRequestLogRedactSecrets = oldRedactSecrets
+		common.APIRequestLogMaxBodyBytes = oldMaxBodyBytes
+	})
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"input":"hello"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.Header.Set("X-Codex-Turn-Metadata", `{"session_id":"session_1","turn_id":"turn_1","window_id":"window_1","request_kind":"user","turn_started_at_unix_ms":1784275200123}`)
+	ctx.Writer.Header().Set("Content-Type", "text/event-stream")
+	StartAPIRequestLogCapture(ctx)
+
+	filler := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"" + strings.Repeat("x", 256) + "\"}\n\n"
+	if _, err := ctx.Writer.Write([]byte(filler)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.Writer.Write([]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"msg_final\",\"type\":\"message\",\"status\":\"in_progress\",\"phase\":\"final\",\"content\":[]}}\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	done := "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"msg_final\",\"type\":\"message\",\"status\":\"completed\",\"phase\":\"final\",\"role\":\"assistant\",\"metadata\":{\"turn_id\":\"turn_1\"},\"content\":[{\"type\":\"output_text\",\"text\":\"finished\"}]}}\n\n"
+	mid := len(done) / 2
+	if _, err := ctx.Writer.Write([]byte(done[:mid])); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.Writer.Write([]byte(done[mid:])); err != nil {
+		t.Fatal(err)
+	}
+
+	responseLog := buildResponseLogBody(ctx)
+	if responseLog.omittedReason != "truncated" {
+		t.Fatalf("expected bounded raw response capture to truncate, got %+v", responseLog)
+	}
+	result := buildAPIRequestLogItems(ctx, nil, buildRequestLogBody(ctx), responseLog)
+	if result.parseStatus != model.APIRequestLogParseOK || result.parseError != "" {
+		t.Fatalf("unexpected parse result: %s %s", result.parseStatus, result.parseError)
+	}
+	if !result.turnMeta.Completed || result.turnMeta.CompletionSignal != "responses.message.final.completed" {
+		t.Fatalf("expected exact final completion past raw body limit, got %+v", result.turnMeta)
+	}
+	if result.turnMeta.SessionID != "session_1" || result.turnMeta.TurnID != "turn_1" || result.turnMeta.TurnStartedAtUnixMS != 1784275200123 {
+		t.Fatalf("unexpected turn identifiers: %+v", result.turnMeta)
+	}
+	if len(result.items) != 2 {
+		t.Fatalf("expected one request and one completed response item, got %d: %+v", len(result.items), result.items)
+	}
+	if string(result.items[1].Content) != "finished" {
+		t.Fatalf("unexpected final item content: %q", result.items[1].Content)
+	}
+	if len(result.turnMeta.Items) != 2 {
+		t.Fatalf("expected metadata aligned with normalized items, got %+v", result.turnMeta.Items)
+	}
+	finalMeta := result.turnMeta.Items[1]
+	if finalMeta.Seq != 2 || finalMeta.ProviderItemID != "msg_final" || finalMeta.TurnID != "turn_1" || finalMeta.MessagePhase != "final" || finalMeta.Status != "completed" {
+		t.Fatalf("unexpected final item metadata: %+v", finalMeta)
+	}
+}
+
 func TestAPIRequestLogCaptureRecordsOnce(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

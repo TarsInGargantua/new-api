@@ -58,44 +58,45 @@ func (APIRequestLogBody) GormDBDataType(db *gorm.DB, field *schema.Field) string
 }
 
 type APIRequestLog struct {
-	Id                    int                 `json:"id" gorm:"primaryKey;index:idx_api_request_logs_created_at_id,priority:1"`
-	Source                string              `json:"source" gorm:"type:varchar(32);index:idx_api_request_logs_source_id,priority:1;default:'live'"`
-	SourceId              int                 `json:"source_id,omitempty" gorm:"index:idx_api_request_logs_source_id,priority:2;default:0"`
-	UsageLogId            int                 `json:"usage_log_id" gorm:"index;default:0"`
-	UserId                int                 `json:"user_id" gorm:"index;default:0"`
-	Username              string              `json:"username" gorm:"index;default:''"`
-	TokenId               int                 `json:"token_id" gorm:"index;default:0"`
-	TokenName             string              `json:"token_name" gorm:"index;default:''"`
-	ModelName             string              `json:"model_name" gorm:"index;default:''"`
-	CreatedAt             int64               `json:"created_at" gorm:"bigint;index:idx_api_request_logs_created_at_id,priority:2"`
-	RequestId             string              `json:"request_id,omitempty" gorm:"type:varchar(64);index;default:''"`
-	UpstreamRequestId     string              `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index;default:''"`
-	Method                string              `json:"method" gorm:"type:varchar(16);default:''"`
-	RequestPath           string              `json:"request_path" gorm:"index;default:''"`
-	APIFormat             string              `json:"api_format,omitempty" gorm:"type:varchar(64);index;default:''"`
-	StatusCode            int                 `json:"status_code" gorm:"index;default:0"`
-	IsStream              bool                `json:"is_stream"`
-	ChannelId             int                 `json:"channel_id" gorm:"index;default:0"`
-	Group                 string              `json:"group" gorm:"index;default:''"`
-	RequestContentType    string              `json:"request_content_type" gorm:"default:''"`
-	ResponseContentType   string              `json:"response_content_type" gorm:"default:''"`
-	RequestSize           int64               `json:"request_size" gorm:"default:0"`
-	ResponseSize          int64               `json:"response_size" gorm:"default:0"`
-	RequestOmittedReason  string              `json:"request_omitted_reason,omitempty" gorm:"default:''"`
-	ResponseOmittedReason string              `json:"response_omitted_reason,omitempty" gorm:"default:''"`
-	Redacted              bool                `json:"redacted"`
-	Quota                 int                 `json:"quota" gorm:"default:0"`
-	PromptTokens          int                 `json:"prompt_tokens" gorm:"default:0"`
-	CompletionTokens      int                 `json:"completion_tokens" gorm:"default:0"`
-	TokenUsed             int                 `json:"token_used" gorm:"default:0"`
-	UseTime               int                 `json:"use_time" gorm:"default:0"`
-	SchemaVersion         int                 `json:"schema_version" gorm:"default:1"`
-	ParseStatus           string              `json:"parse_status" gorm:"type:varchar(16);index;default:'ok'"`
-	ParseError            string              `json:"parse_error,omitempty" gorm:"type:text"`
-	ItemsStatus           string              `json:"items_status" gorm:"type:varchar(16);index;default:''"`
-	ItemsError            string              `json:"items_error,omitempty" gorm:"type:text"`
-	Items                 []APIRequestLogItem `json:"items,omitempty" gorm:"foreignKey:LogId;constraint:OnDelete:CASCADE"`
-	Usage                 *APIRequestLogUsage `json:"usage,omitempty" gorm:"-"`
+	Id                    int                    `json:"id" gorm:"primaryKey;index:idx_api_request_logs_created_at_id,priority:1"`
+	Source                string                 `json:"source" gorm:"type:varchar(32);index:idx_api_request_logs_source_id,priority:1;default:'live'"`
+	SourceId              int                    `json:"source_id,omitempty" gorm:"index:idx_api_request_logs_source_id,priority:2;default:0"`
+	UsageLogId            int                    `json:"usage_log_id" gorm:"index;default:0"`
+	UserId                int                    `json:"user_id" gorm:"index;default:0"`
+	Username              string                 `json:"username" gorm:"index;default:''"`
+	TokenId               int                    `json:"token_id" gorm:"index;default:0"`
+	TokenName             string                 `json:"token_name" gorm:"index;default:''"`
+	ModelName             string                 `json:"model_name" gorm:"index;default:''"`
+	CreatedAt             int64                  `json:"created_at" gorm:"bigint;index:idx_api_request_logs_created_at_id,priority:2"`
+	RequestId             string                 `json:"request_id,omitempty" gorm:"type:varchar(64);index;default:''"`
+	UpstreamRequestId     string                 `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index;default:''"`
+	Method                string                 `json:"method" gorm:"type:varchar(16);default:''"`
+	RequestPath           string                 `json:"request_path" gorm:"index;default:''"`
+	APIFormat             string                 `json:"api_format,omitempty" gorm:"type:varchar(64);index;default:''"`
+	StatusCode            int                    `json:"status_code" gorm:"index;default:0"`
+	IsStream              bool                   `json:"is_stream"`
+	ChannelId             int                    `json:"channel_id" gorm:"index;default:0"`
+	Group                 string                 `json:"group" gorm:"index;default:''"`
+	RequestContentType    string                 `json:"request_content_type" gorm:"default:''"`
+	ResponseContentType   string                 `json:"response_content_type" gorm:"default:''"`
+	RequestSize           int64                  `json:"request_size" gorm:"default:0"`
+	ResponseSize          int64                  `json:"response_size" gorm:"default:0"`
+	RequestOmittedReason  string                 `json:"request_omitted_reason,omitempty" gorm:"default:''"`
+	ResponseOmittedReason string                 `json:"response_omitted_reason,omitempty" gorm:"default:''"`
+	Redacted              bool                   `json:"redacted"`
+	Quota                 int                    `json:"quota" gorm:"default:0"`
+	PromptTokens          int                    `json:"prompt_tokens" gorm:"default:0"`
+	CompletionTokens      int                    `json:"completion_tokens" gorm:"default:0"`
+	TokenUsed             int                    `json:"token_used" gorm:"default:0"`
+	UseTime               int                    `json:"use_time" gorm:"default:0"`
+	SchemaVersion         int                    `json:"schema_version" gorm:"default:1"`
+	ParseStatus           string                 `json:"parse_status" gorm:"type:varchar(16);index;default:'ok'"`
+	ParseError            string                 `json:"parse_error,omitempty" gorm:"type:text"`
+	ItemsStatus           string                 `json:"items_status" gorm:"type:varchar(16);index;default:''"`
+	ItemsError            string                 `json:"items_error,omitempty" gorm:"type:text"`
+	Items                 []APIRequestLogItem    `json:"items,omitempty" gorm:"foreignKey:LogId;constraint:OnDelete:CASCADE"`
+	Usage                 *APIRequestLogUsage    `json:"usage,omitempty" gorm:"-"`
+	TurnMeta              *APIRequestLogTurnMeta `json:"-" gorm:"-"`
 
 	// Compatibility-only fields for older controller/frontend code and tests.
 	// They are intentionally excluded from the normalized table.
@@ -201,6 +202,9 @@ type APIRequestLogStorageStatus struct {
 	QueueCapacity         int    `json:"queue_capacity"`
 	QueuedItemBytes       int64  `json:"queued_item_bytes"`
 	MaxQueueBytes         int64  `json:"max_queue_bytes"`
+	QueueDroppedJobs      int64  `json:"queue_dropped_jobs"`
+	QueueDroppedItems     int64  `json:"queue_dropped_items"`
+	QueueDroppedItemBytes int64  `json:"queue_dropped_item_bytes"`
 }
 
 var REQUEST_LOG_DB *gorm.DB
@@ -213,7 +217,7 @@ var apiRequestLogLastWriteErrorAt int64
 
 type apiRequestLogItemWriteJob struct {
 	DB    *gorm.DB
-	LogId int
+	Log   APIRequestLog
 	Items []APIRequestLogItem
 	Bytes int64
 }
@@ -221,6 +225,9 @@ type apiRequestLogItemWriteJob struct {
 var apiRequestLogItemQueueMu sync.Mutex
 var apiRequestLogItemQueue chan apiRequestLogItemWriteJob
 var apiRequestLogQueuedItemBytes int64
+var apiRequestLogQueueDroppedJobs int64
+var apiRequestLogQueueDroppedItems int64
+var apiRequestLogQueueDroppedItemBytes int64
 
 func InitRequestLogDB() error {
 	if strings.TrimSpace(os.Getenv("REQUEST_LOG_SQL_DSN")) == "" {
@@ -312,6 +319,10 @@ func EnsureAPIRequestLogTable() error {
 		setAPIRequestLogLastWriteError(err)
 		return err
 	}
+	if err := EnsureAPIRequestLogMaterializedTables(db); err != nil {
+		setAPIRequestLogLastWriteError(err)
+		return err
+	}
 	setAPIRequestLogLastWriteError(nil)
 
 	apiRequestLogEnsureMu.Lock()
@@ -378,7 +389,10 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 
 	if !hasItems {
 		log.Items = nil
-		return nil
+		if log.TurnMeta == nil {
+			return nil
+		}
+		return materializeAPIRequestLogTurnForWrite(db, log, nil)
 	}
 
 	log.Items = normalizeAPIRequestLogItems(log.Id, items)
@@ -386,13 +400,16 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 		return nil
 	}
 	if asyncItems {
-		return enqueueAPIRequestLogItems(db, log.Id, log.Items)
+		return enqueueAPIRequestLogItems(db, log, log.Items)
 	}
 	if err := createAPIRequestLogItemsIfMissing(db, log.Id, log.Items); err != nil {
 		_ = updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsFailed, err.Error())
 		return err
 	}
-	return updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsOK, "")
+	if err := updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsOK, ""); err != nil {
+		return err
+	}
+	return materializeAPIRequestLogTurnForWrite(db, log, log.Items)
 }
 
 func shouldAsyncAPIRequestLogItems(log *APIRequestLog, hasItems bool) bool {
@@ -444,7 +461,10 @@ func createAPIRequestLogItems(db *gorm.DB, items []APIRequestLogItem) error {
 	return lastErr
 }
 
-func enqueueAPIRequestLogItems(db *gorm.DB, logId int, items []APIRequestLogItem) error {
+func enqueueAPIRequestLogItems(db *gorm.DB, log *APIRequestLog, items []APIRequestLogItem) error {
+	if log == nil {
+		return errors.New("request log is required")
+	}
 	startAPIRequestLogItemWriters()
 	apiRequestLogItemQueueMu.Lock()
 	queue := apiRequestLogItemQueue
@@ -454,19 +474,31 @@ func enqueueAPIRequestLogItems(db *gorm.DB, logId int, items []APIRequestLogItem
 	}
 	itemBytes := apiRequestLogItemsByteSize(items)
 	if err := reserveAPIRequestLogQueueBytes(itemBytes); err != nil {
-		_ = updateAPIRequestLogItemsStatus(db, logId, APIRequestLogItemsFailed, err.Error())
+		recordAPIRequestLogQueueDrop(len(items), itemBytes)
+		_ = updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsFailed, err.Error())
+		_ = materializeAPIRequestLogTurnWriteFailure(db, log)
 		return err
 	}
-	job := apiRequestLogItemWriteJob{DB: db, LogId: logId, Items: items, Bytes: itemBytes}
+	logCopy := *log
+	logCopy.Items = nil
+	job := apiRequestLogItemWriteJob{DB: db, Log: logCopy, Items: items, Bytes: itemBytes}
 	select {
 	case queue <- job:
 		return nil
 	default:
 		releaseAPIRequestLogQueueBytes(itemBytes)
+		recordAPIRequestLogQueueDrop(len(items), itemBytes)
 		err := errors.New("request log item queue is full")
-		_ = updateAPIRequestLogItemsStatus(db, logId, APIRequestLogItemsFailed, err.Error())
+		_ = updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsFailed, err.Error())
+		_ = materializeAPIRequestLogTurnWriteFailure(db, log)
 		return err
 	}
+}
+
+func recordAPIRequestLogQueueDrop(itemCount int, itemBytes int64) {
+	atomic.AddInt64(&apiRequestLogQueueDroppedJobs, 1)
+	atomic.AddInt64(&apiRequestLogQueueDroppedItems, int64(itemCount))
+	atomic.AddInt64(&apiRequestLogQueueDroppedItemBytes, itemBytes)
 }
 
 func startAPIRequestLogItemWriters() {
@@ -498,10 +530,50 @@ func apiRequestLogItemWorker(queue <-chan apiRequestLogItemWriteJob) {
 		releaseAPIRequestLogQueueBytes(job.Bytes)
 		if err != nil {
 			setAPIRequestLogLastWriteError(err)
-			_ = updateAPIRequestLogItemsStatus(job.DB, job.LogId, APIRequestLogItemsFailed, err.Error())
+			_ = updateAPIRequestLogItemsStatus(job.DB, job.Log.Id, APIRequestLogItemsFailed, err.Error())
+			_ = materializeAPIRequestLogTurnWriteFailure(job.DB, &job.Log)
 			continue
 		}
+		if err := materializeAPIRequestLogTurnForWrite(job.DB, &job.Log, job.Items); err != nil {
+			setAPIRequestLogLastWriteError(err)
+		}
 	}
+}
+
+func materializeAPIRequestLogTurnForWrite(db *gorm.DB, log *APIRequestLog, items []APIRequestLogItem) error {
+	if db == nil || log == nil || log.Id <= 0 {
+		return nil
+	}
+	meta := APIRequestLogTurnMeta{Protocol: log.APIFormat}
+	if log.TurnMeta != nil {
+		meta = *log.TurnMeta
+		if meta.Protocol == "" {
+			meta.Protocol = log.APIFormat
+		}
+	}
+	_, err := MaterializeAPIRequestLogTurn(db, log, meta, items)
+	return err
+}
+
+func materializeAPIRequestLogTurnWriteFailure(db *gorm.DB, log *APIRequestLog) error {
+	if log == nil {
+		return nil
+	}
+	logCopy := *log
+	if log.TurnMeta != nil {
+		meta := *log.TurnMeta
+		meta.Items = nil
+		meta.CompletedAt = 0
+		meta.CompletionSignal = ""
+		if strings.TrimSpace(meta.SessionId) == "" {
+			meta.CompletionStatus = APIRequestLogTurnStatusUnknown
+			meta.Attribution = APIRequestLogTurnAttributionUnknown
+		} else {
+			meta.CompletionStatus = APIRequestLogTurnStatusOpen
+		}
+		logCopy.TurnMeta = &meta
+	}
+	return materializeAPIRequestLogTurnForWrite(db, &logCopy, nil)
 }
 
 func apiRequestLogItemsByteSize(items []APIRequestLogItem) int64 {
@@ -915,9 +987,12 @@ func apiRequestUsageFromRequestLog(log *APIRequestLog) *APIRequestLogUsage {
 
 func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 	status := &APIRequestLogStorageStatus{
-		AsyncWrite:      common.APIRequestLogAsyncWrite,
-		QueuedItemBytes: atomic.LoadInt64(&apiRequestLogQueuedItemBytes),
-		MaxQueueBytes:   int64(common.APIRequestLogMaxQueueBytes),
+		AsyncWrite:            common.APIRequestLogAsyncWrite,
+		QueuedItemBytes:       atomic.LoadInt64(&apiRequestLogQueuedItemBytes),
+		MaxQueueBytes:         int64(common.APIRequestLogMaxQueueBytes),
+		QueueDroppedJobs:      atomic.LoadInt64(&apiRequestLogQueueDroppedJobs),
+		QueueDroppedItems:     atomic.LoadInt64(&apiRequestLogQueueDroppedItems),
+		QueueDroppedItemBytes: atomic.LoadInt64(&apiRequestLogQueueDroppedItemBytes),
 	}
 	apiRequestLogItemQueueMu.Lock()
 	if apiRequestLogItemQueue != nil {

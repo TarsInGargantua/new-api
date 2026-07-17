@@ -275,6 +275,9 @@ func TestCreateAPIRequestLogAsyncItems(t *testing.T) {
 
 func TestCreateAPIRequestLogAsyncItemsQueueByteLimit(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
+	droppedJobsBefore := atomic.LoadInt64(&apiRequestLogQueueDroppedJobs)
+	droppedItemsBefore := atomic.LoadInt64(&apiRequestLogQueueDroppedItems)
+	droppedBytesBefore := atomic.LoadInt64(&apiRequestLogQueueDroppedItemBytes)
 
 	oldAsync := common.APIRequestLogAsyncWrite
 	oldQueueSize := common.APIRequestLogQueueSize
@@ -316,6 +319,9 @@ func TestCreateAPIRequestLogAsyncItemsQueueByteLimit(t *testing.T) {
 	var count int64
 	require.NoError(t, REQUEST_LOG_DB.Model(&APIRequestLogItem{}).Where("log_id = ?", log.Id).Count(&count).Error)
 	require.Equal(t, int64(0), count)
+	require.Equal(t, droppedJobsBefore+1, atomic.LoadInt64(&apiRequestLogQueueDroppedJobs))
+	require.Equal(t, droppedItemsBefore+1, atomic.LoadInt64(&apiRequestLogQueueDroppedItems))
+	require.Greater(t, atomic.LoadInt64(&apiRequestLogQueueDroppedItemBytes), droppedBytesBefore)
 }
 
 func TestCreateAPIRequestLogTruncatesLargeItems(t *testing.T) {

@@ -4,7 +4,7 @@ This deployment splits request-log storage from the main application database:
 
 - `logs` remains in the existing main/log database.
 - `api_request_logs` and `api_request_log_items` use `REQUEST_LOG_SQL_DSN`.
-- The standalone viewer reads the same request-log database through a read-only MySQL user.
+- The standalone viewer reads turn data and has narrowly scoped write access to persistent export batch tables.
 
 ## Main Service Env
 
@@ -43,6 +43,11 @@ The request-log database contains:
 
 - `api_request_logs`: one row per gateway request, with envelope, index, usage, status, size, parse status, and migration source fields.
 - `api_request_log_items`: ordered training items for system/user/assistant messages, reasoning, tool specs, tool calls, tool results, errors, and raw unparsed fallback content.
+- `api_request_log_turns`: one materialized row per session turn, including exact/inferred/unknown attribution and completion state.
+- `api_request_log_turn_requests`: request-to-turn membership and per-request usage data.
+- `api_request_log_turn_items`: canonical turn-item mappings that reference `api_request_log_items`; item content is not copied.
+- `api_request_log_export_batches` and `api_request_log_export_members`: immutable, globally deduplicated export membership and artifact state.
+- `api_request_log_organizer_states`: persistent high-water marks for resumable historical turn organization.
 
 The parent table intentionally does not store `request_body`, `response_body`, or `metadata`. Raw bodies are only used as parser input. If parsing fails, the unparsed text is written once as an item with `item_type=raw_unparsed`.
 
@@ -63,7 +68,13 @@ CREATE DATABASE IF NOT EXISTS newapi_request_logs CHARACTER SET utf8mb4 COLLATE 
 CREATE USER IF NOT EXISTS 'newapi_request_log_app'@'%' IDENTIFIED BY '<strong-password>';
 CREATE USER IF NOT EXISTS 'request_log_viewer'@'localhost' IDENTIFIED BY '<strong-password>';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES ON newapi_request_logs.* TO 'newapi_request_log_app'@'%';
-GRANT SELECT ON newapi_request_logs.* TO 'request_log_viewer'@'localhost';
+REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'request_log_viewer'@'localhost';
+GRANT SELECT ON newapi_request_logs.api_request_log_turns TO 'request_log_viewer'@'localhost';
+GRANT SELECT ON newapi_request_logs.api_request_log_turn_requests TO 'request_log_viewer'@'localhost';
+GRANT SELECT ON newapi_request_logs.api_request_log_turn_items TO 'request_log_viewer'@'localhost';
+GRANT SELECT ON newapi_request_logs.api_request_log_items TO 'request_log_viewer'@'localhost';
+GRANT SELECT, INSERT, UPDATE ON newapi_request_logs.api_request_log_export_batches TO 'request_log_viewer'@'localhost';
+GRANT SELECT, INSERT, UPDATE ON newapi_request_logs.api_request_log_export_members TO 'request_log_viewer'@'localhost';
 FLUSH PRIVILEGES;
 ```
 
@@ -117,6 +128,7 @@ REQUEST_LOG_VIEWER_ADDR=:3001
 REQUEST_LOG_VIEWER_USERNAME=admin
 REQUEST_LOG_VIEWER_PASSWORD=<strong-password>
 REQUEST_LOG_VIEWER_SQL_DSN=request_log_viewer:<password>@tcp(127.0.0.1:3306)/newapi_request_logs?charset=utf8mb4&parseTime=true&loc=Local
+REQUEST_LOG_VIEWER_EXPORT_DIR=/home/rwkv/request-log/exports
 ```
 
 Example systemd unit:
@@ -127,9 +139,9 @@ Description=Request Log Viewer
 After=network.target mysql.service
 
 [Service]
-WorkingDirectory=/home/ubuntu/request-log
-EnvironmentFile=/home/ubuntu/request-log/.env
-ExecStart=/home/ubuntu/request-log/bin/request-log-viewer
+WorkingDirectory=/home/rwkv/request-log
+EnvironmentFile=/home/rwkv/request-log/.env
+ExecStart=/home/rwkv/request-log/bin/request-log-viewer
 Restart=always
 RestartSec=3
 
@@ -140,11 +152,41 @@ WantedBy=multi-user.target
 Viewer endpoints:
 
 - `GET /api/status`
-- `GET /api/logs?p=1&page_size=100`
-- `GET /api/logs/:id`
-- `GET /api/export.jsonl`
+- `GET /api/turns?p=1&page_size=100`
+- `GET /api/turns/:id`
+- `GET /api/export-preview`
+- `POST /api/export-batches`
+- `GET /api/export-batches`
+- `GET /api/export-batches/:tag/download`
+- `POST /api/export-batches/:tag/retry`
 
-`/api/export.jsonl` excludes `content_type=encrypted` items by default. Add `include_encrypted=true` only when encrypted payload export is explicitly intended.
+Turn time filters use `completed_at >= start_timestamp AND completed_at < end_timestamp`. Export batches ignore list pagination, default to exact completed turns, and globally exclude turns claimed by earlier batches. Add `include_inferred=true` only when inferred completed turns are intentionally included. Encrypted reasoning is never exported. The legacy `/api/export.jsonl` endpoint returns `410 Gone`.
+
+## Historical Turn Organizer
+
+Initialize the materialized tables with the migration-capable application account:
+
+```bash
+REQUEST_LOG_SQL_DSN='<request-log-app-dsn>' ./request-log-organize -init-only
+```
+
+Run a bounded dry run before processing the full table:
+
+```bash
+REQUEST_LOG_SQL_DSN='<request-log-app-dsn>' \
+  ./request-log-organize -dry-run -batch-size 100 -max-rows 1000 -lag-seconds 300
+```
+
+Then run the idempotent organizer in small keyset batches. It reads child items with one `log_id IN (...)` query per batch. Each committed batch advances `api_request_log_organizer_states.last_log_id` in the same transaction as its turn mappings, so a later run resumes automatically:
+
+```bash
+REQUEST_LOG_SQL_DSN='<request-log-app-dsn>' \
+  ./request-log-organize -batch-size 100 -lag-seconds 300 -sleep 100ms
+```
+
+Historical data without recoverable session metadata is grouped into deterministic synthetic sessions using user, token, model, and a sliding 30-minute inactivity window. Those turns remain `inferred`; the latest inferred turn stays open until a later turn is observed. Ambiguous records remain `unknown` and are never exportable.
+
+Dry runs ignore saved progress and never update it. Use `-after-id <id>` to override the saved starting point for one run, or `-ignore-progress` to perform an idempotent rescan from the beginning. Persisted progress only moves forward, including during manual rescans.
 
 ## Firewall
 

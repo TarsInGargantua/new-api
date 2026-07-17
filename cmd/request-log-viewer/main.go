@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"crypto/subtle"
 	"flag"
 	"fmt"
@@ -32,6 +31,7 @@ func main() {
 	username := flag.String("username", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_USERNAME"), "admin"), "basic auth username")
 	password := flag.String("password", os.Getenv("REQUEST_LOG_VIEWER_PASSWORD"), "basic auth password")
 	dsn := flag.String("dsn", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_SQL_DSN"), os.Getenv("REQUEST_LOG_SQL_DSN")), "request log database DSN")
+	exportDir := flag.String("export-dir", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_EXPORT_DIR"), "exports"), "persistent JSONL export directory")
 	flag.Parse()
 
 	if strings.TrimSpace(*password) == "" {
@@ -50,13 +50,28 @@ func main() {
 		fmt.Fprintf(os.Stderr, "init request log db: %v\n", err)
 		os.Exit(1)
 	}
+	exportWorker, err := newRequestLogExportWorker(model.REQUEST_LOG_DB, *exportDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init export worker: %v\n", err)
+		os.Exit(1)
+	}
+	if err := exportWorker.Recover(); err != nil {
+		fmt.Fprintf(os.Stderr, "recover export batches: %v\n", err)
+		os.Exit(1)
+	}
+	server := &requestLogViewerServer{db: model.REQUEST_LOG_DB, exports: exportWorker}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", serveIndex)
 	mux.HandleFunc("/api/status", serveStatus)
 	mux.HandleFunc("/api/filter-options", serveFilterOptions)
-	mux.HandleFunc("/api/logs", serveLogs)
-	mux.HandleFunc("/api/logs/", serveLogDetail)
+	mux.HandleFunc("/api/logs", serveLegacyRequestLogs)
+	mux.HandleFunc("/api/logs/", serveLegacyRequestLogs)
+	mux.HandleFunc("/api/turns", server.serveTurns)
+	mux.HandleFunc("/api/turns/", server.serveTurnDetail)
+	mux.HandleFunc("/api/export-preview", server.serveExportPreview)
+	mux.HandleFunc("/api/export-batches", server.serveExportBatches)
+	mux.HandleFunc("/api/export-batches/", server.serveExportBatchAction)
 	mux.HandleFunc("/api/export.jsonl", serveJSONL)
 
 	fmt.Printf("request-log-viewer listening on %s\n", *addr)
@@ -77,8 +92,25 @@ func serveIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveStatus(w http.ResponseWriter, r *http.Request) {
-	status, err := model.GetAPIRequestLogStorageStatus()
-	writeAPI(w, status, err)
+	type viewerStatus struct {
+		HasTurnTable        bool   `json:"has_turn_table"`
+		TurnCount           int64  `json:"turn_count"`
+		RequestLogDBDialect string `json:"request_log_db_dialect,omitempty"`
+	}
+	result := viewerStatus{}
+	if model.REQUEST_LOG_DB == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "request log database is not initialized")
+		return
+	}
+	if model.REQUEST_LOG_DB.Dialector != nil {
+		result.RequestLogDBDialect = model.REQUEST_LOG_DB.Dialector.Name()
+	}
+	result.HasTurnTable = model.REQUEST_LOG_DB.Migrator().HasTable(&model.APIRequestLogTurn{})
+	var err error
+	if result.HasTurnTable {
+		err = model.REQUEST_LOG_DB.Model(&model.APIRequestLogTurn{}).Count(&result.TurnCount).Error
+	}
+	writeAPI(w, result, err)
 }
 
 func serveFilterOptions(w http.ResponseWriter, r *http.Request) {
@@ -86,83 +118,16 @@ func serveFilterOptions(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	options, err := model.GetAPIRequestLogFilterOptions(queryInt(r.URL.Query().Get("limit"), 500))
+	options, err := model.GetAPIRequestLogTurnFilterOptions(model.REQUEST_LOG_DB, queryInt(r.URL.Query().Get("limit"), 500))
 	writeAPI(w, options, err)
 }
 
-func serveLogs(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/api/logs" {
-		http.NotFound(w, r)
-		return
-	}
-	params, page, pageSize := requestQuery(r, 100)
-	items, total, err := model.GetAPIRequestLogs(params)
-	writeAPI(w, pageData{Items: items, Total: total, Page: page, PageSize: pageSize}, err)
-}
-
-func serveLogDetail(w http.ResponseWriter, r *http.Request) {
-	idText := strings.TrimPrefix(r.URL.Path, "/api/logs/")
-	id, _ := strconv.Atoi(idText)
-	if id <= 0 {
-		writeAPIError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	detail, err := model.GetAPIRequestLogById(id)
-	writeAPI(w, detail, err)
+func serveLegacyRequestLogs(w http.ResponseWriter, r *http.Request) {
+	writeAPIError(w, http.StatusGone, "request-level views are disabled; use /api/turns")
 }
 
 func serveJSONL(w http.ResponseWriter, r *http.Request) {
-	params, _, _ := requestQuery(r, 1000)
-	if params.Num > 5000 {
-		params.Num = 5000
-	}
-	includeEncrypted := strings.EqualFold(r.URL.Query().Get("include_encrypted"), "true")
-	items, _, err := model.GetAPIRequestLogs(params)
-	if err != nil {
-		writeAPI(w, nil, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
-	w.Header().Set("Content-Disposition", "attachment; filename=request-log-training.jsonl")
-	writer := bufio.NewWriter(w)
-	defer writer.Flush()
-	for _, item := range items {
-		detail, err := model.GetAPIRequestLogById(item.Id)
-		if err != nil {
-			continue
-		}
-		line := trainingJSONLRecord(detail, includeEncrypted)
-		encoded, err := common.Marshal(line)
-		if err != nil {
-			continue
-		}
-		_, _ = writer.Write(encoded)
-		_, _ = writer.WriteString("\n")
-	}
-}
-
-func requestQuery(r *http.Request, defaultPageSize int) (model.APIRequestLogQueryParams, int, int) {
-	q := r.URL.Query()
-	page := queryInt(q.Get("p"), 1)
-	pageSize := queryInt(q.Get("page_size"), defaultPageSize)
-	if pageSize <= 0 {
-		pageSize = defaultPageSize
-	}
-	if pageSize > 1000 {
-		pageSize = 1000
-	}
-	params := model.APIRequestLogQueryParams{
-		StartTimestamp: queryInt64(q.Get("start_timestamp"), 0),
-		EndTimestamp:   queryInt64(q.Get("end_timestamp"), 0),
-		ModelName:      q.Get("model_name"),
-		ModelNames:     queryList(q, "model_name"),
-		Username:       q.Get("username"),
-		Usernames:      queryList(q, "username"),
-		TokenName:      q.Get("token_name"),
-		StartIdx:       (page - 1) * pageSize,
-		Num:            pageSize,
-	}
-	return params, page, pageSize
+	writeAPIError(w, http.StatusGone, "request-level export is disabled; create a turn export batch")
 }
 
 func queryList(values map[string][]string, key string) []string {
@@ -182,39 +147,6 @@ func queryList(values map[string][]string, key string) []string {
 			out = append(out, value)
 		}
 	}
-	return out
-}
-
-func trainingJSONLRecord(log *model.APIRequestLog, includeEncrypted bool) map[string]interface{} {
-	out := map[string]interface{}{
-		"id":                log.Id,
-		"request_id":        log.RequestId,
-		"model":             log.ModelName,
-		"created_at":        log.CreatedAt,
-		"parse_status":      log.ParseStatus,
-		"schema_version":    log.SchemaVersion,
-		"training_items":    []map[string]interface{}{},
-		"prompt_tokens":     log.PromptTokens,
-		"completion_tokens": log.CompletionTokens,
-	}
-	items := make([]map[string]interface{}, 0, len(log.Items))
-	for _, item := range log.Items {
-		if item.ContentType == "encrypted" && !includeEncrypted {
-			continue
-		}
-		items = append(items, map[string]interface{}{
-			"seq":          item.Seq,
-			"phase":        item.Phase,
-			"type":         item.ItemType,
-			"role":         item.Role,
-			"content_type": item.ContentType,
-			"content":      string(item.Content),
-			"tool_call_id": item.ToolCallId,
-			"name":         item.Name,
-			"source":       item.Source,
-		})
-	}
-	out["training_items"] = items
 	return out
 }
 
@@ -303,6 +235,16 @@ const indexHTML = `<!doctype html>
       --good:#8ea36f;
       --warn:#c88945;
       --bad:#c46a5a;
+      --role-user:#7fc8f1;
+      --role-user-bg:rgba(77,157,203,.12);
+      --role-system:#c8a7e8;
+      --role-system-bg:rgba(161,111,204,.13);
+      --role-assistant:#e8bd68;
+      --role-assistant-bg:rgba(195,163,91,.13);
+      --role-developer:#e69a9a;
+      --role-developer-bg:rgba(196,106,90,.13);
+      --role-tool:#7fc6a4;
+      --role-tool-bg:rgba(92,164,126,.13);
       --code:#0c0d0b;
       --shadow:0 18px 45px rgba(0,0,0,.28);
     }
@@ -346,7 +288,7 @@ const indexHTML = `<!doctype html>
     main {
       position:relative;
       display:grid;
-      grid-template-columns:minmax(430px, 42%) 1fr;
+      grid-template-columns:minmax(560px, 52%) 1fr;
       min-height:0;
       overflow:hidden;
     }
@@ -487,7 +429,7 @@ const indexHTML = `<!doctype html>
       border-color:var(--line-soft);
       background:#141510;
     }
-    input, button {
+    input, button, select {
       min-width:0;
       border:1px solid var(--line);
       background:var(--panel);
@@ -497,9 +439,9 @@ const indexHTML = `<!doctype html>
       font:inherit;
       outline:none;
     }
-    input { color:var(--text); }
+    input, select { color:var(--text); }
     input::placeholder { color:var(--faint); }
-    input:focus { border-color:var(--accent-dim); background:var(--panel-2); }
+    input:focus, select:focus { border-color:var(--accent-dim); background:var(--panel-2); }
     button {
       cursor:pointer;
       color:var(--text);
@@ -540,6 +482,9 @@ const indexHTML = `<!doctype html>
     .pill.ok { color:var(--good); border-color:rgba(142,163,111,.42); }
     .pill.partial { color:var(--warn); border-color:rgba(200,137,69,.5); }
     .pill.failed { color:var(--bad); border-color:rgba(196,106,90,.5); }
+    .pill.completed, .pill.exact { color:var(--good); border-color:rgba(142,163,111,.42); }
+    .pill.open, .pill.inferred, .pill.building, .pill.pending { color:var(--warn); border-color:rgba(200,137,69,.5); }
+    .pill.unknown { color:var(--faint); }
     .detail {
       min-height:0;
       overflow:auto;
@@ -604,18 +549,128 @@ const indexHTML = `<!doctype html>
       box-shadow:var(--shadow);
       overflow:hidden;
     }
-    .item[data-phase="input"] { border-left:3px solid var(--good); }
-    .item[data-phase="output"] { border-left:3px solid var(--accent); }
     .item-head {
       display:flex;
       flex-wrap:wrap;
-      gap:7px;
+      gap:10px;
       align-items:center;
-      padding:9px 10px;
+      padding:10px 12px;
       border-bottom:1px solid var(--line-soft);
       background:#141610;
     }
-    .item-title { margin-right:auto; color:var(--text); font-weight:700; font-size:12px; }
+    .item-primary,
+    .item-meta {
+      display:flex;
+      flex-wrap:wrap;
+      align-items:center;
+      gap:7px;
+      min-width:0;
+    }
+    .item-primary { flex:1 1 520px; }
+    .item-meta { flex:0 1 auto; justify-content:flex-end; }
+    .item-title {
+      color:var(--text);
+      font-weight:750;
+      font-size:12px;
+      white-space:nowrap;
+    }
+    .role-badge {
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      min-height:24px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      padding:2px 9px;
+      color:var(--muted);
+      background:var(--panel-2);
+      font-size:11px;
+      font-weight:750;
+      line-height:1;
+      white-space:nowrap;
+    }
+    .role-badge:before {
+      content:"";
+      width:6px;
+      height:6px;
+      flex:0 0 6px;
+      border-radius:50%;
+      background:currentColor;
+      box-shadow:0 0 0 3px rgba(255,255,255,.035);
+    }
+    .role-user { color:var(--role-user); border-color:rgba(127,200,241,.38); background:var(--role-user-bg); }
+    .role-system { color:var(--role-system); border-color:rgba(200,167,232,.38); background:var(--role-system-bg); }
+    .role-assistant { color:var(--role-assistant); border-color:rgba(232,189,104,.4); background:var(--role-assistant-bg); }
+    .role-developer { color:var(--role-developer); border-color:rgba(230,154,154,.4); background:var(--role-developer-bg); }
+    .role-tool { color:var(--role-tool); border-color:rgba(127,198,164,.38); background:var(--role-tool-bg); }
+    .call-id {
+      display:inline-flex;
+      align-items:baseline;
+      gap:7px;
+      min-width:0;
+      max-width:100%;
+      border:1px solid rgba(195,163,91,.35);
+      border-radius:5px;
+      padding:3px 7px;
+      background:rgba(195,163,91,.075);
+    }
+    .call-id-label {
+      flex:0 0 auto;
+      color:var(--faint);
+      font-size:9px;
+      font-weight:800;
+      line-height:1;
+      text-transform:uppercase;
+      letter-spacing:.07em;
+    }
+    .call-id code {
+      min-width:0;
+      color:#dcc784;
+      font:11px/1.35 "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+      overflow-wrap:anywhere;
+    }
+    .item-context {
+      color:var(--muted);
+      font:11px/1.35 "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+      overflow-wrap:anywhere;
+    }
+    dialog {
+      width:min(760px, calc(100vw - 32px));
+      max-height:min(760px, calc(100vh - 32px));
+      border:1px solid var(--line);
+      border-radius:8px;
+      padding:0;
+      color:var(--text);
+      background:var(--panel);
+      box-shadow:var(--shadow);
+    }
+    dialog::backdrop { background:rgba(5,6,5,.78); backdrop-filter:blur(3px); }
+    .export-head {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      padding:14px 16px;
+      border-bottom:1px solid var(--line);
+    }
+    .export-head h2 { margin:0; font-size:15px; }
+    .icon-button { width:34px; height:34px; padding:0; font-size:20px; line-height:1; }
+    .export-body { display:grid; gap:14px; padding:16px; overflow:auto; }
+    .export-controls { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; }
+    .toggle { display:flex; align-items:center; gap:8px; color:var(--muted); }
+    .toggle input { width:auto; accent-color:var(--accent); }
+    .export-preview { color:var(--muted); font-size:13px; }
+    .batch-list { display:grid; gap:8px; }
+    .batch-row {
+      display:grid;
+      grid-template-columns:minmax(0,1fr) auto auto;
+      align-items:center;
+      gap:10px;
+      padding:10px;
+      border-top:1px solid var(--line-soft);
+    }
+    .batch-tag { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:12px/1.4 "IBM Plex Mono", monospace; }
+    .batch-meta { color:var(--faint); font-size:11px; }
     pre {
       margin:0;
       padding:12px;
@@ -697,6 +752,9 @@ const indexHTML = `<!doctype html>
       .detail { overflow:visible; }
       .summary { grid-template-columns:1fr 1fr; }
       .detail-head { grid-template-columns:1fr; }
+      .item-meta { width:100%; justify-content:flex-start; }
+      .batch-row { grid-template-columns:1fr auto; }
+      .batch-tag { grid-column:1 / -1; }
     }
   </style>
 </head>
@@ -704,12 +762,12 @@ const indexHTML = `<!doctype html>
   <header>
     <div class="brand">
       <div class="mark"></div>
-      <h1>Request Log Viewer</h1>
+      <h1>Turn Log Viewer</h1>
     </div>
     <div id="status" class="status">Loading...</div>
     <div class="actions">
       <button id="refresh">Refresh</button>
-      <button id="export">JSONL</button>
+      <button id="export">Exports</button>
     </div>
   </header>
   <main>
@@ -723,6 +781,25 @@ const indexHTML = `<!doctype html>
           <button class="select-button" id="userFilter" type="button"><strong>All users</strong><span>User</span></button>
           <div class="select-menu" id="userMenu"></div>
         </div>
+        <input id="sessionFilter" type="search" placeholder="Session ID">
+        <input id="turnFilter" type="search" placeholder="Turn ID">
+        <select id="attributionFilter" aria-label="Attribution">
+          <option value="">All confidence</option>
+          <option value="exact">Exact</option>
+          <option value="inferred">Inferred</option>
+          <option value="unknown">Unknown</option>
+        </select>
+        <select id="turnStatusFilter" aria-label="Turn status">
+          <option value="">All states</option>
+          <option value="completed">Completed</option>
+          <option value="open">Open</option>
+          <option value="unknown">Unknown</option>
+        </select>
+        <select id="exportedFilter" aria-label="Export status">
+          <option value="">All export states</option>
+          <option value="false">Not exported</option>
+          <option value="true">Exported</option>
+        </select>
         <div class="time-range">
           <label class="time-field" for="startTime"><span>Start</span><input id="startTime" type="datetime-local"></label>
           <label class="time-field" for="endTime"><span>End</span><input id="endTime" type="datetime-local"></label>
@@ -731,7 +808,7 @@ const indexHTML = `<!doctype html>
       </div>
       <div class="list-scroll">
         <table>
-          <thead><tr><th>Time</th><th>Model</th><th>User</th><th>Status</th></tr></thead>
+          <thead><tr><th>Ended</th><th>Session / turn</th><th>Model</th><th>User</th><th>State</th></tr></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>
@@ -743,8 +820,19 @@ const indexHTML = `<!doctype html>
         </div>
       </div>
     </aside>
-    <section id="detail" class="detail"><div class="empty">Select a request log.</div></section>
+    <section id="detail" class="detail"><div class="empty">Select a turn.</div></section>
   </main>
+  <dialog id="exportDialog">
+    <div class="export-head"><h2>Export batches</h2><button id="closeExport" class="icon-button" type="button" title="Close" aria-label="Close">&times;</button></div>
+    <div class="export-body">
+      <div class="export-controls">
+        <label class="toggle"><input id="includeInferred" type="checkbox">Include inferred completed turns</label>
+        <button id="createExport" type="button">Create batch</button>
+      </div>
+      <div id="exportPreview" class="export-preview">Loading preview...</div>
+      <div id="batchList" class="batch-list"></div>
+    </div>
+  </dialog>
   <script>
     const rowsEl = document.getElementById('rows')
     const detailEl = document.getElementById('detail')
@@ -755,6 +843,15 @@ const indexHTML = `<!doctype html>
     const startTimeEl = document.getElementById('startTime')
     const endTimeEl = document.getElementById('endTime')
     const clearTimeEl = document.getElementById('clearTime')
+    const sessionFilterEl = document.getElementById('sessionFilter')
+    const turnFilterEl = document.getElementById('turnFilter')
+    const attributionFilterEl = document.getElementById('attributionFilter')
+    const turnStatusFilterEl = document.getElementById('turnStatusFilter')
+    const exportedFilterEl = document.getElementById('exportedFilter')
+    const exportDialogEl = document.getElementById('exportDialog')
+    const includeInferredEl = document.getElementById('includeInferred')
+    const exportPreviewEl = document.getElementById('exportPreview')
+    const batchListEl = document.getElementById('batchList')
     const selectFields = Array.from(document.querySelectorAll('.filter-field'))
     const state = {
       page: 1,
@@ -774,42 +871,72 @@ const indexHTML = `<!doctype html>
 
     const esc = value => String(value ?? '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]))
     const pretty = value => { try { return JSON.stringify(JSON.parse(value), null, 2) } catch { return value || '' } }
+    const parsedContent = value => { try { return JSON.parse(value) } catch { return null } }
+    const roleClass = role => {
+      const normalized = String(role || '').toLowerCase()
+      if (['user', 'system', 'assistant', 'developer', 'tool'].includes(normalized)) return 'role-' + normalized
+      return 'role-other'
+    }
+    const callIdFor = item => {
+      if (!['tool_call', 'tool_result'].includes(item.item_type)) return ''
+      const content = parsedContent(item.content)
+      const contentCallId = content && typeof content === 'object' && !Array.isArray(content)
+        ? content.call_id || content.tool_call_id || ''
+        : ''
+      return item.tool_call_id || contentCallId
+    }
+    const displayContentFor = item => {
+      const content = parsedContent(item.content)
+      const callId = callIdFor(item)
+      if (!['tool_call', 'tool_result'].includes(item.item_type) || !content || typeof content !== 'object' || Array.isArray(content) || !callId) {
+        return pretty(item.content)
+      }
+      const displayContent = { ...content }
+      if (displayContent.call_id === callId) delete displayContent.call_id
+      if (displayContent.tool_call_id === callId) delete displayContent.tool_call_id
+      return JSON.stringify(displayContent, null, 2)
+    }
     const detailLoadingHTML = () => [
       '<div class="loading-card" aria-live="polite">',
-      '<div class="loading-copy"><span class="loader"></span><span>Loading request</span></div>',
+      '<div class="loading-copy"><span class="loader"></span><span>Loading turn</span></div>',
       '<div class="loading-lines"><i></i><i></i><i></i></div>',
       '</div>'
     ].join('')
-    const detailErrorHTML = message => '<div class="empty">Failed to load request: ' + esc(message || 'unknown error') + '</div>'
-    const effectiveItemsStatus = log => {
-      if (log.items_status === 'pending' && (log.items || []).length) return 'ok'
-      return log.items_status || ''
-    }
-    const emptyItemsHTML = log => {
-      const status = effectiveItemsStatus(log)
-      if (status === 'pending') return '<div class="empty">Items are still being written.</div>'
-      if (status === 'failed') return '<div class="empty">Items write failed: ' + esc(log.items_error || 'unknown error') + '</div>'
-      return '<div class="empty">No parsed items.</div>'
-    }
+    const detailErrorHTML = message => '<div class="empty">Failed to load turn: ' + esc(message || 'unknown error') + '</div>'
+    const emptyItemsHTML = () => '<div class="empty">No current-turn items.</div>'
     const timestampFromLocalInput = value => {
       if (!value) return 0
       const date = new Date(value)
       if (Number.isNaN(date.getTime())) return 0
       return Math.floor(date.getTime() / 1000)
     }
-    const qs = () => {
-      const p = new URLSearchParams({ p:String(state.page), page_size:String(state.pageSize) })
+    const qs = (includePage = true) => {
+      const p = new URLSearchParams()
+      if (includePage) {
+        p.set('p', String(state.page))
+        p.set('page_size', String(state.pageSize))
+      }
       state.selected.model_name.forEach(value => p.append('model_name', value))
       state.selected.username.forEach(value => p.append('username', value))
+      const sessionId = sessionFilterEl.value.trim()
+      const turnId = turnFilterEl.value.trim()
+      const attribution = attributionFilterEl.value
+      const turnStatus = turnStatusFilterEl.value
+      const exported = exportedFilterEl.value
+      if (sessionId) p.set('session_id', sessionId)
+      if (turnId) p.set('turn_id', turnId)
+      if (attribution) p.set('attribution', attribution)
+      if (turnStatus) p.set('status', turnStatus)
+      if (exported) p.set('exported', exported)
       const startTimestamp = timestampFromLocalInput(state.time.start)
       const endTimestamp = timestampFromLocalInput(state.time.end)
       if (startTimestamp > 0) p.set('start_timestamp', String(startTimestamp))
       if (endTimestamp > 0) p.set('end_timestamp', String(endTimestamp))
       return p
     }
-    async function api(path) {
-      const res = await fetch(path)
-      const json = await res.json()
+    async function api(path, options = {}) {
+      const res = await fetch(path, options)
+      const json = await res.json().catch(() => ({ success:false, message:res.statusText }))
       if (!json.success) throw new Error(json.message || 'request failed')
       return json.data
     }
@@ -908,7 +1035,9 @@ const indexHTML = `<!doctype html>
     }
     async function loadStatus() {
       const data = await api('/api/status')
-      statusEl.textContent = data.has_table ? String(data.count) + ' rows - ' + (data.request_log_db_dialect || 'db') : 'table missing'
+      const count = data.turn_count ?? data.count ?? 0
+      const dropped = data.queue_dropped_jobs ? ' · ' + String(data.queue_dropped_jobs) + ' queue drops' : ''
+      statusEl.textContent = data.has_turn_table === false ? 'turn table missing' : String(count) + ' turns - ' + (data.request_log_db_dialect || 'db') + dropped
     }
     function updatePager() {
       const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize))
@@ -920,21 +1049,22 @@ const indexHTML = `<!doctype html>
       nextPageEl.disabled = state.page >= totalPages
     }
     async function loadRows() {
-      const data = await api('/api/logs?' + qs())
+      const data = await api('/api/turns?' + qs())
       state.total = data.total || 0
       state.page = data.page || state.page
       state.pageSize = data.page_size || state.pageSize
       updatePager()
       if (!data.items || data.items.length === 0) {
-        rowsEl.innerHTML = '<tr><td colspan="4"><div class="empty">No rows.</div></td></tr>'
+        rowsEl.innerHTML = '<tr><td colspan="5"><div class="empty">No turns.</div></td></tr>'
         return
       }
       rowsEl.innerHTML = data.items.map(row => [
         '<tr data-id="' + esc(row.id) + '" class="' + (row.id === selectedId ? 'selected' : '') + '">',
-        '<td><div class="time">' + new Date((row.created_at || 0) * 1000).toLocaleString() + '</div></td>',
+        '<td><div class="time">' + (row.completed_at ? new Date(row.completed_at * 1000).toLocaleString() : 'Open') + '</div></td>',
+        '<td><div class="model">' + esc(row.session_id || 'unknown') + '</div><div class="subline">#' + esc(row.turn_index || '-') + ' · ' + esc(row.turn_id || '-') + '</div></td>',
         '<td><div class="model">' + esc(row.model_name || '-') + '</div><div class="subline">' + esc(row.token_name || '') + '</div></td>',
-        '<td><div>' + esc(row.username || '-') + '</div><div class="subline">' + esc(row.group || '') + '</div></td>',
-        '<td><span class="pill ' + esc(row.parse_status || 'ok') + '">' + esc(row.parse_status || 'ok') + '</span></td>',
+        '<td><div>' + esc(row.username || '-') + '</div><div class="subline">' + esc(row.request_count || 0) + ' requests</div></td>',
+        '<td><span class="pill ' + esc(row.completion_status || 'unknown') + '">' + esc(row.completion_status || 'unknown') + '</span><div class="subline">' + esc(row.attribution || 'unknown') + (row.exported ? ' · exported' : '') + '</div></td>',
         '</tr>'
       ].join('')).join('')
       rowsEl.querySelectorAll('tr').forEach(row => row.onclick = () => loadDetail(Number(row.dataset.id)))
@@ -945,29 +1075,39 @@ const indexHTML = `<!doctype html>
       detailEl.innerHTML = detailLoadingHTML()
       try {
         await loadRows()
-        const log = await api('/api/logs/' + id)
+        const log = await api('/api/turns/' + id)
         if (requestToken !== detailRequestToken) return
-        const itemHtml = (log.items || []).map(item => [
-          '<article class="item" data-phase="' + esc(item.phase || '') + '">',
-          '<div class="item-head">',
-          '<div class="item-title">' + esc(item.item_type || 'item') + '</div>',
-          '<span class="pill">' + esc(item.seq) + '</span>',
-          '<span class="pill">' + esc(item.phase) + '</span>',
-          item.role ? '<span class="pill">' + esc(item.role) + '</span>' : '',
-          item.name ? '<span class="muted">' + esc(item.name) + '</span>' : '',
-          item.source ? '<span class="muted">' + esc(item.source) + '</span>' : '',
-          '</div>',
-          '<pre>' + esc(pretty(item.content)) + '</pre>',
-          '</article>'
-        ].join('')).join('') || emptyItemsHTML(log)
+        const itemHtml = (log.items || []).map(item => {
+          const callId = callIdFor(item)
+          return [
+            '<article class="item" data-phase="' + esc(item.phase || '') + '">',
+            '<div class="item-head">',
+            '<div class="item-primary">',
+            item.role ? '<span class="role-badge ' + roleClass(item.role) + '">' + esc(item.role) + '</span>' : '',
+            '<div class="item-title">' + esc(item.item_type || 'item') + '</div>',
+            callId ? '<span class="call-id" title="' + esc(callId) + '"><span class="call-id-label">call_id</span><code>' + esc(callId) + '</code></span>' : '',
+            '</div>',
+            '<div class="item-meta">',
+            '<span class="pill">' + esc(item.seq) + '</span>',
+            '<span class="pill">' + esc(item.phase) + '</span>',
+            item.message_phase ? '<span class="pill ' + esc(item.message_phase) + '">' + esc(item.message_phase) + '</span>' : '',
+            item.item_status ? '<span class="pill ' + esc(item.item_status) + '">' + esc(item.item_status) + '</span>' : '',
+            item.name ? '<span class="item-context">' + esc(item.name) + '</span>' : '',
+            item.source ? '<span class="item-context">' + esc(item.source) + '</span>' : '',
+            '</div>',
+            '</div>',
+            '<pre>' + esc(displayContentFor(item)) + '</pre>',
+            '</article>'
+          ].join('')
+        }).join('') || emptyItemsHTML()
         detailEl.innerHTML = [
           '<div class="detail-head">',
-          '<div class="detail-title"><h2>' + esc(log.model_name || '-') + '</h2><div class="request-id">' + esc(log.request_id || '-') + '</div></div>',
-          '<span class="pill ' + esc(log.parse_status || 'ok') + '">' + esc(log.parse_status || 'ok') + '</span>',
+          '<div class="detail-title"><h2>' + esc(log.model_name || '-') + '</h2><div class="request-id">' + esc(log.session_id || 'unknown') + ' / ' + esc(log.turn_id || '-') + '</div></div>',
+          '<span class="pill ' + esc(log.completion_status || 'unknown') + '">' + esc(log.completion_status || 'unknown') + ' · ' + esc(log.attribution || 'unknown') + '</span>',
           '</div>',
           '<div class="summary">',
           '<div class="metric"><span>Items</span><strong>' + esc((log.items || []).length) + '</strong></div>',
-          '<div class="metric"><span>Item status</span><strong>' + esc(effectiveItemsStatus(log) || '-') + '</strong></div>',
+          '<div class="metric"><span>Requests</span><strong>' + esc(log.request_count || 0) + '</strong></div>',
           '<div class="metric"><span>Tokens</span><strong>' + esc(log.token_used || 0) + '</strong></div>',
           '<div class="metric"><span>Cost</span><strong>' + esc(log.quota || 0) + '</strong></div>',
           '</div>',
@@ -978,9 +1118,73 @@ const indexHTML = `<!doctype html>
         detailEl.innerHTML = detailErrorHTML(err.message)
       }
     }
+    async function loadExportPreview() {
+      const p = qs(false)
+      p.set('include_inferred', String(includeInferredEl.checked))
+      const data = await api('/api/export-preview?' + p)
+      exportPreviewEl.textContent = String(data.available_count || 0) + ' unexported turns match the current filters.'
+    }
+    function batchActions(batch) {
+      if (batch.status === 'completed') {
+        return '<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>'
+      }
+      if (batch.status === 'failed') {
+        return '<button type="button" data-retry="' + esc(batch.tag) + '">Retry</button>'
+      }
+      return ''
+    }
+    async function loadBatches() {
+      const data = await api('/api/export-batches?p=1&page_size=50')
+      const batches = data.items || []
+      batchListEl.innerHTML = batches.map(batch => [
+        '<div class="batch-row">',
+        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns' + (batch.error ? ' · ' + esc(batch.error) : '') + '</div></div>',
+        '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batch.status || 'pending') + '</span>',
+        '<div>' + batchActions(batch) + '</div>',
+        '</div>'
+      ].join('')).join('') || '<div class="empty">No export batches.</div>'
+      batchListEl.querySelectorAll('[data-retry]').forEach(button => {
+        button.onclick = async () => {
+          button.disabled = true
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.retry) + '/retry', { method:'POST' })
+            await loadBatches()
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      if (batches.some(batch => ['pending', 'building'].includes(batch.status))) {
+        setTimeout(() => { if (exportDialogEl.open) loadBatches().catch(() => {}) }, 1500)
+      }
+    }
+    async function openExports() {
+      exportDialogEl.showModal()
+      exportPreviewEl.textContent = 'Loading preview...'
+      await Promise.all([loadExportPreview(), loadBatches()])
+    }
     document.addEventListener('click', () => closeMenus())
     document.getElementById('refresh').onclick = () => { loadStatus(); loadFilterOptions(); loadRows() }
-    document.getElementById('export').onclick = () => { location.href = '/api/export.jsonl?' + qs() }
+    document.getElementById('export').onclick = () => openExports().catch(err => exportPreviewEl.textContent = err.message)
+    document.getElementById('closeExport').onclick = () => exportDialogEl.close()
+    includeInferredEl.onchange = () => loadExportPreview().catch(err => exportPreviewEl.textContent = err.message)
+    document.getElementById('createExport').onclick = async event => {
+      const button = event.currentTarget
+      button.disabled = true
+      const p = qs(false)
+      p.set('include_inferred', String(includeInferredEl.checked))
+      try {
+        const batch = await api('/api/export-batches?' + p, { method:'POST' })
+        exportPreviewEl.textContent = 'Created ' + batch.tag + ' with ' + String(batch.row_count || 0) + ' turns.'
+        await Promise.all([loadBatches(), loadRows()])
+      } catch (err) {
+        exportPreviewEl.textContent = err.message
+      } finally {
+        button.disabled = false
+      }
+    }
     prevPageEl.onclick = () => {
       if (state.page <= 1) return
       state.page--
@@ -1005,9 +1209,31 @@ const indexHTML = `<!doctype html>
       endTimeEl.value = ''
       applyTimeFilter()
     }
+    let textFilterTimer = 0
+    function applyTextFilters() {
+      clearTimeout(textFilterTimer)
+      textFilterTimer = setTimeout(() => {
+        state.page = 1
+        loadRows()
+      }, 250)
+    }
+    sessionFilterEl.oninput = applyTextFilters
+    turnFilterEl.oninput = applyTextFilters
+    attributionFilterEl.onchange = () => {
+      state.page = 1
+      loadRows()
+    }
+    turnStatusFilterEl.onchange = () => {
+      state.page = 1
+      loadRows()
+    }
+    exportedFilterEl.onchange = () => {
+      state.page = 1
+      loadRows()
+    }
     loadStatus().catch(err => statusEl.textContent = err.message)
     loadFilterOptions().catch(err => statusEl.textContent = err.message)
-    loadRows().catch(err => rowsEl.innerHTML = '<tr><td colspan="4">' + esc(err.message) + '</td></tr>')
+    loadRows().catch(err => rowsEl.innerHTML = '<tr><td colspan="5">' + esc(err.message) + '</td></tr>')
   </script>
 </body>
 </html>`
