@@ -458,6 +458,13 @@ func RenewAPIRequestLogExportBatchLease(db *gorm.DB, tag, owner string, leaseDur
 		return nil, result.Error
 	}
 	if result.RowsAffected == 0 {
+		batch, lookupErr := GetAPIRequestLogExportBatchByTag(db, tag)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if batch.Status == APIRequestLogExportBatchStatusBuilding && batch.BuildOwner == owner && batch.LeaseExpiresAt > now {
+			return batch, nil
+		}
 		return nil, apiRequestLogExportTransitionError(db, tag, ErrAPIRequestLogExportBatchLeaseLost)
 	}
 	return GetAPIRequestLogExportBatchByTag(db, tag)

@@ -195,6 +195,9 @@ func TestAPIRequestLogExportBatchLeaseTakeoverAndRetryPreserveMembers(t *testing
 	require.Equal(t, APIRequestLogExportBatchStatusBuilding, claimedA.Status)
 	require.Equal(t, "worker-a", claimedA.BuildOwner)
 	require.Equal(t, 1, claimedA.BuildAttempt)
+	renewedA, err := RenewAPIRequestLogExportBatchLease(db, batch.Tag, "worker-a", time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, "worker-a", renewedA.BuildOwner)
 
 	_, err = ClaimAPIRequestLogExportBatch(db, batch.Tag, "worker-b", time.Minute)
 	require.ErrorIs(t, err, ErrAPIRequestLogExportBatchNotClaimable)
