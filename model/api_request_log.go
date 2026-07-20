@@ -434,7 +434,7 @@ func createAPIRequestLogItemsIfMissing(db *gorm.DB, logId int, items []APIReques
 			return nil
 		}
 		lastErr = err
-		if !isRetryableAPIRequestLogItemError(err) || attempt == apiRequestLogItemMaxRetry-1 {
+		if !isRetryableAPIRequestLogDBError(err) || attempt == apiRequestLogItemMaxRetry-1 {
 			return err
 		}
 		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
@@ -453,7 +453,7 @@ func createAPIRequestLogItems(db *gorm.DB, items []APIRequestLogItem) error {
 			return nil
 		}
 		lastErr = err
-		if !isRetryableAPIRequestLogItemError(err) || attempt == apiRequestLogItemMaxRetry-1 {
+		if !isRetryableAPIRequestLogDBError(err) || attempt == apiRequestLogItemMaxRetry-1 {
 			return err
 		}
 		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
@@ -615,7 +615,7 @@ func updateAPIRequestLogItemsStatus(db *gorm.DB, logId int, status string, messa
 	}).Error
 }
 
-func isRetryableAPIRequestLogItemError(err error) bool {
+func isRetryableAPIRequestLogDBError(err error) bool {
 	if err == nil {
 		return false
 	}
