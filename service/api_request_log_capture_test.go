@@ -2,10 +2,12 @@ package service
 
 import (
 	"bytes"
+	"compress/gzip"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -60,7 +62,8 @@ func TestAPIRequestLogCaptureSkipsExcludedUsername(t *testing.T) {
 	})
 
 	gin.SetMode(gin.TestMode)
-	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"messages":[]}`))
 	ctx.Set("username", "RYAN")
 
@@ -108,6 +111,11 @@ func TestAPIRequestLogBodyCaptureUsesConfiguredLimit(t *testing.T) {
 	if _, err := ctx.Writer.Write([]byte("1234567890abcdef")); err != nil {
 		t.Fatal(err)
 	}
+	rawWriter, _ := ctx.Get(apiRequestLogWriterKey)
+	captured, _, wireTruncated := rawWriter.(*apiRequestLogWriter).snapshot()
+	if len(captured) != 16 || wireTruncated {
+		t.Fatalf("expected bounded wire overhead to retain the identity response before build, got %d truncated=%t", len(captured), wireTruncated)
+	}
 	responseLog := buildResponseLogBody(ctx)
 	if responseLog.omittedReason != "truncated" {
 		t.Fatalf("expected truncated response body, got %+v", responseLog)
@@ -115,9 +123,316 @@ func TestAPIRequestLogBodyCaptureUsesConfiguredLimit(t *testing.T) {
 	if responseLog.size != 16 {
 		t.Fatalf("expected full response size to be tracked, got %d", responseLog.size)
 	}
-	if len(responseLog.body) > common.APIRequestLogMaxBodyBytes {
-		t.Fatalf("expected captured response body to be limited, got %d", len(responseLog.body))
+	if len(responseLog.body) != common.APIRequestLogMaxBodyBytes {
+		t.Fatalf("expected identity response body to be strictly limited, got %d", len(responseLog.body))
 	}
+}
+
+func TestAPIRequestLogCaptureDecodesGzipJSONForItems(t *testing.T) {
+	oldEnabled := common.APIRequestLogEnabled
+	oldCaptureResponse := common.APIRequestLogCaptureResponse
+	oldRedactSecrets := common.APIRequestLogRedactSecrets
+	oldMaxBodyBytes := common.APIRequestLogMaxBodyBytes
+	common.APIRequestLogEnabled = true
+	common.APIRequestLogCaptureResponse = true
+	common.APIRequestLogRedactSecrets = false
+	common.APIRequestLogMaxBodyBytes = 4096
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.APIRequestLogCaptureResponse = oldCaptureResponse
+		common.APIRequestLogRedactSecrets = oldRedactSecrets
+		common.APIRequestLogMaxBodyBytes = oldMaxBodyBytes
+	})
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"messages":[{"role":"user","content":"question"}]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Writer.Header().Set("Content-Type", "application/json")
+	ctx.Writer.Header().Set("Content-Encoding", " GZip ")
+	StartAPIRequestLogCapture(ctx)
+
+	responseJSON := `{"content":[{"type":"text","text":"compressed answer"}],"stop_reason":"end_turn"}`
+	wireBody := gzipAPIRequestLogTestBody(t, responseJSON)
+	if _, err := ctx.Writer.Write(wireBody); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(recorder.Body.Bytes(), wireBody) {
+		t.Fatal("response logging must not alter the compressed client response")
+	}
+
+	responseLog := buildResponseLogBody(ctx)
+	if responseLog.body != responseJSON {
+		t.Fatalf("expected decoded response JSON, got %q", responseLog.body)
+	}
+	if responseLog.size != int64(len(wireBody)) {
+		t.Fatalf("expected wire response size %d, got %d", len(wireBody), responseLog.size)
+	}
+	if responseLog.omittedReason != "" {
+		t.Fatalf("unexpected omitted reason: %q", responseLog.omittedReason)
+	}
+
+	result := buildAPIRequestLogItems(ctx, nil, buildRequestLogBody(ctx), responseLog)
+	if result.parseStatus != model.APIRequestLogParseOK || result.parseError != "" {
+		t.Fatalf("unexpected parse result: %s %s", result.parseStatus, result.parseError)
+	}
+	if !strings.Contains(requestLogItemText(result.items), "compressed answer") {
+		t.Fatalf("expected normalized response item, got %+v", result.items)
+	}
+}
+
+func TestAPIRequestLogCaptureAllowsGzipWireOverBodyLimit(t *testing.T) {
+	responseJSON := `{"content":[{"type":"text","text":"a"}]}`
+	ctx, _ := newAPIRequestLogResponseCaptureTest(t, len(responseJSON), "gzip")
+	wireBody := gzipAPIRequestLogTestBody(t, responseJSON)
+	if len(wireBody) <= len(responseJSON) {
+		t.Fatalf("test fixture requires gzip wire bytes larger than decoded JSON: wire=%d decoded=%d", len(wireBody), len(responseJSON))
+	}
+	if _, err := ctx.Writer.Write(wireBody); err != nil {
+		t.Fatal(err)
+	}
+
+	responseLog := buildResponseLogBody(ctx)
+	if responseLog.body != responseJSON || responseLog.omittedReason != "" {
+		t.Fatalf("expected complete decoded response inside body limit, got %+v", responseLog)
+	}
+	if responseLog.size != int64(len(wireBody)) {
+		t.Fatalf("expected wire response size %d, got %d", len(wireBody), responseLog.size)
+	}
+	result := buildAPIRequestLogItems(ctx, nil, buildRequestLogBody(ctx), responseLog)
+	if result.parseStatus != model.APIRequestLogParseOK || !strings.Contains(requestLogItemText(result.items), "a") {
+		t.Fatalf("expected normalized gzip response items, got status=%s items=%+v", result.parseStatus, result.items)
+	}
+}
+
+func TestAPIRequestLogCaptureBoundsGzipDecompression(t *testing.T) {
+	oldEnabled := common.APIRequestLogEnabled
+	oldCaptureResponse := common.APIRequestLogCaptureResponse
+	oldRedactSecrets := common.APIRequestLogRedactSecrets
+	oldMaxBodyBytes := common.APIRequestLogMaxBodyBytes
+	common.APIRequestLogEnabled = true
+	common.APIRequestLogCaptureResponse = true
+	common.APIRequestLogRedactSecrets = false
+	common.APIRequestLogMaxBodyBytes = 127
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.APIRequestLogCaptureResponse = oldCaptureResponse
+		common.APIRequestLogRedactSecrets = oldRedactSecrets
+		common.APIRequestLogMaxBodyBytes = oldMaxBodyBytes
+	})
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"messages":[]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Writer.Header().Set("Content-Type", "application/json")
+	ctx.Writer.Header().Set("Content-Encoding", "gzip")
+	StartAPIRequestLogCapture(ctx)
+
+	wireBody := gzipAPIRequestLogTestBody(t, `{"content":[{"type":"text","text":"`+strings.Repeat("\u4f60", 4096)+`"}]}`)
+	if len(wireBody) >= 127 {
+		t.Fatalf("test fixture must exercise decompressed rather than wire limit: %d", len(wireBody))
+	}
+	if _, err := ctx.Writer.Write(wireBody); err != nil {
+		t.Fatal(err)
+	}
+
+	responseLog := buildResponseLogBody(ctx)
+	if responseLog.size != int64(len(wireBody)) {
+		t.Fatalf("expected wire response size %d, got %d", len(wireBody), responseLog.size)
+	}
+	if responseLog.omittedReason != "gzip_decompressed_too_large" {
+		t.Fatalf("expected oversized decompressed body to be omitted, got %+v", responseLog)
+	}
+	if responseLog.body != "" {
+		t.Fatalf("oversized decompressed body must not retain an unchecked prefix: %q", responseLog.body)
+	}
+}
+
+func TestAPIRequestLogCaptureOmitsInvalidGzip(t *testing.T) {
+	oldEnabled := common.APIRequestLogEnabled
+	oldCaptureResponse := common.APIRequestLogCaptureResponse
+	oldRedactSecrets := common.APIRequestLogRedactSecrets
+	oldMaxBodyBytes := common.APIRequestLogMaxBodyBytes
+	common.APIRequestLogEnabled = true
+	common.APIRequestLogCaptureResponse = true
+	common.APIRequestLogRedactSecrets = false
+	common.APIRequestLogMaxBodyBytes = 4096
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.APIRequestLogCaptureResponse = oldCaptureResponse
+		common.APIRequestLogRedactSecrets = oldRedactSecrets
+		common.APIRequestLogMaxBodyBytes = oldMaxBodyBytes
+	})
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"messages":[{"role":"user","content":"question"}]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Writer.Header().Set("Content-Type", "application/json")
+	ctx.Writer.Header().Set("Content-Encoding", "gzip")
+	StartAPIRequestLogCapture(ctx)
+
+	invalidWireBody := []byte{0xff, 0xfe, 0xfd, 0x00, 'd', 'a', 't', 'a', ':'}
+	if _, err := ctx.Writer.Write(invalidWireBody); err != nil {
+		t.Fatal(err)
+	}
+
+	responseLog := buildResponseLogBody(ctx)
+	if responseLog.body != "" {
+		t.Fatalf("invalid gzip must not be retained as response text: %q", responseLog.body)
+	}
+	if responseLog.omittedReason != "gzip_decode_failed" {
+		t.Fatalf("expected gzip decode failure, got %+v", responseLog)
+	}
+	if responseLog.size != int64(len(invalidWireBody)) {
+		t.Fatalf("expected wire response size %d, got %d", len(invalidWireBody), responseLog.size)
+	}
+
+	result := buildAPIRequestLogItems(ctx, nil, buildRequestLogBody(ctx), responseLog)
+	for _, item := range result.items {
+		if item.Source == "response_body" {
+			t.Fatalf("invalid gzip must not create a raw response item: %+v", item)
+		}
+		if !utf8.ValidString(string(item.Content)) {
+			t.Fatalf("invalid gzip produced DB-invalid item text: %q", item.Content)
+		}
+	}
+}
+
+func TestAPIRequestLogCaptureOmitsInvalidUTF8InsideValidGzip(t *testing.T) {
+	ctx, _ := newAPIRequestLogResponseCaptureTest(t, 4096, "gzip")
+	decodedBody := append([]byte(`{"content":"`), 0xff, 0xfe)
+	decodedBody = append(decodedBody, []byte(`"}`)...)
+	wireBody := gzipAPIRequestLogTestBytes(t, decodedBody)
+	if _, err := ctx.Writer.Write(wireBody); err != nil {
+		t.Fatal(err)
+	}
+
+	responseLog := buildResponseLogBody(ctx)
+	if responseLog.body != "" || responseLog.omittedReason != "gzip_invalid_utf8" {
+		t.Fatalf("valid gzip containing invalid UTF-8 must be omitted, got %+v", responseLog)
+	}
+	result := buildAPIRequestLogItems(ctx, nil, buildRequestLogBody(ctx), responseLog)
+	for _, item := range result.items {
+		if item.Source == "response_body" || !utf8.ValidString(string(item.Content)) {
+			t.Fatalf("invalid UTF-8 gzip produced a raw or DB-invalid item: %+v", item)
+		}
+	}
+}
+
+func TestAPIRequestLogContentEncodingRejectsMultipleLayers(t *testing.T) {
+	if encoding, supported := apiRequestLogContentEncoding([]string{"gzip, br"}); supported || encoding != "" {
+		t.Fatalf("multiple content encodings must not be treated as supported: %q %t", encoding, supported)
+	}
+	if encoding, supported := apiRequestLogContentEncoding([]string{"gzip", "identity"}); supported || encoding != "" {
+		t.Fatalf("multiple content-encoding headers must not be treated as supported: %q %t", encoding, supported)
+	}
+}
+
+func TestAPIRequestLogCaptureOmitsMultipleContentEncodings(t *testing.T) {
+	ctx, _ := newAPIRequestLogResponseCaptureTest(t, 4096, "gzip, br")
+	wireBody := gzipAPIRequestLogTestBody(t, `{"content":[{"type":"text","text":"must not parse"}]}`)
+	if _, err := ctx.Writer.Write(wireBody); err != nil {
+		t.Fatal(err)
+	}
+
+	responseLog := buildResponseLogBody(ctx)
+	if responseLog.body != "" || responseLog.omittedReason != "unsupported_content_encoding" {
+		t.Fatalf("multiple content encodings must be omitted, got %+v", responseLog)
+	}
+	result := buildAPIRequestLogItems(ctx, nil, buildRequestLogBody(ctx), responseLog)
+	for _, item := range result.items {
+		if item.Source == "response_body" || strings.Contains(string(item.Content), "must not parse") {
+			t.Fatalf("multiple content encodings produced a response item: %+v", item)
+		}
+	}
+}
+
+func TestAPIRequestLogCaptureOmitsGzipBeyondWireCap(t *testing.T) {
+	const bodyLimit = 8
+	ctx, _ := newAPIRequestLogResponseCaptureTest(t, bodyLimit, "gzip")
+	wireBody := make([]byte, apiRequestLogResponseWireLimit(bodyLimit)+1)
+	copy(wireBody, []byte{0x1f, 0x8b, 0x08})
+	if _, err := ctx.Writer.Write(wireBody); err != nil {
+		t.Fatal(err)
+	}
+
+	responseLog := buildResponseLogBody(ctx)
+	if responseLog.body != "" || responseLog.omittedReason != "gzip_wire_too_large" {
+		t.Fatalf("gzip beyond the wire cap must be explicitly omitted, got %+v", responseLog)
+	}
+	if responseLog.size != int64(len(wireBody)) {
+		t.Fatalf("expected complete wire size %d, got %d", len(wireBody), responseLog.size)
+	}
+}
+
+func TestAPIRequestLogResponseWireLimitBoundaries(t *testing.T) {
+	if limit := apiRequestLogResponseWireLimit(0); limit != 0 {
+		t.Fatalf("zero body limit must not allocate wire overhead, got %d", limit)
+	}
+	maxInt := int(^uint(0) >> 1)
+	if limit := apiRequestLogResponseWireLimit(maxInt); limit != maxInt {
+		t.Fatalf("wire limit overflowed: got %d want %d", limit, maxInt)
+	}
+}
+
+func TestAPIRequestLogGzipChecksumFailureIsOmitted(t *testing.T) {
+	body := gzipAPIRequestLogTestBody(t, `{"content":[{"type":"text","text":"answer"}]}`)
+	body[len(body)-1] ^= 0xff
+	decoded, omittedReason := decodeAPIRequestLogGzipBody(body, 4096)
+	if len(decoded) != 0 {
+		t.Fatalf("corrupt gzip must not retain decoded text: %q", decoded)
+	}
+	if omittedReason != "gzip_read_failed" {
+		t.Fatalf("expected gzip read failure for corrupt checksum, got %q", omittedReason)
+	}
+}
+
+func gzipAPIRequestLogTestBody(t *testing.T, body string) []byte {
+	return gzipAPIRequestLogTestBytes(t, []byte(body))
+}
+
+func gzipAPIRequestLogTestBytes(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
+}
+
+func newAPIRequestLogResponseCaptureTest(t *testing.T, maxBodyBytes int, contentEncoding string) (*gin.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	oldEnabled := common.APIRequestLogEnabled
+	oldCaptureResponse := common.APIRequestLogCaptureResponse
+	oldRedactSecrets := common.APIRequestLogRedactSecrets
+	oldMaxBodyBytes := common.APIRequestLogMaxBodyBytes
+	common.APIRequestLogEnabled = true
+	common.APIRequestLogCaptureResponse = true
+	common.APIRequestLogRedactSecrets = false
+	common.APIRequestLogMaxBodyBytes = maxBodyBytes
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.APIRequestLogCaptureResponse = oldCaptureResponse
+		common.APIRequestLogRedactSecrets = oldRedactSecrets
+		common.APIRequestLogMaxBodyBytes = oldMaxBodyBytes
+	})
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"messages":[]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Writer.Header().Set("Content-Type", "application/json")
+	ctx.Writer.Header().Set("Content-Encoding", contentEncoding)
+	StartAPIRequestLogCapture(ctx)
+	return ctx, recorder
 }
 
 func TestAPIRequestLogTurnMetaParsesCodexAllowlistWithThreadFallback(t *testing.T) {
