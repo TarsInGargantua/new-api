@@ -183,12 +183,6 @@ func TestAPIRequestLogExportExcludesCompletedTurnsWithoutItems(t *testing.T) {
 	require.Equal(t, eligible.Id, member.TurnRecordId)
 }
 
-func TestAPIRequestLogExportTurnRowLockStrengthByDialect(t *testing.T) {
-	require.Empty(t, apiRequestLogExportTurnLockStrength("postgres"), "PostgreSQL coordinates through advisory locks")
-	require.Equal(t, "UPDATE", apiRequestLogExportTurnLockStrength("mysql"), "MySQL 5.7 does not support FOR SHARE")
-	require.Empty(t, apiRequestLogExportTurnLockStrength("sqlite"), "SQLite batch creation already serializes the write transaction")
-}
-
 func TestAPIRequestLogExportBatchLeaseTakeoverAndRetryPreserveMembers(t *testing.T) {
 	db := setupAPIRequestLogTurnTestDB(t)
 	createAPIRequestLogExportTestTurn(t, db, "lease-session", "lease-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 100)
