@@ -69,6 +69,12 @@ func TestMaterializeAPIRequestLogTurnsMergesRequestsAndKeepsCurrentTurnOnly(t *t
 		{Seq: 6, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemToolResult, Role: "tool", ContentType: "text", ToolCallId: "call-1", Content: "lookup result"},
 		{Seq: 7, Phase: APIRequestLogPhaseOutput, ItemType: APIRequestLogItemMessage, Role: "assistant", ContentType: "text", Content: "final answer"},
 	})
+	mappingUpdateStatements := 0
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:count_turn_item_updates", func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == apiRequestLogTurnItemsTable {
+			mappingUpdateStatements++
+		}
+	}))
 	turn, err = MaterializeAPIRequestLogTurn(db, secondLog, APIRequestLogTurnMeta{
 		SessionId: "session-1", TurnId: "turn-1", Protocol: "codex", StartedAt: 100, CompletedAt: 110, CompletionStatus: APIRequestLogTurnStatusOpen, Attribution: APIRequestLogTurnAttributionExact,
 		Items: []APIRequestLogTurnItemMeta{
@@ -83,6 +89,7 @@ func TestMaterializeAPIRequestLogTurnsMergesRequestsAndKeepsCurrentTurnOnly(t *t
 	require.Equal(t, int64(110), turn.CompletedAt)
 	require.Equal(t, 2, turn.RequestCount)
 	require.Equal(t, 7, turn.ItemCount)
+	require.Zero(t, mappingUpdateStatements, "appending a request must not rewrite existing turn item mappings")
 	require.Equal(t, 22, turn.PromptTokens)
 	require.Equal(t, 5, turn.CompletionTokens)
 
