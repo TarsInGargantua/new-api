@@ -36,3 +36,10 @@ func GetEnvOrDefaultBool(env string, defaultValue bool) bool {
 	}
 	return b
 }
+
+// APIRequestLogAsyncWriteEnabledFromEnv requires an explicit acknowledgement
+// before enabling the process-local, volatile request-log item queue.
+func APIRequestLogAsyncWriteEnabledFromEnv() bool {
+	return GetEnvOrDefaultBool("API_REQUEST_LOG_ASYNC_WRITE", false) &&
+		GetEnvOrDefaultBool("API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE", false)
+}
