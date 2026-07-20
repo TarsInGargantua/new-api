@@ -2,12 +2,14 @@ package model
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 
@@ -220,7 +222,76 @@ func TestAPIRequestLogCreateQueryAndDetail(t *testing.T) {
 	require.Equal(t, 1234, detail.Usage.Quota)
 }
 
-func TestCreateAPIRequestLogAsyncItems(t *testing.T) {
+func TestCreateAPIRequestLogLiveItemsPersistSynchronouslyWithoutVolatileOptIn(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	oldAsync := common.APIRequestLogAsyncWrite
+	t.Setenv("API_REQUEST_LOG_ASYNC_WRITE", "true")
+	t.Setenv("API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE", "false")
+	common.APIRequestLogAsyncWrite = common.APIRequestLogAsyncWriteEnabledFromEnv()
+	t.Cleanup(func() {
+		common.APIRequestLogAsyncWrite = oldAsync
+	})
+	require.False(t, common.APIRequestLogAsyncWrite)
+
+	log := &APIRequestLog{
+		Source:      APIRequestLogSourceLive,
+		UsageLogId:  11,
+		Username:    "sync-user",
+		TokenName:   "sync-token",
+		ModelName:   "gpt-sync",
+		CreatedAt:   101,
+		RequestId:   "req-sync",
+		ParseStatus: APIRequestLogParseOK,
+		TurnMeta: &APIRequestLogTurnMeta{
+			SessionId:        "sync-session",
+			TurnId:           "sync-turn",
+			Protocol:         "codex",
+			StartedAt:        101,
+			CompletedAt:      102,
+			CompletionStatus: APIRequestLogTurnStatusCompleted,
+			CompletionSignal: "message.final",
+			Attribution:      APIRequestLogTurnAttributionExact,
+			Items: []APIRequestLogTurnItemMeta{
+				{Seq: 1, ProviderItemId: "sync-item", TurnId: "sync-turn", MessagePhase: "final_answer", ItemStatus: "completed"},
+			},
+		},
+		Items: []APIRequestLogItem{
+			{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody("sync hello")},
+		},
+	}
+
+	require.NoError(t, CreateAPIRequestLog(log))
+	require.Equal(t, APIRequestLogItemsOK, log.ItemsStatus)
+
+	var stored APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.Preload("Items").First(&stored, "usage_log_id = ?", 11).Error)
+	require.Equal(t, APIRequestLogItemsOK, stored.ItemsStatus)
+	require.Empty(t, stored.ItemsError)
+	require.Len(t, stored.Items, 1)
+	require.Equal(t, APIRequestLogBody("sync hello"), stored.Items[0].Content)
+
+	var turnRequestCount int64
+	require.NoError(t, REQUEST_LOG_DB.Model(&APIRequestLogTurnRequest{}).Where("log_id = ?", stored.Id).Count(&turnRequestCount).Error)
+	require.Equal(t, int64(1), turnRequestCount)
+	var turn APIRequestLogTurn
+	require.NoError(t, REQUEST_LOG_DB.Joins("JOIN api_request_log_turn_requests request ON request.turn_record_id = api_request_log_turns.id").Where("request.log_id = ?", stored.Id).First(&turn).Error)
+	require.Equal(t, "sync-session", turn.SessionId)
+	require.Equal(t, "sync-turn", turn.TurnId)
+	require.Equal(t, APIRequestLogTurnAttributionExact, turn.Attribution)
+	require.Equal(t, APIRequestLogTurnStatusCompleted, turn.CompletionStatus)
+	var turnItemCount int64
+	require.NoError(t, REQUEST_LOG_DB.Model(&APIRequestLogTurnItem{}).Where("source_item_id = ?", stored.Items[0].Id).Count(&turnItemCount).Error)
+	require.Equal(t, int64(1), turnItemCount)
+
+	status, err := GetAPIRequestLogStorageStatus()
+	require.NoError(t, err)
+	require.False(t, status.AsyncWrite)
+	require.Zero(t, status.QueueDepth)
+	require.Zero(t, status.QueuedItemBytes)
+}
+
+func TestCreateAPIRequestLogVolatileAsyncOptInItems(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
 
 	oldAsync := common.APIRequestLogAsyncWrite
@@ -258,22 +329,18 @@ func TestCreateAPIRequestLogAsyncItems(t *testing.T) {
 	var logs []APIRequestLog
 	require.NoError(t, REQUEST_LOG_DB.Find(&logs).Error)
 	require.Len(t, logs, 1)
-	require.Equal(t, APIRequestLogItemsPending, logs[0].ItemsStatus)
-
-	var detail *APIRequestLog
-	require.Eventually(t, func() bool {
-		var err error
-		detail, err = GetAPIRequestLogById(logs[0].Id)
-		return err == nil && len(detail.Items) == 1 && detail.ItemsStatus == APIRequestLogItemsOK
-	}, 2*time.Second, 20*time.Millisecond)
-	require.Equal(t, APIRequestLogBody("async hello"), detail.Items[0].Content)
 
 	var stored APIRequestLog
-	require.NoError(t, REQUEST_LOG_DB.First(&stored, logs[0].Id).Error)
-	require.Equal(t, APIRequestLogItemsPending, stored.ItemsStatus)
+	require.Eventually(t, func() bool {
+		stored = APIRequestLog{}
+		err := REQUEST_LOG_DB.Preload("Items").First(&stored, logs[0].Id).Error
+		return err == nil && stored.ItemsStatus == APIRequestLogItemsOK && len(stored.Items) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+	require.Empty(t, stored.ItemsError)
+	require.Equal(t, APIRequestLogBody("async hello"), stored.Items[0].Content)
 }
 
-func TestCreateAPIRequestLogAsyncItemsQueueByteLimit(t *testing.T) {
+func TestCreateAPIRequestLogVolatileAsyncOptInQueueByteLimit(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
 	droppedJobsBefore := atomic.LoadInt64(&apiRequestLogQueueDroppedJobs)
 	droppedItemsBefore := atomic.LoadInt64(&apiRequestLogQueueDroppedItems)
@@ -324,6 +391,113 @@ func TestCreateAPIRequestLogAsyncItemsQueueByteLimit(t *testing.T) {
 	require.Greater(t, atomic.LoadInt64(&apiRequestLogQueueDroppedItemBytes), droppedBytesBefore)
 }
 
+func TestCreateAPIRequestLogVolatileAsyncOptInMissingQueueMarksFailed(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	oldAsync := common.APIRequestLogAsyncWrite
+	common.APIRequestLogAsyncWrite = true
+	t.Setenv("REQUEST_LOG_DB_READ_ONLY", "true")
+	t.Cleanup(func() {
+		common.APIRequestLogAsyncWrite = oldAsync
+	})
+
+	err := CreateAPIRequestLog(&APIRequestLog{
+		Source:      APIRequestLogSourceLive,
+		UsageLogId:  14,
+		Username:    "missing-queue-user",
+		ModelName:   "gpt-missing-queue",
+		CreatedAt:   104,
+		RequestId:   "req-missing-queue",
+		ParseStatus: APIRequestLogParseOK,
+		TurnMeta: &APIRequestLogTurnMeta{
+			SessionId:        "missing-queue-session",
+			TurnId:           "missing-queue-turn",
+			Protocol:         "codex",
+			StartedAt:        104,
+			CompletedAt:      105,
+			CompletionStatus: APIRequestLogTurnStatusCompleted,
+			CompletionSignal: "message.final",
+			Attribution:      APIRequestLogTurnAttributionExact,
+		},
+		Items: []APIRequestLogItem{
+			{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody("not queued")},
+		},
+	})
+	require.ErrorContains(t, err, "queue is not initialized")
+
+	var stored APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.First(&stored, "usage_log_id = ?", 14).Error)
+	require.Equal(t, APIRequestLogItemsFailed, stored.ItemsStatus)
+	require.Contains(t, stored.ItemsError, "queue is not initialized")
+
+	var turn APIRequestLogTurn
+	require.NoError(t, REQUEST_LOG_DB.Joins("JOIN api_request_log_turn_requests request ON request.turn_record_id = api_request_log_turns.id").Where("request.log_id = ?", stored.Id).First(&turn).Error)
+	require.Equal(t, APIRequestLogTurnStatusOpen, turn.CompletionStatus)
+}
+
+func TestCreateAPIRequestLogItemsIfMissingRepairsPartialWrite(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	parent := &APIRequestLog{
+		Source:      APIRequestLogSourceLive,
+		UsageLogId:  17,
+		Username:    "partial-item-user",
+		ModelName:   "gpt-partial-item",
+		CreatedAt:   107,
+		ParseStatus: APIRequestLogParseOK,
+		ItemsStatus: APIRequestLogItemsPending,
+	}
+	require.NoError(t, REQUEST_LOG_DB.Create(parent).Error)
+	expected := []APIRequestLogItem{
+		{LogId: parent.Id, Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody("first")},
+		{LogId: parent.Id, Seq: 2, Phase: APIRequestLogPhaseOutput, ItemType: APIRequestLogItemMessage, Role: "assistant", ContentType: "text", Content: APIRequestLogBody("second")},
+	}
+	require.NoError(t, REQUEST_LOG_DB.Create(&expected[0]).Error)
+	partial, err := GetAPIRequestLogById(parent.Id)
+	require.NoError(t, err)
+	require.Equal(t, APIRequestLogItemsPending, partial.ItemsStatus)
+	require.Len(t, partial.Items, 1)
+
+	require.NoError(t, createAPIRequestLogItemsIfMissing(REQUEST_LOG_DB, parent.Id, expected))
+	require.NoError(t, updateAPIRequestLogItemsStatus(REQUEST_LOG_DB, parent.Id, APIRequestLogItemsOK, ""))
+
+	var stored []APIRequestLogItem
+	require.NoError(t, REQUEST_LOG_DB.Where("log_id = ?", parent.Id).Order("seq asc").Find(&stored).Error)
+	require.Len(t, stored, 2)
+	require.Equal(t, []int{1, 2}, []int{stored[0].Seq, stored[1].Seq})
+	complete, err := GetAPIRequestLogById(parent.Id)
+	require.NoError(t, err)
+	require.Equal(t, APIRequestLogItemsOK, complete.ItemsStatus)
+	require.Len(t, complete.Items, 2)
+}
+
+func TestCreateAPIRequestLogItemsIfMissingRecomputesAfterPartialBatchFailure(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	parent := &APIRequestLog{Source: APIRequestLogSourceLive, UsageLogId: 18, CreatedAt: 108, ItemsStatus: APIRequestLogItemsPending}
+	require.NoError(t, REQUEST_LOG_DB.Create(parent).Error)
+	expected := []APIRequestLogItem{
+		{LogId: parent.Id, Seq: 1, ItemType: APIRequestLogItemMessage, Content: APIRequestLogBody("first")},
+		{LogId: parent.Id, Seq: 2, ItemType: APIRequestLogItemMessage, Content: APIRequestLogBody("second")},
+	}
+	var calls [][]int
+	writer := func(db *gorm.DB, items []APIRequestLogItem) error {
+		seqs := make([]int, len(items))
+		for i := range items {
+			seqs[i] = items[i].Seq
+		}
+		calls = append(calls, seqs)
+		if len(calls) == 1 {
+			require.NoError(t, db.Create(&items[0]).Error)
+			return errors.New("simulated deadlock after partial batch")
+		}
+		return db.CreateInBatches(items, apiRequestLogItemBatchSize).Error
+	}
+
+	require.NoError(t, createAPIRequestLogItemsIfMissingWithWriter(REQUEST_LOG_DB, parent.Id, expected, writer))
+	require.Equal(t, [][]int{{1, 2}, {2}}, calls)
+}
+
 func TestCreateAPIRequestLogTruncatesLargeItems(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
 
@@ -349,6 +523,80 @@ func TestCreateAPIRequestLogTruncatesLargeItems(t *testing.T) {
 	require.Len(t, log.Items, 1)
 	require.True(t, log.Items[0].Truncated)
 	require.Contains(t, string(log.Items[0].Content), "[TRUNCATED]")
+}
+
+func TestCreateAPIRequestLogSanitizesInvalidUTF8BelowItemLimit(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	oldMaxItemBytes := common.APIRequestLogMaxItemBytes
+	common.APIRequestLogMaxItemBytes = 1024
+	t.Cleanup(func() {
+		common.APIRequestLogMaxItemBytes = oldMaxItemBytes
+	})
+
+	invalidContent := APIRequestLogBody(string([]byte{'o', 'k', 0xff, 'x'}))
+	require.False(t, utf8.ValidString(string(invalidContent)))
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		UsageLogId:  15,
+		Username:    "utf8-user",
+		ModelName:   "gpt-utf8",
+		CreatedAt:   105,
+		ParseStatus: APIRequestLogParseOK,
+		Items: []APIRequestLogItem{
+			{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: invalidContent},
+		},
+	}))
+
+	var stored APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.Preload("Items").First(&stored, "usage_log_id = ?", 15).Error)
+	require.Len(t, stored.Items, 1)
+	require.True(t, utf8.ValidString(string(stored.Items[0].Content)))
+	require.Equal(t, "ok\ufffdx", string(stored.Items[0].Content))
+}
+
+func TestCreateAPIRequestLogNormalizedEmptyItemsSetEmptyStatus(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	log := &APIRequestLog{
+		UsageLogId:  16,
+		Username:    "empty-item-user",
+		ModelName:   "gpt-empty-item",
+		CreatedAt:   106,
+		ParseStatus: APIRequestLogParseOK,
+		Items: []APIRequestLogItem{
+			{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody(" \n\t ")},
+		},
+	}
+	require.NoError(t, CreateAPIRequestLog(log))
+	require.Equal(t, APIRequestLogItemsEmpty, log.ItemsStatus)
+
+	var stored APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.Preload("Items").First(&stored, "usage_log_id = ?", 16).Error)
+	require.Equal(t, APIRequestLogItemsEmpty, stored.ItemsStatus)
+	require.Empty(t, stored.ItemsError)
+	require.Empty(t, stored.Items)
+}
+
+func TestCreateAPIRequestLogMaterializeFailureMarksItemsFailed(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	log := &APIRequestLog{
+		Source: APIRequestLogSourceLive, UsageLogId: 19, Username: "turn-failure-user", ModelName: "gpt-turn-failure",
+		CreatedAt: 109, ParseStatus: APIRequestLogParseOK,
+		Items: []APIRequestLogItem{{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody("persist me")}},
+	}
+	normalizeAPIRequestLog(log)
+	materializeErr := errors.New("forced turn materialization failure")
+	err := createOrUpdateAPIRequestLogWithMaterializer(log, func(*gorm.DB, *APIRequestLog, []APIRequestLogItem) error {
+		return materializeErr
+	})
+	require.ErrorContains(t, err, materializeErr.Error())
+
+	var stored APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.Preload("Items").First(&stored, log.Id).Error)
+	require.Equal(t, APIRequestLogItemsFailed, stored.ItemsStatus)
+	require.Contains(t, stored.ItemsError, "materialize request log turn")
+	require.Len(t, stored.Items, 1)
 }
 
 func TestCreateAPIRequestLogUsageOnlyUpdatePreservesItems(t *testing.T) {
@@ -380,12 +628,32 @@ func TestCreateAPIRequestLogUsageOnlyUpdatePreservesItems(t *testing.T) {
 	require.Len(t, logs, 1)
 	require.Equal(t, "alice-renamed", logs[0].Username)
 	require.Equal(t, 10, logs[0].Quota)
+	require.Equal(t, APIRequestLogItemsOK, logs[0].ItemsStatus)
 
 	detail, err := GetAPIRequestLogById(logs[0].Id)
 	require.NoError(t, err)
+	require.Equal(t, APIRequestLogItemsOK, detail.ItemsStatus)
 	require.Len(t, detail.Items, 2)
 	require.Equal(t, APIRequestLogBody("hello"), detail.Items[0].Content)
 	require.Equal(t, APIRequestLogBody("ok"), detail.Items[1].Content)
+}
+
+func TestCreateAPIRequestLogUsageOnlyStatusDefaultsAndExplicitValue(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{UsageLogId: 20, Username: "empty-status", CreatedAt: 110}))
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		UsageLogId: 21, Username: "explicit-status", CreatedAt: 111,
+		ItemsStatus: APIRequestLogItemsFailed, ItemsError: "explicit failure",
+	}))
+
+	var emptyLog APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.First(&emptyLog, "usage_log_id = ?", 20).Error)
+	require.Equal(t, APIRequestLogItemsEmpty, emptyLog.ItemsStatus)
+	var explicitLog APIRequestLog
+	require.NoError(t, REQUEST_LOG_DB.First(&explicitLog, "usage_log_id = ?", 21).Error)
+	require.Equal(t, APIRequestLogItemsFailed, explicitLog.ItemsStatus)
+	require.Equal(t, "explicit failure", explicitLog.ItemsError)
 }
 
 func TestRecordConsumeLogSyncsAPIRequestLog(t *testing.T) {

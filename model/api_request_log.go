@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -346,21 +347,20 @@ func CreateAPIRequestLog(log *APIRequestLog) error {
 }
 
 func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
+	return createOrUpdateAPIRequestLogWithMaterializer(log, materializeAPIRequestLogTurnForWrite)
+}
+
+type apiRequestLogTurnMaterializer func(*gorm.DB, *APIRequestLog, []APIRequestLogItem) error
+
+func createOrUpdateAPIRequestLogWithMaterializer(log *APIRequestLog, materialize apiRequestLogTurnMaterializer) error {
 	db := requestLogDB()
 	items := log.Items
 	log.Items = nil
 	hasItems := len(items) > 0
 	asyncItems := shouldAsyncAPIRequestLogItems(log, hasItems)
 	if hasItems {
-		if asyncItems {
-			log.ItemsStatus = APIRequestLogItemsPending
-			log.ItemsError = ""
-		} else {
-			log.ItemsStatus = APIRequestLogItemsOK
-			log.ItemsError = ""
-		}
-	} else if log.ItemsStatus == "" {
-		log.ItemsStatus = APIRequestLogItemsEmpty
+		log.ItemsStatus = APIRequestLogItemsPending
+		log.ItemsError = ""
 	}
 
 	if err := db.Transaction(func(tx *gorm.DB) error {
@@ -368,6 +368,10 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 		err := findExistingAPIRequestLog(tx, log, &existing)
 		switch {
 		case errors.Is(err, gorm.ErrRecordNotFound):
+			if !hasItems && log.ItemsStatus == "" {
+				log.ItemsStatus = APIRequestLogItemsEmpty
+				log.ItemsError = ""
+			}
 			if err := tx.Create(log).Error; err != nil {
 				return err
 			}
@@ -375,6 +379,10 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 			return err
 		default:
 			log.Id = existing.Id
+			if !hasItems && log.ItemsStatus == "" {
+				log.ItemsStatus = existing.ItemsStatus
+				log.ItemsError = existing.ItemsError
+			}
 			if existing.UsageLogId > 0 && log.UsageLogId == 0 {
 				preserveAPIRequestLogUsageFields(log, &existing)
 			}
@@ -392,24 +400,29 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 		if log.TurnMeta == nil {
 			return nil
 		}
-		return materializeAPIRequestLogTurnForWrite(db, log, nil)
+		return materializeRequestLogTurnOrMarkFailed(db, log, nil, materialize)
 	}
 
 	log.Items = normalizeAPIRequestLogItems(log.Id, items)
 	if len(log.Items) == 0 {
-		return nil
+		log.ItemsStatus = APIRequestLogItemsEmpty
+		log.ItemsError = ""
+		if err := updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsEmpty, ""); err != nil {
+			return err
+		}
+		if log.TurnMeta == nil {
+			return nil
+		}
+		return materializeRequestLogTurnOrMarkFailed(db, log, nil, materialize)
 	}
 	if asyncItems {
 		return enqueueAPIRequestLogItems(db, log, log.Items)
 	}
 	if err := createAPIRequestLogItemsIfMissing(db, log.Id, log.Items); err != nil {
-		_ = updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsFailed, err.Error())
+		markAPIRequestLogItemsFailed(db, log, err)
 		return err
 	}
-	if err := updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsOK, ""); err != nil {
-		return err
-	}
-	return materializeAPIRequestLogTurnForWrite(db, log, log.Items)
+	return materializeRequestLogTurnAndComplete(db, log, log.Items, materialize)
 }
 
 func shouldAsyncAPIRequestLogItems(log *APIRequestLog, hasItems bool) bool {
@@ -417,48 +430,85 @@ func shouldAsyncAPIRequestLogItems(log *APIRequestLog, hasItems bool) bool {
 }
 
 func createAPIRequestLogItemsIfMissing(db *gorm.DB, logId int, items []APIRequestLogItem) error {
+	return createAPIRequestLogItemsIfMissingWithWriter(db, logId, items, createAPIRequestLogItems)
+}
+
+type apiRequestLogItemWriter func(*gorm.DB, []APIRequestLogItem) error
+
+func createAPIRequestLogItemsIfMissingWithWriter(db *gorm.DB, logId int, items []APIRequestLogItem, writer apiRequestLogItemWriter) error {
 	if db == nil || logId <= 0 || len(items) == 0 {
 		return nil
 	}
+	if writer == nil {
+		return errors.New("request log item writer is required")
+	}
 	var lastErr error
-	for attempt := 0; attempt < apiRequestLogItemMaxRetry; attempt++ {
-		var count int64
-		if err := db.Model(&APIRequestLogItem{}).Where("log_id = ?", logId).Count(&count).Error; err != nil {
+	for attempt := 0; attempt <= apiRequestLogItemMaxRetry; attempt++ {
+		missing, complete, err := missingAPIRequestLogItems(db, logId, items)
+		if err != nil {
 			return err
 		}
-		if count > 0 {
+		if complete {
 			return nil
 		}
-		err := createAPIRequestLogItems(db, items)
-		if err == nil {
-			return nil
+		if attempt == apiRequestLogItemMaxRetry {
+			break
 		}
+		err = writer(db, missing)
 		lastErr = err
-		if !isRetryableAPIRequestLogDBError(err) || attempt == apiRequestLogItemMaxRetry-1 {
+		if err != nil && !isRetryableAPIRequestLogDBError(err) {
 			return err
 		}
-		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+		if err != nil {
+			time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("request log items for log %d remain incomplete after %d attempts", logId, apiRequestLogItemMaxRetry)
 	}
 	return lastErr
+}
+
+func missingAPIRequestLogItems(db *gorm.DB, logId int, expected []APIRequestLogItem) ([]APIRequestLogItem, bool, error) {
+	var storedSeqs []int
+	if err := db.Model(&APIRequestLogItem{}).Where("log_id = ?", logId).Pluck("seq", &storedSeqs).Error; err != nil {
+		return nil, false, err
+	}
+	expectedCounts := make(map[int]int, len(expected))
+	for _, item := range expected {
+		expectedCounts[item.Seq]++
+	}
+	storedCounts := make(map[int]int, len(storedSeqs))
+	for _, seq := range storedSeqs {
+		storedCounts[seq]++
+		if storedCounts[seq] > expectedCounts[seq] {
+			return nil, false, fmt.Errorf("request log items for log %d contain unexpected seq %d", logId, seq)
+		}
+	}
+	complete := len(storedSeqs) == len(expected)
+	missing := make([]APIRequestLogItem, 0, len(expected)-len(storedSeqs))
+	remaining := make(map[int]int, len(storedCounts))
+	for seq, count := range storedCounts {
+		remaining[seq] = count
+	}
+	for _, item := range expected {
+		if remaining[item.Seq] > 0 {
+			remaining[item.Seq]--
+			continue
+		}
+		complete = false
+		item.Id = 0
+		item.LogId = logId
+		missing = append(missing, item)
+	}
+	return missing, complete, nil
 }
 
 func createAPIRequestLogItems(db *gorm.DB, items []APIRequestLogItem) error {
 	if db == nil || len(items) == 0 {
 		return nil
 	}
-	var lastErr error
-	for attempt := 0; attempt < apiRequestLogItemMaxRetry; attempt++ {
-		err := db.Session(&gorm.Session{SkipDefaultTransaction: true}).CreateInBatches(items, apiRequestLogItemBatchSize).Error
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !isRetryableAPIRequestLogDBError(err) || attempt == apiRequestLogItemMaxRetry-1 {
-			return err
-		}
-		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
-	}
-	return lastErr
+	return db.Session(&gorm.Session{SkipDefaultTransaction: true}).CreateInBatches(items, apiRequestLogItemBatchSize).Error
 }
 
 func enqueueAPIRequestLogItems(db *gorm.DB, log *APIRequestLog, items []APIRequestLogItem) error {
@@ -470,7 +520,12 @@ func enqueueAPIRequestLogItems(db *gorm.DB, log *APIRequestLog, items []APIReque
 	queue := apiRequestLogItemQueue
 	apiRequestLogItemQueueMu.Unlock()
 	if queue == nil {
-		return errors.New("request log item queue is not initialized")
+		err := errors.New("request log item queue is not initialized")
+		log.ItemsStatus = APIRequestLogItemsFailed
+		log.ItemsError = err.Error()
+		_ = updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsFailed, err.Error())
+		_ = materializeAPIRequestLogTurnWriteFailure(db, log)
+		return err
 	}
 	itemBytes := apiRequestLogItemsByteSize(items)
 	if err := reserveAPIRequestLogQueueBytes(itemBytes); err != nil {
@@ -526,7 +581,7 @@ func startAPIRequestLogItemWriters() {
 
 func apiRequestLogItemWorker(queue <-chan apiRequestLogItemWriteJob) {
 	for job := range queue {
-		err := createAPIRequestLogItems(job.DB, job.Items)
+		err := createAPIRequestLogItemsIfMissing(job.DB, job.Log.Id, job.Items)
 		releaseAPIRequestLogQueueBytes(job.Bytes)
 		if err != nil {
 			setAPIRequestLogLastWriteError(err)
@@ -534,10 +589,48 @@ func apiRequestLogItemWorker(queue <-chan apiRequestLogItemWriteJob) {
 			_ = materializeAPIRequestLogTurnWriteFailure(job.DB, &job.Log)
 			continue
 		}
-		if err := materializeAPIRequestLogTurnForWrite(job.DB, &job.Log, job.Items); err != nil {
+		if err := materializeRequestLogTurnAndComplete(job.DB, &job.Log, job.Items, materializeAPIRequestLogTurnForWrite); err != nil {
 			setAPIRequestLogLastWriteError(err)
+			continue
 		}
 	}
+}
+
+func materializeRequestLogTurnAndComplete(db *gorm.DB, log *APIRequestLog, items []APIRequestLogItem, materialize apiRequestLogTurnMaterializer) error {
+	if err := materializeRequestLogTurnOrMarkFailed(db, log, items, materialize); err != nil {
+		return err
+	}
+	if err := updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsOK, ""); err != nil {
+		wrapped := fmt.Errorf("mark request log items complete: %w", err)
+		markAPIRequestLogItemsFailed(db, log, wrapped)
+		return wrapped
+	}
+	log.ItemsStatus = APIRequestLogItemsOK
+	log.ItemsError = ""
+	return nil
+}
+
+func materializeRequestLogTurnOrMarkFailed(db *gorm.DB, log *APIRequestLog, items []APIRequestLogItem, materialize apiRequestLogTurnMaterializer) error {
+	if materialize == nil {
+		err := errors.New("request log turn materializer is required")
+		markAPIRequestLogItemsFailed(db, log, err)
+		return err
+	}
+	if err := materialize(db, log, items); err != nil {
+		wrapped := fmt.Errorf("materialize request log turn: %w", err)
+		markAPIRequestLogItemsFailed(db, log, wrapped)
+		return wrapped
+	}
+	return nil
+}
+
+func markAPIRequestLogItemsFailed(db *gorm.DB, log *APIRequestLog, err error) {
+	if log == nil || err == nil {
+		return
+	}
+	log.ItemsStatus = APIRequestLogItemsFailed
+	log.ItemsError = err.Error()
+	_ = updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsFailed, err.Error())
 }
 
 func materializeAPIRequestLogTurnForWrite(db *gorm.DB, log *APIRequestLog, items []APIRequestLogItem) error {
@@ -719,11 +812,11 @@ func normalizeAPIRequestLogItems(logId int, items []APIRequestLogItem) []APIRequ
 }
 
 func truncateAPIRequestLogItemContent(content APIRequestLogBody, alreadyTruncated bool) (APIRequestLogBody, bool) {
+	text := strings.ToValidUTF8(string(content), "\uFFFD")
 	maxBytes := common.APIRequestLogMaxItemBytes
-	if maxBytes <= 0 || len(content) <= maxBytes {
-		return content, alreadyTruncated
+	if maxBytes <= 0 || len(text) <= maxBytes {
+		return APIRequestLogBody(text), alreadyTruncated
 	}
-	text := string(content)
 	if len(text) > maxBytes {
 		text = text[:maxBytes]
 		for len(text) > 0 && !utf8.ValidString(text) {
@@ -900,9 +993,6 @@ func GetAPIRequestLogById(id int) (*APIRequestLog, error) {
 		return db.Order("seq asc, id asc")
 	}).First(&log, id).Error; err != nil {
 		return nil, err
-	}
-	if log.ItemsStatus == APIRequestLogItemsPending && len(log.Items) > 0 {
-		log.ItemsStatus = APIRequestLogItemsOK
 	}
 	log.Usage = apiRequestUsageFromRequestLog(&log)
 	return &log, nil

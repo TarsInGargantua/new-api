@@ -91,7 +91,7 @@ func InitEnv() {
 	APIRequestLogEnabled = GetEnvOrDefaultBool("API_REQUEST_LOG_ENABLED", false)
 	APIRequestLogRedactSecrets = GetEnvOrDefaultBool("API_REQUEST_LOG_REDACT_SECRETS", true)
 	APIRequestLogCaptureResponse = GetEnvOrDefaultBool("API_REQUEST_LOG_CAPTURE_RESPONSE", true)
-	APIRequestLogAsyncWrite = GetEnvOrDefaultBool("API_REQUEST_LOG_ASYNC_WRITE", true)
+	APIRequestLogAsyncWrite = APIRequestLogAsyncWriteEnabledFromEnv()
 	APIRequestLogQueueSize = GetEnvOrDefault("API_REQUEST_LOG_QUEUE_SIZE", 128)
 	if APIRequestLogQueueSize < 1 {
 		APIRequestLogQueueSize = 1

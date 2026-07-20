@@ -14,7 +14,8 @@ Set these on the main new-api deployment:
 API_REQUEST_LOG_ENABLED=true
 API_REQUEST_LOG_CAPTURE_RESPONSE=true
 API_REQUEST_LOG_REDACT_SECRETS=true
-API_REQUEST_LOG_ASYNC_WRITE=true
+API_REQUEST_LOG_ASYNC_WRITE=false
+API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE=false
 API_REQUEST_LOG_QUEUE_SIZE=128
 API_REQUEST_LOG_WORKERS=2
 API_REQUEST_LOG_MAX_BODY_BYTES=4194304
@@ -30,7 +31,9 @@ Do not change `SQL_DSN` or `LOG_SQL_DSN` for this migration unless the main appl
 
 For high-concurrency or very large requests:
 
-- `API_REQUEST_LOG_ASYNC_WRITE=true` writes parent rows synchronously and queues item inserts in background workers.
+- Keep `API_REQUEST_LOG_ASYNC_WRITE=false` for durable request-log capture. `CreateAPIRequestLog` returns only after the parent, parsed items, and turn mappings are persisted; `items_status=ok` therefore means all three completed.
+- The in-process item queue is volatile and can lose pending items on a crash or restart. It is enabled only when both `API_REQUEST_LOG_ASYNC_WRITE=true` and `API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE=true` explicitly accept that risk. Do not enable it for the current production deployment.
+- Queue size, worker count, and queue byte limits apply only when volatile async writes are explicitly enabled.
 - `API_REQUEST_LOG_MAX_BODY_BYTES` limits captured request/response bytes before parsing. `0` disables body capture.
 - `API_REQUEST_LOG_MAX_ITEM_BYTES` truncates each parsed item before database insert. `0` disables item truncation.
 - `API_REQUEST_LOG_MAX_QUEUE_BYTES` caps queued item payload bytes in process memory. `0` disables this byte cap.
