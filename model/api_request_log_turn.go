@@ -32,6 +32,8 @@ const (
 	apiRequestLogTurnLockNamespace = int64(0x52514c5400000000)
 )
 
+var errAPIRequestLogTurnClaimedDuringWrite = errors.New("request log turn was claimed for export during materialization")
+
 // APIRequestLogTurnMeta is normalized provider metadata for one agent turn.
 // StartedAt and CompletedAt accept Unix seconds or Unix milliseconds.
 type APIRequestLogTurnMeta struct {
@@ -224,6 +226,7 @@ func MaterializeAPIRequestLogTurn(db *gorm.DB, log *APIRequestLog, meta APIReque
 		if err != nil {
 			return err
 		}
+		result = *turn
 		if err := lockAPIRequestLogTurnForExportCoordination(tx, turn.Id); err != nil {
 			return err
 		}
@@ -251,9 +254,22 @@ func MaterializeAPIRequestLogTurn(db *gorm.DB, log *APIRequestLog, meta APIReque
 		if err := refreshAPIRequestLogTurn(tx, turn, log, meta); err != nil {
 			return err
 		}
+		exported, err = lockAPIRequestLogTurnExportMember(tx, turn.Id)
+		if err != nil {
+			return err
+		}
+		if exported {
+			return errAPIRequestLogTurnClaimedDuringWrite
+		}
 		result = *turn
 		return nil
 	})
+	if errors.Is(err, errAPIRequestLogTurnClaimedDuringWrite) {
+		if loadErr := db.First(&result, result.Id).Error; loadErr != nil {
+			return nil, loadErr
+		}
+		return &result, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -604,6 +620,25 @@ func apiRequestLogTurnHasExportMember(tx *gorm.DB, turnRecordId int64) (bool, er
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func lockAPIRequestLogTurnExportMember(tx *gorm.DB, turnRecordId int64) (bool, error) {
+	if turnRecordId <= 0 {
+		return false, nil
+	}
+	var member APIRequestLogExportMember
+	query := tx.Where("turn_record_id = ?", turnRecordId)
+	if tx.Dialector != nil && tx.Dialector.Name() == "mysql" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	err := query.First(&member).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func lockAPIRequestLogTurnForExportCoordination(tx *gorm.DB, turnRecordId int64) error {

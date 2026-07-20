@@ -585,11 +585,10 @@ func buildAPIRequestLogExportEligibleQuery(db *gorm.DB, params APIRequestLogTurn
 	return tx.Where("attribution = ?", APIRequestLogTurnAttributionExact)
 }
 
-// lockAPIRequestLogExportTurnIds locks candidate turns in ascending ID order,
-// then rechecks eligibility and global membership while holding those locks.
+// lockAPIRequestLogExportTurnIds rechecks eligibility and global membership.
 // Creating the batch before this call serializes SQLite write transactions.
-// MySQL 5.7 uses FOR UPDATE. PostgreSQL uses transaction-scoped advisory locks
-// so the viewer account keeps read-only access to turn tables.
+// PostgreSQL uses transaction-scoped advisory locks. MySQL writers lock the
+// export-member key before commit, so the viewer keeps read-only turn access.
 func lockAPIRequestLogExportTurnIds(db *gorm.DB, params APIRequestLogTurnQueryParams, includeInferred bool, cutoffTurnId int64, candidateIds []int64) ([]int64, error) {
 	candidateIds = uniquePositiveInt64s(candidateIds)
 	if len(candidateIds) == 0 {
@@ -612,23 +611,11 @@ func lockAPIRequestLogExportTurnIds(db *gorm.DB, params APIRequestLogTurnQueryPa
 		Where(apiRequestLogTurnsTable+".id <= ?", cutoffTurnId).
 		Where("NOT " + apiRequestLogExportMemberExistsSQL()).
 		Order(apiRequestLogTurnsTable + ".id ASC")
-	if strength := apiRequestLogExportTurnLockStrength(dialect); strength != "" {
-		query = query.Clauses(clause.Locking{Strength: strength})
-	}
 	var lockedIds []int64
 	if err := query.Pluck(apiRequestLogTurnsTable+".id", &lockedIds).Error; err != nil {
 		return nil, err
 	}
 	return lockedIds, nil
-}
-
-func apiRequestLogExportTurnLockStrength(dialect string) string {
-	switch strings.ToLower(strings.TrimSpace(dialect)) {
-	case "mysql":
-		return "UPDATE"
-	default:
-		return ""
-	}
 }
 
 func apiRequestLogExportMemberExistsSQL() string {
