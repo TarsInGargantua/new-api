@@ -120,6 +120,43 @@ func TestOrganizeAPIRequestLogTurnsDryRunCountsFinalCompletedItem(t *testing.T) 
 	require.Zero(t, stats.Open)
 }
 
+func TestOrganizeAPIRequestLogTurnsRepairsExistingFinalAnswerCompletion(t *testing.T) {
+	db := setupAPIRequestLogOrganizerTestDB(t)
+	base := int64(1_779_950_000)
+	log := createAPIRequestLogOrganizerFixture(t, db, base, []APIRequestLogItem{
+		{Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: "hello"},
+		{Phase: APIRequestLogPhaseOutput, ItemType: APIRequestLogItemMessage, Role: "assistant", ContentType: "text", Content: "done"},
+	})
+	var items []APIRequestLogItem
+	require.NoError(t, db.Where("log_id = ?", log.Id).Order("seq ASC").Find(&items).Error)
+	turn, err := MaterializeAPIRequestLogTurn(db, &log, APIRequestLogTurnMeta{
+		SessionId: "session-live", TurnId: "turn-live", Protocol: "openai_responses",
+		CompletionStatus: APIRequestLogTurnStatusOpen, Attribution: APIRequestLogTurnAttributionExact,
+		Items: []APIRequestLogTurnItemMeta{{Seq: 2, ProviderItemId: "message-live", TurnId: "turn-live", MessagePhase: "commentary", ItemStatus: "completed"}},
+	}, items)
+	require.NoError(t, err)
+	require.Equal(t, APIRequestLogTurnStatusOpen, turn.CompletionStatus)
+	require.NoError(t, db.Model(&APIRequestLogTurnItem{}).
+		Where("turn_record_id = ? AND provider_item_id = ?", turn.Id, "message-live").
+		Updates(map[string]interface{}{"message_phase": "final_answer", "item_status": "completed"}).Error)
+
+	stats, err := OrganizeAPIRequestLogTurns(t.Context(), db, APIRequestLogOrganizerOptions{
+		BatchSize: 10, LagSeconds: 0, IgnoreProgress: true,
+		now: func() time.Time { return time.Unix(base+100, 0) },
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), stats.Completed)
+	require.NoError(t, db.First(turn, turn.Id).Error)
+	require.Equal(t, APIRequestLogTurnStatusCompleted, turn.CompletionStatus)
+	require.Equal(t, log.CreatedAt, turn.CompletedAt)
+	require.Equal(t, "message.final.completed", turn.CompletionSignal)
+
+	var mapping APIRequestLogTurnItem
+	require.NoError(t, db.Where("turn_record_id = ? AND provider_item_id = ?", turn.Id, "message-live").First(&mapping).Error)
+	require.Equal(t, "final_answer", mapping.MessagePhase)
+	require.Equal(t, "completed", mapping.ItemStatus)
+}
+
 func TestOrganizeAPIRequestLogTurnsAcrossBatchesAndIdempotently(t *testing.T) {
 	db := setupAPIRequestLogOrganizerTestDB(t)
 	base := int64(1_780_000_000)

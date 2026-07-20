@@ -121,6 +121,11 @@ type apiRequestLogOrganizerDecision struct {
 	Rename   *apiRequestLogOrganizerRenameAction
 }
 
+type apiRequestLogOrganizerExistingTurn struct {
+	Turn     APIRequestLogTurn
+	ItemMeta []APIRequestLogTurnItemMeta
+}
+
 type apiRequestLogOrganizerTurnObservation struct {
 	Attribution string
 	Status      string
@@ -565,8 +570,8 @@ func loadAPIRequestLogOrganizerItems(ctx context.Context, db *gorm.DB, logs []AP
 	return byLog, nil
 }
 
-func loadAPIRequestLogOrganizerExistingTurns(ctx context.Context, db *gorm.DB, logs []APIRequestLog, dryRun bool) (map[int]APIRequestLogTurn, error) {
-	existing := make(map[int]APIRequestLogTurn)
+func loadAPIRequestLogOrganizerExistingTurns(ctx context.Context, db *gorm.DB, logs []APIRequestLog, dryRun bool) (map[int]apiRequestLogOrganizerExistingTurn, error) {
+	existing := make(map[int]apiRequestLogOrganizerExistingTurn)
 	if dryRun || len(logs) == 0 || !db.Migrator().HasTable(&APIRequestLogTurnRequest{}) {
 		return existing, nil
 	}
@@ -579,10 +584,10 @@ func loadAPIRequestLogOrganizerExistingTurns(ctx context.Context, db *gorm.DB, l
 		return nil, err
 	}
 	turnIDs := make([]int64, 0, len(requests))
-	requestByTurn := make(map[int64][]int)
+	turnByLog := make(map[int]int64, len(requests))
 	for _, request := range requests {
 		turnIDs = append(turnIDs, request.TurnRecordId)
-		requestByTurn[request.TurnRecordId] = append(requestByTurn[request.TurnRecordId], request.LogId)
+		turnByLog[request.LogId] = request.TurnRecordId
 	}
 	if len(turnIDs) == 0 {
 		return existing, nil
@@ -591,15 +596,49 @@ func loadAPIRequestLogOrganizerExistingTurns(ctx context.Context, db *gorm.DB, l
 	if err := db.WithContext(ctx).Where("id IN ?", uniquePositiveInt64s(turnIDs)).Find(&turns).Error; err != nil {
 		return nil, err
 	}
+	turnByID := make(map[int64]APIRequestLogTurn, len(turns))
 	for _, turn := range turns {
-		for _, logID := range requestByTurn[turn.Id] {
-			existing[logID] = turn
+		turnByID[turn.Id] = turn
+	}
+	for logID, turnID := range turnByLog {
+		if turn, ok := turnByID[turnID]; ok {
+			existing[logID] = apiRequestLogOrganizerExistingTurn{Turn: turn}
 		}
+	}
+	type existingItemMetaRow struct {
+		LogId          int
+		TurnRecordId   int64
+		Seq            int
+		ProviderItemId string
+		MessagePhase   string
+		ItemStatus     string
+	}
+	var itemMetaRows []existingItemMetaRow
+	if err := db.WithContext(ctx).
+		Table(apiRequestLogTurnItemsTable+" turn_item").
+		Select("turn_request.log_id, turn_item.turn_record_id, source_item.seq, turn_item.provider_item_id, turn_item.message_phase, turn_item.item_status").
+		Joins("JOIN "+apiRequestLogTurnRequestsTable+" turn_request ON turn_request.id = turn_item.request_record_id").
+		Joins("JOIN api_request_log_items source_item ON source_item.id = turn_item.source_item_id").
+		Where("turn_request.log_id IN ?", logIDs).
+		Order("turn_request.log_id ASC").Order("source_item.seq ASC").Order("turn_item.id ASC").
+		Scan(&itemMetaRows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range itemMetaRows {
+		observation, ok := existing[row.LogId]
+		if !ok {
+			continue
+		}
+		observation.ItemMeta = append(observation.ItemMeta, APIRequestLogTurnItemMeta{
+			Seq: row.Seq, ProviderItemId: row.ProviderItemId, TurnId: observation.Turn.TurnId,
+			MessagePhase: row.MessagePhase, ItemStatus: row.ItemStatus,
+		})
+		existing[row.LogId] = observation
 	}
 	return existing, nil
 }
 
-func planAPIRequestLogOrganizerDecision(ctx context.Context, db *gorm.DB, log APIRequestLog, rawItems []APIRequestLogItem, existing APIRequestLogTurn, states map[string]*apiRequestLogOrganizerSessionState, dryRun bool) (apiRequestLogOrganizerDecision, error) {
+func planAPIRequestLogOrganizerDecision(ctx context.Context, db *gorm.DB, log APIRequestLog, rawItems []APIRequestLogItem, existing apiRequestLogOrganizerExistingTurn, states map[string]*apiRequestLogOrganizerSessionState, dryRun bool) (apiRequestLogOrganizerDecision, error) {
 	canonical := organizerCanonicalItems(rawItems)
 	items := make([]APIRequestLogItem, 0, len(canonical))
 	for _, item := range canonical {
@@ -610,15 +649,17 @@ func planAPIRequestLogOrganizerDecision(ctx context.Context, db *gorm.DB, log AP
 	userSequence := organizerUserSequence(rawItems)
 	identity, hasIdentity := organizerIdentityForLog(log)
 
-	if existing.Id > 0 {
+	if existing.Turn.Id > 0 {
+		turn := existing.Turn
+		decision.ItemMeta = mergeAPIRequestLogOrganizerItemMeta(decision.ItemMeta, existing.ItemMeta)
 		decision.Meta = APIRequestLogTurnMeta{
-			SessionId: existing.SessionId, TurnId: existing.TurnId, Protocol: existing.Protocol,
-			StartedAt: existing.StartedAt, CompletedAt: existing.CompletedAt,
-			CompletionStatus: existing.CompletionStatus, Attribution: existing.Attribution,
-			WindowId: existing.WindowId, RequestKind: existing.RequestKind,
+			SessionId: turn.SessionId, TurnId: turn.TurnId, Protocol: turn.Protocol,
+			StartedAt: turn.StartedAt, CompletedAt: turn.CompletedAt,
+			CompletionStatus: turn.CompletionStatus, Attribution: turn.Attribution,
+			WindowId: turn.WindowId, RequestKind: turn.RequestKind,
 		}
-		if hasIdentity && existing.Attribution == APIRequestLogTurnAttributionInferred {
-			observeAPIRequestLogOrganizerExistingTurn(states, identity, existing, log, userSequence)
+		if hasIdentity && turn.Attribution == APIRequestLogTurnAttributionInferred {
+			observeAPIRequestLogOrganizerExistingTurn(states, identity, turn, log, userSequence)
 		}
 		return decision, nil
 	}
@@ -713,6 +754,35 @@ func planAPIRequestLogOrganizerDecision(ctx context.Context, db *gorm.DB, log AP
 	}
 	state.LastSeenAt = maxInt64(state.LastSeenAt, createdAt)
 	return decision, nil
+}
+
+func mergeAPIRequestLogOrganizerItemMeta(current, existing []APIRequestLogTurnItemMeta) []APIRequestLogTurnItemMeta {
+	merged := append([]APIRequestLogTurnItemMeta(nil), current...)
+	bySeq := make(map[int]int, len(merged))
+	for index := range merged {
+		bySeq[merged[index].Seq] = index
+	}
+	for _, item := range existing {
+		index, ok := bySeq[item.Seq]
+		if !ok {
+			bySeq[item.Seq] = len(merged)
+			merged = append(merged, item)
+			continue
+		}
+		if value := strings.TrimSpace(item.ProviderItemId); value != "" {
+			merged[index].ProviderItemId = value
+		}
+		if value := strings.TrimSpace(item.TurnId); value != "" {
+			merged[index].TurnId = value
+		}
+		if value := strings.TrimSpace(item.MessagePhase); value != "" {
+			merged[index].MessagePhase = value
+		}
+		if value := strings.TrimSpace(item.ItemStatus); value != "" {
+			merged[index].ItemStatus = value
+		}
+	}
+	return merged
 }
 
 func observeAPIRequestLogOrganizerExistingTurn(states map[string]*apiRequestLogOrganizerSessionState, identity apiRequestLogOrganizerIdentity, turn APIRequestLogTurn, log APIRequestLog, userSequence []string) {
