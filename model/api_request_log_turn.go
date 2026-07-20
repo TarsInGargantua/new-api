@@ -215,6 +215,8 @@ func MaterializeAPIRequestLogTurn(db *gorm.DB, log *APIRequestLog, meta APIReque
 		return nil, err
 	}
 	meta = normalizeAPIRequestLogTurnMeta(log, meta)
+	candidates := buildAPIRequestLogTurnCandidates(resolvedItems, meta)
+	inputKeys, contextKeys := apiRequestLogTurnCandidateFingerprints(candidates)
 
 	var result APIRequestLogTurn
 	err = db.Transaction(func(tx *gorm.DB) error {
@@ -237,8 +239,6 @@ func MaterializeAPIRequestLogTurn(db *gorm.DB, log *APIRequestLog, meta APIReque
 		if err != nil {
 			return err
 		}
-		candidates := buildAPIRequestLogTurnCandidates(resolvedItems, meta)
-		inputKeys, contextKeys := apiRequestLogTurnCandidateFingerprints(candidates)
 		prefixLength := longestAPIRequestLogTurnPrefix(inputKeys, priorInput, priorContext)
 
 		request, err := upsertAPIRequestLogTurnRequest(tx, turn.Id, log, inputKeys, contextKeys)
@@ -988,6 +988,20 @@ func mapAPIRequestLogTurnItems(tx *gorm.DB, turnRecordId, requestRecordId int64,
 		}
 	}
 
+	appendOnly := true
+	sawNewMapping := false
+	for index := range winners {
+		mapping := &winners[index].mapping
+		if mapping.Id <= 0 {
+			sawNewMapping = true
+			mapping.Ordinal = index + 1
+			continue
+		}
+		if sawNewMapping || mapping.Ordinal != index+1 {
+			appendOnly = false
+		}
+	}
+
 	newMappings := make([]APIRequestLogTurnItem, 0)
 	for _, winner := range winners {
 		mapping := winner.mapping
@@ -995,27 +1009,41 @@ func mapAPIRequestLogTurnItems(tx *gorm.DB, turnRecordId, requestRecordId int64,
 			newMappings = append(newMappings, mapping)
 			continue
 		}
-		updates := map[string]interface{}{
-			"provider_item_id": mapping.ProviderItemId,
-			"message_phase":    mapping.MessagePhase,
-			"item_status":      mapping.ItemStatus,
+		existing := existingById[mapping.Id]
+		updates := map[string]interface{}{}
+		if existing.ProviderItemId != mapping.ProviderItemId {
+			updates["provider_item_id"] = mapping.ProviderItemId
+		}
+		if existing.MessagePhase != mapping.MessagePhase {
+			updates["message_phase"] = mapping.MessagePhase
+		}
+		if existing.ItemStatus != mapping.ItemStatus {
+			updates["item_status"] = mapping.ItemStatus
+		}
+		if len(updates) == 0 {
+			continue
 		}
 		if err := tx.Model(&APIRequestLogTurnItem{}).Where("id = ?", mapping.Id).Updates(updates).Error; err != nil {
 			return err
 		}
 	}
 	if len(newMappings) > 0 {
-		var minOrdinal int
-		if err := tx.Model(&APIRequestLogTurnItem{}).Where("turn_record_id = ?", turnRecordId).Select("COALESCE(MIN(ordinal), 0)").Scan(&minOrdinal).Error; err != nil {
-			return err
-		}
-		temporaryStart := minOrdinal - len(newMappings) - 1
-		for index := range newMappings {
-			newMappings[index].Ordinal = temporaryStart + index
+		if !appendOnly {
+			var minOrdinal int
+			if err := tx.Model(&APIRequestLogTurnItem{}).Where("turn_record_id = ?", turnRecordId).Select("COALESCE(MIN(ordinal), 0)").Scan(&minOrdinal).Error; err != nil {
+				return err
+			}
+			temporaryStart := minOrdinal - len(newMappings) - 1
+			for index := range newMappings {
+				newMappings[index].Ordinal = temporaryStart + index
+			}
 		}
 		if err := tx.CreateInBatches(newMappings, 100).Error; err != nil {
 			return err
 		}
+	}
+	if appendOnly {
+		return nil
 	}
 	return reindexAPIRequestLogTurnItems(tx, turnRecordId)
 }
