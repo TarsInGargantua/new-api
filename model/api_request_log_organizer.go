@@ -15,6 +15,7 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 const (
@@ -149,7 +150,12 @@ func OpenAPIRequestLogOrganizerDB() (*gorm.DB, error) {
 	if strings.TrimSpace(common.GetEnvOrDefaultString("REQUEST_LOG_SQL_DSN", "")) == "" {
 		return nil, errors.New("REQUEST_LOG_SQL_DSN is required")
 	}
-	return chooseDedicatedRequestLogDB()
+	db, err := chooseDedicatedRequestLogDB()
+	if err != nil {
+		return nil, err
+	}
+	db.Logger = logger.Default.LogMode(logger.Silent)
+	return db, nil
 }
 
 func EnsureAPIRequestLogOrganizerStateTable(db *gorm.DB) error {
