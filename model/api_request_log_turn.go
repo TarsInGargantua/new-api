@@ -2,12 +2,14 @@ package model
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 
@@ -30,6 +32,7 @@ const (
 	apiRequestLogTurnRequestsTable = "api_request_log_turn_requests"
 	apiRequestLogTurnItemsTable    = "api_request_log_turn_items"
 	apiRequestLogTurnLockNamespace = int64(0x52514c5400000000)
+	apiRequestLogTurnMaxRetries    = 3
 )
 
 var errAPIRequestLogTurnClaimedDuringWrite = errors.New("request log turn was claimed for export during materialization")
@@ -221,59 +224,67 @@ func MaterializeAPIRequestLogTurn(db *gorm.DB, log *APIRequestLog, meta APIReque
 	inputKeys, contextKeys := apiRequestLogTurnCandidateFingerprints(candidates)
 
 	var result APIRequestLogTurn
-	err = db.Transaction(func(tx *gorm.DB) error {
-		turn, _, err := findOrCreateAPIRequestLogTurn(tx, log, meta)
-		if err != nil {
-			return err
-		}
-		result = *turn
-		if err := lockAPIRequestLogTurnForExportCoordination(tx, turn.Id); err != nil {
-			return err
-		}
-		exported, err := apiRequestLogTurnHasExportMember(tx, turn.Id)
-		if err != nil {
-			return err
-		}
-		if exported {
+	for attempt := 0; attempt < apiRequestLogTurnMaxRetries; attempt++ {
+		result = APIRequestLogTurn{}
+		err = db.Transaction(func(tx *gorm.DB) error {
+			turn, _, err := findOrCreateAPIRequestLogTurn(tx, log, meta)
+			if err != nil {
+				return err
+			}
+			result = *turn
+			if err := lockAPIRequestLogTurnForExportCoordination(tx, turn.Id); err != nil {
+				return err
+			}
+			exported, err := apiRequestLogTurnHasExportMember(tx, turn.Id)
+			if err != nil {
+				return err
+			}
+			if exported {
+				result = *turn
+				return nil
+			}
+			priorInput, priorContext, err := latestAPIRequestLogTurnFingerprints(tx, turn.OwnerFingerprint, turn.SessionId, normalizeAPIRequestLogTurnTimestamp(log.CreatedAt), log.Id)
+			if err != nil {
+				return err
+			}
+			prefixLength := longestAPIRequestLogTurnPrefix(inputKeys, priorInput, priorContext)
+
+			request, err := upsertAPIRequestLogTurnRequest(tx, turn.Id, log, inputKeys, contextKeys)
+			if err != nil {
+				return err
+			}
+			if err := mapAPIRequestLogTurnItems(tx, turn.Id, request.Id, candidates, prefixLength); err != nil {
+				return err
+			}
+			if err := refreshAPIRequestLogTurn(tx, turn, log, meta); err != nil {
+				return err
+			}
+			exported, err = lockAPIRequestLogTurnExportMember(tx, turn.Id)
+			if err != nil {
+				return err
+			}
+			if exported {
+				return errAPIRequestLogTurnClaimedDuringWrite
+			}
 			result = *turn
 			return nil
+		})
+		if errors.Is(err, errAPIRequestLogTurnClaimedDuringWrite) {
+			if loadErr := db.First(&result, result.Id).Error; loadErr != nil {
+				return nil, loadErr
+			}
+			return &result, nil
 		}
-		priorInput, priorContext, err := latestAPIRequestLogTurnFingerprints(tx, turn.OwnerFingerprint, turn.SessionId, normalizeAPIRequestLogTurnTimestamp(log.CreatedAt), log.Id)
-		if err != nil {
-			return err
+		if err == nil {
+			return &result, nil
 		}
-		prefixLength := longestAPIRequestLogTurnPrefix(inputKeys, priorInput, priorContext)
-
-		request, err := upsertAPIRequestLogTurnRequest(tx, turn.Id, log, inputKeys, contextKeys)
-		if err != nil {
-			return err
+		if !isRetryableAPIRequestLogDBError(err) || attempt == apiRequestLogTurnMaxRetries-1 {
+			return nil, err
 		}
-		if err := mapAPIRequestLogTurnItems(tx, turn.Id, request.Id, candidates, prefixLength); err != nil {
-			return err
-		}
-		if err := refreshAPIRequestLogTurn(tx, turn, log, meta); err != nil {
-			return err
-		}
-		exported, err = lockAPIRequestLogTurnExportMember(tx, turn.Id)
-		if err != nil {
-			return err
-		}
-		if exported {
-			return errAPIRequestLogTurnClaimedDuringWrite
-		}
-		result = *turn
-		return nil
-	})
-	if errors.Is(err, errAPIRequestLogTurnClaimedDuringWrite) {
-		if loadErr := db.First(&result, result.Id).Error; loadErr != nil {
-			return nil, loadErr
-		}
-		return &result, nil
+		delay := time.Duration((attempt+1)*10+(log.Id%17)) * time.Millisecond
+		time.Sleep(delay)
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &result, nil
+	return nil, err
 }
 
 func inheritAPIRequestLogTurnMetaForLog(db *gorm.DB, logId int, meta APIRequestLogTurnMeta) (APIRequestLogTurnMeta, error) {
@@ -561,19 +572,26 @@ func normalizeAPIRequestLogTurnAttribution(value string) string {
 func findOrCreateAPIRequestLogTurn(tx *gorm.DB, log *APIRequestLog, meta APIRequestLogTurnMeta) (*APIRequestLogTurn, bool, error) {
 	ownerFingerprint := apiRequestLogOwnerFingerprint(log)
 	var turn APIRequestLogTurn
-	query := tx.Where("owner_fingerprint = ? AND session_id = ? AND turn_id = ?", ownerFingerprint, meta.SessionId, meta.TurnId)
-	if tx.Dialector != nil && tx.Dialector.Name() != "sqlite" {
-		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
-	}
-	err := query.First(&turn).Error
+	err := tx.Where("owner_fingerprint = ? AND session_id = ? AND turn_id = ?", ownerFingerprint, meta.SessionId, meta.TurnId).First(&turn).Error
 	if err == nil {
+		if err := lockAPIRequestLogTurnByIdentity(tx, ownerFingerprint, meta.SessionId, meta.TurnId, &turn); err != nil {
+			return nil, false, err
+		}
 		return &turn, false, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, false, err
 	}
-	var maxIndex int
-	if err := tx.Model(&APIRequestLogTurn{}).Where("owner_fingerprint = ? AND session_id = ?", ownerFingerprint, meta.SessionId).Select("COALESCE(MAX(turn_index), 0)").Scan(&maxIndex).Error; err != nil {
+	maxIndex, err := lockAndGetAPIRequestLogTurnSessionMaxIndex(tx, ownerFingerprint, meta.SessionId)
+	if err != nil {
+		return nil, false, err
+	}
+	turn = APIRequestLogTurn{}
+	err = lockAPIRequestLogTurnByIdentity(tx, ownerFingerprint, meta.SessionId, meta.TurnId, &turn)
+	if err == nil {
+		return &turn, false, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, false, err
 	}
 	turn = APIRequestLogTurn{
@@ -601,14 +619,52 @@ func findOrCreateAPIRequestLogTurn(tx *gorm.DB, log *APIRequestLog, meta APIRequ
 		return nil, false, result.Error
 	}
 	created := result.RowsAffected > 0
-	query = tx.Where("owner_fingerprint = ? AND session_id = ? AND turn_id = ?", ownerFingerprint, meta.SessionId, meta.TurnId)
-	if tx.Dialector != nil && tx.Dialector.Name() != "sqlite" {
-		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
-	}
-	if err := query.First(&turn).Error; err != nil {
+	if err := lockAPIRequestLogTurnByIdentity(tx, ownerFingerprint, meta.SessionId, meta.TurnId, &turn); err != nil {
 		return nil, false, err
 	}
 	return &turn, created, nil
+}
+
+func lockAPIRequestLogTurnByIdentity(tx *gorm.DB, ownerFingerprint, sessionId, turnId string, turn *APIRequestLogTurn) error {
+	query := tx.Where("owner_fingerprint = ? AND session_id = ? AND turn_id = ?", ownerFingerprint, sessionId, turnId)
+	if tx.Dialector != nil && tx.Dialector.Name() != "sqlite" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	return query.First(turn).Error
+}
+
+func lockAndGetAPIRequestLogTurnSessionMaxIndex(tx *gorm.DB, ownerFingerprint, sessionId string) (int, error) {
+	dialect := ""
+	if tx.Dialector != nil {
+		dialect = tx.Dialector.Name()
+	}
+	if dialect == "postgres" {
+		lockId := apiRequestLogTurnLockNamespace ^ int64(apiRequestLogUint64Hash(ownerFingerprint+"\x00"+sessionId))
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", lockId).Error; err != nil {
+			return 0, err
+		}
+	}
+	type turnIndexRow struct {
+		TurnIndex int
+	}
+	var rows []turnIndexRow
+	query := tx.Model(&APIRequestLogTurn{}).
+		Select("turn_index").
+		Where("owner_fingerprint = ? AND session_id = ?", ownerFingerprint, sessionId).
+		Order("turn_index ASC").Order("id ASC")
+	if dialect == "mysql" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	if err := query.Find(&rows).Error; err != nil {
+		return 0, err
+	}
+	maxIndex := 0
+	for _, row := range rows {
+		if row.TurnIndex > maxIndex {
+			maxIndex = row.TurnIndex
+		}
+	}
+	return maxIndex, nil
 }
 
 func apiRequestLogTurnHasExportMember(tx *gorm.DB, turnRecordId int64) (bool, error) {
@@ -1505,6 +1561,11 @@ func apiRequestLogOwnerFingerprint(log *APIRequestLog) string {
 func apiRequestLogSHA256(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
+}
+
+func apiRequestLogUint64Hash(value string) uint64 {
+	digest := sha256.Sum256([]byte(value))
+	return binary.BigEndian.Uint64(digest[:8])
 }
 
 func marshalAPIRequestLogTurnFingerprints(values []string) (APIRequestLogBody, error) {
