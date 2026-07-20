@@ -74,7 +74,7 @@ func TestMaterializeAPIRequestLogTurnsMergesRequestsAndKeepsCurrentTurnOnly(t *t
 		Items: []APIRequestLogTurnItemMeta{
 			{Seq: 5, ProviderItemId: "assistant-1", TurnId: "turn-1"},
 			{Seq: 6, ProviderItemId: "tool-result-1", TurnId: "turn-1"},
-			{Seq: 7, ProviderItemId: "assistant-final-1", TurnId: "turn-1", MessagePhase: "final", ItemStatus: "completed"},
+			{Seq: 7, ProviderItemId: "assistant-final-1", TurnId: "turn-1", MessagePhase: "final_answer", ItemStatus: "completed"},
 		},
 	}, secondItems)
 	require.NoError(t, err)

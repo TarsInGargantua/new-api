@@ -448,7 +448,7 @@ func normalizeAPIRequestLogTurnMeta(log *APIRequestLog, meta APIRequestLogTurnMe
 			if strings.TrimSpace(itemMeta.TurnId) == "" {
 				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(itemMeta.MessagePhase), "final") && strings.EqualFold(strings.TrimSpace(itemMeta.ItemStatus), "completed") {
+			if IsAPIRequestLogFinalMessagePhase(itemMeta.MessagePhase) && strings.EqualFold(strings.TrimSpace(itemMeta.ItemStatus), "completed") {
 				meta.TurnId = strings.TrimSpace(itemMeta.TurnId)
 				break
 			}
@@ -461,7 +461,7 @@ func normalizeAPIRequestLogTurnMeta(log *APIRequestLog, meta APIRequestLogTurnMe
 		if strings.TrimSpace(itemMeta.TurnId) != "" && strings.TrimSpace(itemMeta.TurnId) != meta.TurnId {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(itemMeta.MessagePhase), "final") && strings.EqualFold(strings.TrimSpace(itemMeta.ItemStatus), "completed") {
+		if IsAPIRequestLogFinalMessagePhase(itemMeta.MessagePhase) && strings.EqualFold(strings.TrimSpace(itemMeta.ItemStatus), "completed") {
 			meta.CompletionStatus = APIRequestLogTurnStatusCompleted
 			meta.CompletionSignal = strongerAPIRequestLogTurnCompletionSignal(meta.CompletionSignal, "message.final.completed")
 			break
@@ -519,6 +519,15 @@ func normalizeAPIRequestLogTurnStatus(value string) string {
 		return APIRequestLogTurnStatusCompleted
 	default:
 		return APIRequestLogTurnStatusUnknown
+	}
+}
+
+func IsAPIRequestLogFinalMessagePhase(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "final", "final_answer":
+		return true
+	default:
+		return false
 	}
 }
 
