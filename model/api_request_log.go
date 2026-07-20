@@ -24,6 +24,10 @@ const (
 	APIRequestLogSchemaVersion = 1
 	apiRequestLogItemBatchSize = 20
 	apiRequestLogItemMaxRetry  = 3
+	requestLogDefaultMaxIdle   = 8
+	requestLogDefaultMaxOpen   = 32
+	requestLogDefaultLifetime  = 300
+	requestLogMaxLifetime      = time.Duration(1<<63 - 1)
 
 	APIRequestLogSourceLive     = "live"
 	APIRequestLogSourceLegacy   = "legacy_api_request_logs"
@@ -255,9 +259,10 @@ func InitRequestLogDB() error {
 	if err != nil {
 		return err
 	}
-	sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("REQUEST_LOG_SQL_MAX_IDLE_CONNS", common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100)))
-	sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("REQUEST_LOG_SQL_MAX_OPEN_CONNS", common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000)))
-	sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("REQUEST_LOG_SQL_MAX_LIFETIME", common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60))))
+	poolConfig := requestLogConnectionPoolConfigFromEnv()
+	sqlDB.SetMaxIdleConns(poolConfig.MaxIdleConns)
+	sqlDB.SetMaxOpenConns(poolConfig.MaxOpenConns)
+	sqlDB.SetConnMaxLifetime(poolConfig.MaxLifetime)
 	if common.GetEnvOrDefaultBool("REQUEST_LOG_DB_READ_ONLY", false) {
 		return nil
 	}
@@ -269,6 +274,40 @@ func InitRequestLogDB() error {
 	}
 	startAPIRequestLogItemWriters()
 	return nil
+}
+
+type requestLogConnectionPoolConfig struct {
+	MaxIdleConns int
+	MaxOpenConns int
+	MaxLifetime  time.Duration
+}
+
+func requestLogConnectionPoolConfigFromEnv() requestLogConnectionPoolConfig {
+	maxOpenConns := common.GetEnvOrDefault("REQUEST_LOG_SQL_MAX_OPEN_CONNS", requestLogDefaultMaxOpen)
+	if maxOpenConns < 1 {
+		maxOpenConns = 1
+	}
+	maxIdleConns := common.GetEnvOrDefault("REQUEST_LOG_SQL_MAX_IDLE_CONNS", requestLogDefaultMaxIdle)
+	if maxIdleConns < 0 {
+		maxIdleConns = 0
+	}
+	if maxIdleConns > maxOpenConns {
+		maxIdleConns = maxOpenConns
+	}
+	maxLifetimeSeconds := common.GetEnvOrDefault("REQUEST_LOG_SQL_MAX_LIFETIME", requestLogDefaultLifetime)
+	maxLifetime := time.Duration(0)
+	if maxLifetimeSeconds < 0 {
+		maxLifetime = 0
+	} else if int64(maxLifetimeSeconds) > int64(requestLogMaxLifetime/time.Second) {
+		maxLifetime = requestLogMaxLifetime
+	} else {
+		maxLifetime = time.Duration(maxLifetimeSeconds) * time.Second
+	}
+	return requestLogConnectionPoolConfig{
+		MaxIdleConns: maxIdleConns,
+		MaxOpenConns: maxOpenConns,
+		MaxLifetime:  maxLifetime,
+	}
 }
 
 func chooseDedicatedRequestLogDB() (*gorm.DB, error) {

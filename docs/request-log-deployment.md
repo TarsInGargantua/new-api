@@ -22,6 +22,9 @@ API_REQUEST_LOG_MAX_BODY_BYTES=4194304
 API_REQUEST_LOG_MAX_ITEM_BYTES=1048576
 API_REQUEST_LOG_MAX_QUEUE_BYTES=67108864
 CALL_LOG_EXCLUDED_USERNAMES=ryan
+REQUEST_LOG_SQL_MAX_IDLE_CONNS=8
+REQUEST_LOG_SQL_MAX_OPEN_CONNS=32
+REQUEST_LOG_SQL_MAX_LIFETIME=300
 REQUEST_LOG_SQL_DSN=newapi_request_log_app:<password>@tcp(<REMOTE_PUBLIC_HOST>:3306)/newapi_request_logs?charset=utf8mb4&parseTime=true&loc=Local
 ```
 
@@ -34,6 +37,7 @@ For high-concurrency or very large requests:
 - Keep `API_REQUEST_LOG_ASYNC_WRITE=false` for durable request-log capture. `CreateAPIRequestLog` returns only after the parent, parsed items, and turn mappings are persisted; `items_status=ok` therefore means all three completed.
 - The in-process item queue is volatile and can lose pending items on a crash or restart. It is enabled only when both `API_REQUEST_LOG_ASYNC_WRITE=true` and `API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE=true` explicitly accept that risk. Do not enable it for the current production deployment.
 - Queue size, worker count, and queue byte limits apply only when volatile async writes are explicitly enabled.
+- Keep the dedicated request-log pool below the MySQL connection limit. The defaults are 8 idle connections, 32 open connections, and a 300-second connection lifetime; each running gateway replica has its own pool.
 - `API_REQUEST_LOG_MAX_BODY_BYTES` limits captured request/response bytes before parsing. `0` disables body capture.
 - `API_REQUEST_LOG_MAX_ITEM_BYTES` truncates each parsed item before database insert. `0` disables item truncation.
 - `API_REQUEST_LOG_MAX_QUEUE_BYTES` caps queued item payload bytes in process memory. `0` disables this byte cap.
