@@ -468,7 +468,7 @@ func buildAPIRequestLogItems(c *gin.Context, relayInfo *relaycommon.RelayInfo, r
 
 func preferredAPIRequestLogTurnID(items []APIRequestLogTurnItemMeta) string {
 	for _, item := range items {
-		if item.MessagePhase == "final" && item.Status == "completed" && item.TurnID != "" {
+		if model.IsAPIRequestLogFinalMessagePhase(item.MessagePhase) && strings.EqualFold(strings.TrimSpace(item.Status), "completed") && item.TurnID != "" {
 			return item.TurnID
 		}
 	}
@@ -1025,7 +1025,7 @@ func apiRequestLogResponseItemCompleted(item map[string]interface{}) bool {
 	if item == nil || !strings.Contains(strings.ToLower(common.Interface2String(item["type"])), "message") {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(common.Interface2String(item["phase"])), "final") &&
+	return model.IsAPIRequestLogFinalMessagePhase(common.Interface2String(item["phase"])) &&
 		strings.EqualFold(strings.TrimSpace(common.Interface2String(item["status"])), "completed")
 }
 

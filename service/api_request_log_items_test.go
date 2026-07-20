@@ -94,10 +94,10 @@ func TestBuildAPIRequestLogTrainingItemsPreservesDeveloperRole(t *testing.T) {
 
 func TestAPIRequestLogSSECollectorKeepsOnlyCompletedResponsesItem(t *testing.T) {
 	collector := newAPIRequestLogSSECollector(false)
-	collector.Feed([]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"in_progress\",\"phase\":\"final\",\"content\":[]}}\n\n"))
+	collector.Feed([]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"in_progress\",\"phase\":\"final_answer\",\"content\":[]}}\n\n"))
 	collector.Feed([]byte("data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"hel\"}\n\n"))
-	collector.Feed([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"phase\":\"final\",\"role\":\"assistant\",\"metadata\":{\"turn_id\":\"turn_1\"},\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}\n\n"))
-	collector.Feed([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"phase\":\"final\",\"role\":\"assistant\",\"metadata\":{\"turn_id\":\"turn_1\"},\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}\n\n"))
+	collector.Feed([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"phase\":\"final_answer\",\"role\":\"assistant\",\"metadata\":{\"turn_id\":\"turn_1\"},\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}\n\n"))
+	collector.Feed([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"phase\":\"final_answer\",\"role\":\"assistant\",\"metadata\":{\"turn_id\":\"turn_1\"},\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}\n\n"))
 	collector.Feed([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}]}}\n\n"))
 
 	snapshot := collector.Snapshot()
@@ -114,7 +114,7 @@ func TestAPIRequestLogSSECollectorKeepsOnlyCompletedResponsesItem(t *testing.T) 
 		t.Fatalf("expected one item metadata row, got %d", len(snapshot.itemMeta))
 	}
 	meta := snapshot.itemMeta[0]
-	if meta.ProviderItemID != "msg_1" || meta.TurnID != "turn_1" || meta.MessagePhase != "final" || meta.Status != "completed" {
+	if meta.ProviderItemID != "msg_1" || meta.TurnID != "turn_1" || meta.MessagePhase != "final_answer" || meta.Status != "completed" {
 		t.Fatalf("unexpected item metadata: %+v", meta)
 	}
 }
