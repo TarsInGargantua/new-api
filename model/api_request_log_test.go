@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,6 +56,47 @@ func resetAPIRequestLogItemQueueForTest() {
 	}
 	apiRequestLogItemQueueMu.Unlock()
 	atomic.StoreInt64(&apiRequestLogQueuedItemBytes, 0)
+}
+
+func TestRequestLogConnectionPoolConfigUsesDedicatedSafeDefaults(t *testing.T) {
+	t.Setenv("REQUEST_LOG_SQL_MAX_IDLE_CONNS", "")
+	t.Setenv("REQUEST_LOG_SQL_MAX_OPEN_CONNS", "")
+	t.Setenv("REQUEST_LOG_SQL_MAX_LIFETIME", "")
+	t.Setenv("SQL_MAX_IDLE_CONNS", "100")
+	t.Setenv("SQL_MAX_OPEN_CONNS", "1000")
+	t.Setenv("SQL_MAX_LIFETIME", "60")
+
+	config := requestLogConnectionPoolConfigFromEnv()
+	require.Equal(t, requestLogDefaultMaxIdle, config.MaxIdleConns)
+	require.Equal(t, requestLogDefaultMaxOpen, config.MaxOpenConns)
+	require.Equal(t, time.Duration(requestLogDefaultLifetime)*time.Second, config.MaxLifetime)
+}
+
+func TestRequestLogConnectionPoolConfigClampsInvalidValues(t *testing.T) {
+	t.Setenv("REQUEST_LOG_SQL_MAX_IDLE_CONNS", "99")
+	t.Setenv("REQUEST_LOG_SQL_MAX_OPEN_CONNS", "12")
+	t.Setenv("REQUEST_LOG_SQL_MAX_LIFETIME", "600")
+
+	config := requestLogConnectionPoolConfigFromEnv()
+	require.Equal(t, 12, config.MaxIdleConns)
+	require.Equal(t, 12, config.MaxOpenConns)
+	require.Equal(t, 600*time.Second, config.MaxLifetime)
+
+	if strconv.IntSize == 64 {
+		t.Setenv("REQUEST_LOG_SQL_MAX_LIFETIME", "9223372036854775807")
+		config = requestLogConnectionPoolConfigFromEnv()
+		require.Equal(t, requestLogMaxLifetime, config.MaxLifetime)
+	}
+
+	t.Setenv("REQUEST_LOG_SQL_MAX_LIFETIME", "-1")
+	config = requestLogConnectionPoolConfigFromEnv()
+	require.Zero(t, config.MaxLifetime)
+
+	t.Setenv("REQUEST_LOG_SQL_MAX_IDLE_CONNS", "-1")
+	t.Setenv("REQUEST_LOG_SQL_MAX_OPEN_CONNS", "0")
+	config = requestLogConnectionPoolConfigFromEnv()
+	require.Zero(t, config.MaxIdleConns)
+	require.Equal(t, 1, config.MaxOpenConns)
 }
 
 func TestGetLogModelNames(t *testing.T) {
