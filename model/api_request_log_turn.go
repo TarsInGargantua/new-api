@@ -845,16 +845,30 @@ func reindexAPIRequestLogTurnRequests(tx *gorm.DB, turnRecordId int64) error {
 		Order("created_at ASC").Order("log_id ASC").Order("id ASC").Find(&requests).Error; err != nil {
 		return err
 	}
+	needsReindex := false
+	minSequence := 0
 	for index := range requests {
-		sequence := index + 1
-		if requests[index].Sequence == sequence {
-			continue
+		if requests[index].Sequence != index+1 {
+			needsReindex = true
 		}
-		if err := tx.Model(&APIRequestLogTurnRequest{}).Where("id = ?", requests[index].Id).Update("sequence", sequence).Error; err != nil {
-			return err
+		if requests[index].Sequence < minSequence {
+			minSequence = requests[index].Sequence
 		}
 	}
-	return nil
+	if !needsReindex {
+		return nil
+	}
+	temporaryStart := minSequence - len(requests) - 1
+	temporary := make([]apiRequestLogOrderingUpdate, len(requests))
+	final := make([]apiRequestLogOrderingUpdate, len(requests))
+	for index := range requests {
+		temporary[index] = apiRequestLogOrderingUpdate{Id: requests[index].Id, Value: temporaryStart + index}
+		final[index] = apiRequestLogOrderingUpdate{Id: requests[index].Id, Value: index + 1}
+	}
+	if err := bulkUpdateAPIRequestLogOrdering(tx, &APIRequestLogTurnRequest{}, "sequence", temporary); err != nil {
+		return err
+	}
+	return bulkUpdateAPIRequestLogOrdering(tx, &APIRequestLogTurnRequest{}, "sequence", final)
 }
 
 type apiRequestLogTurnItemProposal struct {
@@ -1147,13 +1161,41 @@ func reindexAPIRequestLogTurnItems(tx *gorm.DB, turnRecordId int64) error {
 		return nil
 	}
 	temporaryStart := minOrdinal - len(mappings) - 1
+	temporary := make([]apiRequestLogOrderingUpdate, len(mappings))
+	final := make([]apiRequestLogOrderingUpdate, len(mappings))
 	for index, mapping := range mappings {
-		if err := tx.Model(&APIRequestLogTurnItem{}).Where("id = ?", mapping.Id).Update("ordinal", temporaryStart+index).Error; err != nil {
-			return err
-		}
+		temporary[index] = apiRequestLogOrderingUpdate{Id: mapping.Id, Value: temporaryStart + index}
+		final[index] = apiRequestLogOrderingUpdate{Id: mapping.Id, Value: index + 1}
 	}
-	for index, mapping := range mappings {
-		if err := tx.Model(&APIRequestLogTurnItem{}).Where("id = ?", mapping.Id).Update("ordinal", index+1).Error; err != nil {
+	if err := bulkUpdateAPIRequestLogOrdering(tx, &APIRequestLogTurnItem{}, "ordinal", temporary); err != nil {
+		return err
+	}
+	return bulkUpdateAPIRequestLogOrdering(tx, &APIRequestLogTurnItem{}, "ordinal", final)
+}
+
+type apiRequestLogOrderingUpdate struct {
+	Id    int64
+	Value int
+}
+
+func bulkUpdateAPIRequestLogOrdering(tx *gorm.DB, table interface{}, column string, updates []apiRequestLogOrderingUpdate) error {
+	for start := 0; start < len(updates); start += 100 {
+		end := start + 100
+		if end > len(updates) {
+			end = len(updates)
+		}
+		chunk := updates[start:end]
+		var expression strings.Builder
+		expression.WriteString("CASE id")
+		args := make([]interface{}, 0, len(chunk)*2)
+		ids := make([]int64, 0, len(chunk))
+		for _, update := range chunk {
+			expression.WriteString(" WHEN ? THEN ?")
+			args = append(args, update.Id, update.Value)
+			ids = append(ids, update.Id)
+		}
+		expression.WriteString(" END")
+		if err := tx.Model(table).Where("id IN ?", ids).Update(column, gorm.Expr(expression.String(), args...)).Error; err != nil {
 			return err
 		}
 	}
