@@ -1,9 +1,12 @@
 package service
 
 import (
+	"bytes"
+	"compress/gzip"
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -20,6 +23,8 @@ const apiRequestLogRecordedKey = "api_request_log_recorded"
 const apiRequestLogRecordedUsageIdsKey = "api_request_log_recorded_usage_ids"
 const apiRequestLogPendingUsageKey = "api_request_log_pending_usage"
 const APIRequestLogOriginalPathKey = "api_request_log_original_path"
+
+const apiRequestLogResponseWireOverheadBytes = 64 * 1024
 
 type apiRequestLogWriter struct {
 	gin.ResponseWriter
@@ -44,7 +49,7 @@ func (w *apiRequestLogWriter) capture(data []byte) {
 	if w.buffer != nil {
 		w.buffer.Write(data)
 	}
-	if w.stream != nil {
+	if w.stream != nil && isAPIRequestLogIdentityContentEncoding(w.ResponseWriter.Header().Values("Content-Encoding")) {
 		w.stream.Feed(data)
 	}
 }
@@ -113,7 +118,7 @@ func StartAPIRequestLogCapture(c *gin.Context) {
 	}
 	writer := &apiRequestLogWriter{
 		ResponseWriter: c.Writer,
-		buffer:         newLimitedAuditBuffer(common.APIRequestLogMaxBodyBytes),
+		buffer:         newLimitedAuditBuffer(apiRequestLogResponseWireLimit(common.APIRequestLogMaxBodyBytes)),
 		stream:         newAPIRequestLogSSECollector(common.APIRequestLogRedactSecrets),
 	}
 	c.Writer = writer
@@ -423,6 +428,36 @@ func buildResponseLogBody(c *gin.Context) apiRequestLogBody {
 			omittedReason: "non_text_content_type",
 		}
 	}
+	contentEncoding, supported := apiRequestLogContentEncoding(c.Writer.Header().Values("Content-Encoding"))
+	if !supported {
+		return apiRequestLogBody{
+			contentType:   contentType,
+			size:          seen,
+			omittedReason: "unsupported_content_encoding",
+		}
+	}
+	if contentEncoding == "gzip" {
+		if truncated {
+			return apiRequestLogBody{
+				contentType:   contentType,
+				size:          seen,
+				omittedReason: "gzip_wire_too_large",
+			}
+		}
+		decoded, omittedReason := decodeAPIRequestLogGzipBody(body, common.APIRequestLogMaxBodyBytes)
+		if omittedReason != "" {
+			return apiRequestLogBody{
+				contentType:   contentType,
+				size:          seen,
+				omittedReason: omittedReason,
+			}
+		}
+		body = decoded
+	} else {
+		var bodyTruncated bool
+		body, bodyTruncated = limitAPIRequestLogResponseBody(body, common.APIRequestLogMaxBodyBytes)
+		truncated = truncated || bodyTruncated
+	}
 	text, redacted := auditBodyToStringWithRedact(body, contentType, common.APIRequestLogRedactSecrets)
 	return apiRequestLogBody{
 		body:          text,
@@ -431,6 +466,83 @@ func buildResponseLogBody(c *gin.Context) apiRequestLogBody {
 		omittedReason: truncatedReason(truncated),
 		redacted:      redacted,
 	}
+}
+
+func apiRequestLogContentEncoding(values []string) (string, bool) {
+	var encodings []string
+	for _, value := range values {
+		for _, encoding := range strings.Split(value, ",") {
+			encoding = strings.ToLower(strings.TrimSpace(encoding))
+			if encoding != "" {
+				encodings = append(encodings, encoding)
+			}
+		}
+	}
+	if len(encodings) == 0 || (len(encodings) == 1 && encodings[0] == "identity") {
+		return "", true
+	}
+	if len(encodings) == 1 && encodings[0] == "gzip" {
+		return "gzip", true
+	}
+	return "", false
+}
+
+func isAPIRequestLogIdentityContentEncoding(values []string) bool {
+	encoding, supported := apiRequestLogContentEncoding(values)
+	return supported && encoding == ""
+}
+
+func apiRequestLogResponseWireLimit(bodyLimit int) int {
+	if bodyLimit <= 0 {
+		return 0
+	}
+	maxInt := int(^uint(0) >> 1)
+	if bodyLimit > maxInt-apiRequestLogResponseWireOverheadBytes {
+		return maxInt
+	}
+	return bodyLimit + apiRequestLogResponseWireOverheadBytes
+}
+
+func limitAPIRequestLogResponseBody(body []byte, limit int) ([]byte, bool) {
+	if limit <= 0 {
+		return nil, len(body) > 0
+	}
+	if len(body) <= limit {
+		return body, false
+	}
+	return body[:limit], true
+}
+
+func decodeAPIRequestLogGzipBody(body []byte, limit int) ([]byte, string) {
+	reader, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, "gzip_decode_failed"
+	}
+
+	if limit < 0 {
+		limit = 0
+	}
+	readLimit := int64(limit)
+	if limit < int(^uint(0)>>1) {
+		readLimit++
+	}
+	decoded, readErr := io.ReadAll(io.LimitReader(reader, readLimit))
+	if len(decoded) > limit {
+		_ = reader.Close()
+		return nil, "gzip_decompressed_too_large"
+	}
+	if readErr != nil {
+		_ = reader.Close()
+		return nil, "gzip_read_failed"
+	}
+	if closeErr := reader.Close(); closeErr != nil {
+		return nil, "gzip_close_failed"
+	}
+
+	if !utf8.Valid(decoded) {
+		return nil, "gzip_invalid_utf8"
+	}
+	return decoded, ""
 }
 
 func readAPIRequestLogBodyStorage(storage common.BodyStorage) ([]byte, int64, bool, error) {
