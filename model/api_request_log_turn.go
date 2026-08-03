@@ -2,7 +2,6 @@ package model
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -31,11 +30,8 @@ const (
 	apiRequestLogTurnsTable        = "api_request_log_turns"
 	apiRequestLogTurnRequestsTable = "api_request_log_turn_requests"
 	apiRequestLogTurnItemsTable    = "api_request_log_turn_items"
-	apiRequestLogTurnLockNamespace = int64(0x52514c5400000000)
 	apiRequestLogTurnMaxRetries    = 3
 )
-
-var errAPIRequestLogTurnClaimedDuringWrite = errors.New("request log turn was claimed for export during materialization")
 
 // APIRequestLogTurnMeta is normalized provider metadata for one agent turn.
 // StartedAt and CompletedAt accept Unix seconds or Unix milliseconds.
@@ -62,43 +58,58 @@ type APIRequestLogTurnItemMeta struct {
 }
 
 type APIRequestLogTurn struct {
-	Id               int64  `json:"id" gorm:"primaryKey"`
-	OwnerFingerprint string `json:"-" gorm:"type:char(64);not null;uniqueIndex:idx_api_request_log_turn_identity,priority:1;index:idx_api_request_log_turn_owner_session,priority:1"`
-	SessionId        string `json:"session_id" gorm:"type:varchar(191);not null;uniqueIndex:idx_api_request_log_turn_identity,priority:2;index:idx_api_request_log_turn_session_index,priority:1;index:idx_api_request_log_turn_owner_session,priority:2"`
-	TurnId           string `json:"turn_id" gorm:"type:varchar(191);not null;uniqueIndex:idx_api_request_log_turn_identity,priority:3"`
-	Protocol         string `json:"protocol" gorm:"type:varchar(32);index;default:'unknown'"`
-	TurnIndex        int    `json:"turn_index" gorm:"index:idx_api_request_log_turn_session_index,priority:2;default:1"`
-	WindowId         string `json:"window_id,omitempty" gorm:"type:varchar(191);index;default:''"`
-	RequestKind      string `json:"request_kind,omitempty" gorm:"type:varchar(64);index;default:''"`
-	StartedAt        int64  `json:"started_at" gorm:"bigint;index"`
-	CompletedAt      int64  `json:"completed_at" gorm:"bigint;index"`
-	CompletionStatus string `json:"completion_status" gorm:"type:varchar(16);index;default:'unknown'"`
-	CompletionSignal string `json:"completion_signal,omitempty" gorm:"type:varchar(128);index;default:''"`
-	Attribution      string `json:"attribution" gorm:"type:varchar(16);index;default:'unknown'"`
-	UserId           int    `json:"user_id" gorm:"index;default:0"`
-	Username         string `json:"username" gorm:"index;default:''"`
-	TokenId          int    `json:"token_id" gorm:"index;default:0"`
-	TokenName        string `json:"token_name" gorm:"index;default:''"`
-	TokenFingerprint string `json:"token_fingerprint,omitempty" gorm:"type:varchar(64);index;default:''"`
-	ModelName        string `json:"model_name" gorm:"index;default:''"`
-	RequestCount     int    `json:"request_count" gorm:"default:0"`
-	ItemCount        int    `json:"item_count" gorm:"default:0"`
-	PromptTokens     int    `json:"prompt_tokens" gorm:"default:0"`
-	CompletionTokens int    `json:"completion_tokens" gorm:"default:0"`
-	TokenUsed        int    `json:"token_used" gorm:"default:0"`
-	Quota            int    `json:"quota" gorm:"default:0"`
+	Id                     int64  `json:"id" gorm:"primaryKey;index:idx_api_request_log_turn_owner_session_order,priority:4"`
+	OwnerFingerprint       string `json:"-" gorm:"type:char(64);not null;uniqueIndex:idx_api_request_log_turn_identity,priority:1;index:idx_api_request_log_turn_owner_session,priority:1;index:idx_api_request_log_turn_owner_session_order,priority:1"`
+	SessionId              string `json:"session_id" gorm:"type:varchar(191);not null;uniqueIndex:idx_api_request_log_turn_identity,priority:2;index:idx_api_request_log_turn_session_index,priority:1;index:idx_api_request_log_turn_owner_session,priority:2;index:idx_api_request_log_turn_owner_session_order,priority:2"`
+	TurnId                 string `json:"turn_id" gorm:"type:varchar(191);not null;uniqueIndex:idx_api_request_log_turn_identity,priority:3"`
+	Protocol               string `json:"protocol" gorm:"type:varchar(32);index;default:'unknown'"`
+	TurnIndex              int    `json:"turn_index" gorm:"index:idx_api_request_log_turn_session_index,priority:2;index:idx_api_request_log_turn_owner_session_order,priority:3;default:1"`
+	WindowId               string `json:"window_id,omitempty" gorm:"type:varchar(191);index;default:''"`
+	RequestKind            string `json:"request_kind,omitempty" gorm:"type:varchar(64);index;default:''"`
+	StartedAt              int64  `json:"started_at" gorm:"bigint;index"`
+	CompletedAt            int64  `json:"completed_at" gorm:"bigint;index"`
+	CompletionStatus       string `json:"completion_status" gorm:"type:varchar(16);index;default:'unknown'"`
+	CompletionSignal       string `json:"completion_signal,omitempty" gorm:"type:varchar(128);index;default:''"`
+	Attribution            string `json:"attribution" gorm:"type:varchar(16);index;default:'unknown'"`
+	UserId                 int    `json:"user_id" gorm:"index;default:0"`
+	Username               string `json:"username" gorm:"index;default:''"`
+	TokenId                int    `json:"token_id" gorm:"index;default:0"`
+	TokenName              string `json:"token_name" gorm:"index;default:''"`
+	TokenFingerprint       string `json:"token_fingerprint,omitempty" gorm:"type:varchar(64);index;default:''"`
+	ModelName              string `json:"model_name" gorm:"index;default:''"`
+	RequestCount           int    `json:"request_count" gorm:"default:0"`
+	ItemCount              int    `json:"item_count" gorm:"default:0"`
+	PromptTokens           int    `json:"prompt_tokens" gorm:"default:0"`
+	CompletionTokens       int    `json:"completion_tokens" gorm:"default:0"`
+	TokenUsed              int    `json:"token_used" gorm:"default:0"`
+	Quota                  int    `json:"quota" gorm:"default:0"`
+	MaterializationVersion int64  `json:"materialization_version" gorm:"not null;default:0"`
+	ExportedVersion        int64  `json:"exported_version" gorm:"not null;default:0;index"`
 }
 
 func (APIRequestLogTurn) TableName() string { return apiRequestLogTurnsTable }
 
+type APIRequestLogTurnSessionState struct {
+	Id               int64  `json:"id" gorm:"primaryKey"`
+	OwnerFingerprint string `json:"-" gorm:"type:char(64);not null;uniqueIndex:idx_api_request_log_turn_session_state,priority:1"`
+	SessionId        string `json:"session_id" gorm:"type:varchar(191);not null;uniqueIndex:idx_api_request_log_turn_session_state,priority:2"`
+	NextTurnIndex    int    `json:"next_turn_index" gorm:"not null;default:1"`
+	CreatedAt        int64  `json:"created_at" gorm:"autoCreateTime"`
+	UpdatedAt        int64  `json:"updated_at" gorm:"autoUpdateTime"`
+}
+
+func (APIRequestLogTurnSessionState) TableName() string {
+	return "api_request_log_turn_session_states"
+}
+
 type APIRequestLogTurnRequest struct {
-	Id                 int64             `json:"id" gorm:"primaryKey"`
-	TurnRecordId       int64             `json:"turn_record_id" gorm:"not null;index:idx_api_request_log_turn_request_sequence,priority:1"`
-	LogId              int               `json:"log_id" gorm:"not null;uniqueIndex"`
+	Id                 int64             `json:"id" gorm:"primaryKey;index:idx_api_request_log_turn_request_order,priority:4"`
+	TurnRecordId       int64             `json:"turn_record_id" gorm:"not null;index:idx_api_request_log_turn_request_sequence,priority:1;index:idx_api_request_log_turn_request_order,priority:1"`
+	LogId              int               `json:"log_id" gorm:"not null;uniqueIndex;index:idx_api_request_log_turn_request_order,priority:3"`
 	Sequence           int               `json:"sequence" gorm:"index:idx_api_request_log_turn_request_sequence,priority:2"`
 	RequestId          string            `json:"request_id,omitempty" gorm:"type:varchar(64);index;default:''"`
 	UpstreamRequestId  string            `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index;default:''"`
-	CreatedAt          int64             `json:"created_at" gorm:"bigint;index"`
+	CreatedAt          int64             `json:"created_at" gorm:"bigint;index;index:idx_api_request_log_turn_request_order,priority:2"`
 	StatusCode         int               `json:"status_code" gorm:"default:0"`
 	IsStream           bool              `json:"is_stream"`
 	PromptTokens       int               `json:"prompt_tokens" gorm:"default:0"`
@@ -197,7 +208,7 @@ func EnsureAPIRequestLogTurnTables(db *gorm.DB) error {
 	if db == nil {
 		return errors.New("request log database is not initialized")
 	}
-	return db.AutoMigrate(&APIRequestLogTurn{}, &APIRequestLogTurnRequest{}, &APIRequestLogTurnItem{})
+	return db.AutoMigrate(&APIRequestLogTurn{}, &APIRequestLogTurnRequest{}, &APIRequestLogTurnItem{}, &APIRequestLogTurnSessionState{})
 }
 
 // MaterializeAPIRequestLogTurn idempotently associates one raw request and its
@@ -222,20 +233,29 @@ func MaterializeAPIRequestLogTurn(db *gorm.DB, log *APIRequestLog, meta APIReque
 	meta = normalizeAPIRequestLogTurnMeta(log, meta)
 	candidates := buildAPIRequestLogTurnCandidates(resolvedItems, meta)
 	inputKeys, contextKeys := apiRequestLogTurnCandidateFingerprints(candidates)
+	var ensuredTurn *APIRequestLogTurn
+	for attempt := 0; attempt < apiRequestLogTurnMaxRetries; attempt++ {
+		ensuredTurn, err = ensureAPIRequestLogTurn(db, log, meta)
+		if err == nil {
+			break
+		}
+		if !isRetryableAPIRequestLogDBError(err) || attempt == apiRequestLogTurnMaxRetries-1 {
+			return nil, err
+		}
+		delay := time.Duration((attempt+1)*10+(log.Id%17)) * time.Millisecond
+		time.Sleep(delay)
+	}
 
 	var result APIRequestLogTurn
 	for attempt := 0; attempt < apiRequestLogTurnMaxRetries; attempt++ {
 		result = APIRequestLogTurn{}
 		err = db.Transaction(func(tx *gorm.DB) error {
-			turn, _, err := findOrCreateAPIRequestLogTurn(tx, log, meta)
-			if err != nil {
+			turn := &APIRequestLogTurn{Id: ensuredTurn.Id}
+			if err := lockAPIRequestLogTurnByID(tx, ensuredTurn.Id, turn); err != nil {
 				return err
 			}
 			result = *turn
-			if err := lockAPIRequestLogTurnForExportCoordination(tx, turn.Id); err != nil {
-				return err
-			}
-			exported, err := apiRequestLogTurnHasExportMember(tx, turn.Id)
+			exported, err := apiRequestLogTurnIsFrozen(tx, turn)
 			if err != nil {
 				return err
 			}
@@ -259,22 +279,9 @@ func MaterializeAPIRequestLogTurn(db *gorm.DB, log *APIRequestLog, meta APIReque
 			if err := refreshAPIRequestLogTurn(tx, turn, log, meta); err != nil {
 				return err
 			}
-			exported, err = lockAPIRequestLogTurnExportMember(tx, turn.Id)
-			if err != nil {
-				return err
-			}
-			if exported {
-				return errAPIRequestLogTurnClaimedDuringWrite
-			}
 			result = *turn
 			return nil
 		})
-		if errors.Is(err, errAPIRequestLogTurnClaimedDuringWrite) {
-			if loadErr := db.First(&result, result.Id).Error; loadErr != nil {
-				return nil, loadErr
-			}
-			return &result, nil
-		}
 		if err == nil {
 			return &result, nil
 		}
@@ -285,6 +292,150 @@ func MaterializeAPIRequestLogTurn(db *gorm.DB, log *APIRequestLog, meta APIReque
 		time.Sleep(delay)
 	}
 	return nil, err
+}
+
+func ensureAPIRequestLogTurn(db *gorm.DB, log *APIRequestLog, meta APIRequestLogTurnMeta) (*APIRequestLogTurn, error) {
+	ownerFingerprint := apiRequestLogOwnerFingerprint(log)
+	var existing APIRequestLogTurn
+	err := db.Where("owner_fingerprint = ? AND session_id = ? AND turn_id = ?", ownerFingerprint, meta.SessionId, meta.TurnId).First(&existing).Error
+	if err == nil {
+		return &existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	var result APIRequestLogTurn
+	err = db.Transaction(func(tx *gorm.DB) error {
+		existing = APIRequestLogTurn{}
+		lookup := tx.Where("owner_fingerprint = ? AND session_id = ? AND turn_id = ?", ownerFingerprint, meta.SessionId, meta.TurnId)
+		if tx.Dialector != nil && tx.Dialector.Name() != "sqlite" {
+			lookup = lookup.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		err := lookup.First(&existing).Error
+		if err == nil {
+			result = existing
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		turnIndex, err := allocateAPIRequestLogTurnIndex(tx, ownerFingerprint, meta.SessionId)
+		if err != nil {
+			return err
+		}
+		turn := newAPIRequestLogTurn(log, meta, ownerFingerprint, turnIndex)
+		create := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "owner_fingerprint"}, {Name: "session_id"}, {Name: "turn_id"}},
+			DoNothing: true,
+		}).Create(&turn)
+		if create.Error != nil {
+			return create.Error
+		}
+		if create.RowsAffected > 0 {
+			result = turn
+			return nil
+		}
+		return tx.Where("owner_fingerprint = ? AND session_id = ? AND turn_id = ?", ownerFingerprint, meta.SessionId, meta.TurnId).First(&result).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func allocateAPIRequestLogTurnIndex(tx *gorm.DB, ownerFingerprint, sessionId string) (int, error) {
+	var state APIRequestLogTurnSessionState
+	query := tx.Where("owner_fingerprint = ? AND session_id = ?", ownerFingerprint, sessionId)
+	if tx.Dialector != nil && tx.Dialector.Name() != "sqlite" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	err := query.First(&state).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		var maxIndex int
+		if err := tx.Model(&APIRequestLogTurn{}).
+			Where("owner_fingerprint = ? AND session_id = ?", ownerFingerprint, sessionId).
+			Select("COALESCE(MAX(turn_index), 0)").Scan(&maxIndex).Error; err != nil {
+			return 0, err
+		}
+		allocated := maxIndex + 1
+		state = APIRequestLogTurnSessionState{
+			OwnerFingerprint: ownerFingerprint,
+			SessionId:        sessionId,
+			NextTurnIndex:    allocated + 1,
+		}
+		create := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "owner_fingerprint"}, {Name: "session_id"}},
+			DoNothing: true,
+		}).Create(&state)
+		if create.Error != nil {
+			return 0, create.Error
+		}
+		if create.RowsAffected > 0 {
+			return allocated, nil
+		}
+		state = APIRequestLogTurnSessionState{}
+		reload := tx.Where("owner_fingerprint = ? AND session_id = ?", ownerFingerprint, sessionId)
+		if tx.Dialector != nil && tx.Dialector.Name() != "sqlite" {
+			reload = reload.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := reload.First(&state).Error; err != nil {
+			return 0, err
+		}
+		allocated = state.NextTurnIndex
+		if allocated < 1 {
+			allocated = 1
+		}
+		if err := tx.Model(&APIRequestLogTurnSessionState{}).
+			Where("id = ?", state.Id).
+			Update("next_turn_index", allocated+1).Error; err != nil {
+			return 0, err
+		}
+		return allocated, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	allocated := state.NextTurnIndex
+	if allocated < 1 {
+		allocated = 1
+	}
+	if err := tx.Model(&APIRequestLogTurnSessionState{}).
+		Where("id = ?", state.Id).
+		Update("next_turn_index", allocated+1).Error; err != nil {
+		return 0, err
+	}
+	return allocated, nil
+}
+
+func newAPIRequestLogTurn(log *APIRequestLog, meta APIRequestLogTurnMeta, ownerFingerprint string, turnIndex int) APIRequestLogTurn {
+	return APIRequestLogTurn{
+		OwnerFingerprint: ownerFingerprint,
+		SessionId:        meta.SessionId,
+		TurnId:           meta.TurnId,
+		Protocol:         meta.Protocol,
+		TurnIndex:        turnIndex,
+		WindowId:         meta.WindowId,
+		RequestKind:      meta.RequestKind,
+		StartedAt:        meta.StartedAt,
+		CompletedAt:      meta.CompletedAt,
+		CompletionStatus: meta.CompletionStatus,
+		CompletionSignal: meta.CompletionSignal,
+		Attribution:      meta.Attribution,
+		UserId:           log.UserId,
+		Username:         log.Username,
+		TokenId:          log.TokenId,
+		TokenName:        log.TokenName,
+		TokenFingerprint: apiRequestLogTokenFingerprint(log),
+		ModelName:        log.ModelName,
+	}
+}
+
+func lockAPIRequestLogTurnByID(tx *gorm.DB, turnId int64, turn *APIRequestLogTurn) error {
+	query := tx.Where("id = ?", turnId)
+	if tx.Dialector != nil && tx.Dialector.Name() != "sqlite" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	return query.First(turn).Error
 }
 
 func inheritAPIRequestLogTurnMetaForLog(db *gorm.DB, logId int, meta APIRequestLogTurnMeta) (APIRequestLogTurnMeta, error) {
@@ -446,11 +597,10 @@ func buildAPIRequestLogTurnsQuery(db *gorm.DB, params APIRequestLogTurnQueryPara
 		tx = tx.Where("completed_at < ?", normalizeAPIRequestLogTurnTimestamp(params.EndTimestamp))
 	}
 	if params.Exported != nil {
-		existsSQL := "EXISTS (SELECT 1 FROM " + apiRequestLogExportMembersTable + " export_member WHERE export_member.turn_record_id = " + apiRequestLogTurnsTable + ".id)"
 		if *params.Exported {
-			tx = tx.Where(existsSQL)
+			tx = tx.Where(apiRequestLogTurnExportedSQL())
 		} else {
-			tx = tx.Where("NOT " + existsSQL)
+			tx = tx.Where("NOT " + apiRequestLogTurnExportedSQL())
 		}
 	}
 	return tx
@@ -582,43 +732,20 @@ func findOrCreateAPIRequestLogTurn(tx *gorm.DB, log *APIRequestLog, meta APIRequ
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, false, err
 	}
-	maxIndex, err := lockAndGetAPIRequestLogTurnSessionMaxIndex(tx, ownerFingerprint, meta.SessionId)
+	turnIndex, err := allocateAPIRequestLogTurnIndex(tx, ownerFingerprint, meta.SessionId)
 	if err != nil {
 		return nil, false, err
 	}
-	turn = APIRequestLogTurn{}
-	err = lockAPIRequestLogTurnByIdentity(tx, ownerFingerprint, meta.SessionId, meta.TurnId, &turn)
-	if err == nil {
-		return &turn, false, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, false, err
-	}
-	turn = APIRequestLogTurn{
-		OwnerFingerprint: ownerFingerprint,
-		SessionId:        meta.SessionId,
-		TurnId:           meta.TurnId,
-		Protocol:         meta.Protocol,
-		TurnIndex:        maxIndex + 1,
-		WindowId:         meta.WindowId,
-		RequestKind:      meta.RequestKind,
-		StartedAt:        meta.StartedAt,
-		CompletedAt:      meta.CompletedAt,
-		CompletionStatus: meta.CompletionStatus,
-		CompletionSignal: meta.CompletionSignal,
-		Attribution:      meta.Attribution,
-		UserId:           log.UserId,
-		Username:         log.Username,
-		TokenId:          log.TokenId,
-		TokenName:        log.TokenName,
-		TokenFingerprint: apiRequestLogTokenFingerprint(log),
-		ModelName:        log.ModelName,
-	}
+	turn = newAPIRequestLogTurn(log, meta, ownerFingerprint, turnIndex)
 	result := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "owner_fingerprint"}, {Name: "session_id"}, {Name: "turn_id"}}, DoNothing: true}).Create(&turn)
 	if result.Error != nil {
 		return nil, false, result.Error
 	}
 	created := result.RowsAffected > 0
+	if created {
+		return &turn, true, nil
+	}
+	turn = APIRequestLogTurn{}
 	if err := lockAPIRequestLogTurnByIdentity(tx, ownerFingerprint, meta.SessionId, meta.TurnId, &turn); err != nil {
 		return nil, false, err
 	}
@@ -633,40 +760,6 @@ func lockAPIRequestLogTurnByIdentity(tx *gorm.DB, ownerFingerprint, sessionId, t
 	return query.First(turn).Error
 }
 
-func lockAndGetAPIRequestLogTurnSessionMaxIndex(tx *gorm.DB, ownerFingerprint, sessionId string) (int, error) {
-	dialect := ""
-	if tx.Dialector != nil {
-		dialect = tx.Dialector.Name()
-	}
-	if dialect == "postgres" {
-		lockId := apiRequestLogTurnLockNamespace ^ int64(apiRequestLogUint64Hash(ownerFingerprint+"\x00"+sessionId))
-		if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", lockId).Error; err != nil {
-			return 0, err
-		}
-	}
-	type turnIndexRow struct {
-		TurnIndex int
-	}
-	var rows []turnIndexRow
-	query := tx.Model(&APIRequestLogTurn{}).
-		Select("turn_index").
-		Where("owner_fingerprint = ? AND session_id = ?", ownerFingerprint, sessionId).
-		Order("turn_index ASC").Order("id ASC")
-	if dialect == "mysql" {
-		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
-	}
-	if err := query.Find(&rows).Error; err != nil {
-		return 0, err
-	}
-	maxIndex := 0
-	for _, row := range rows {
-		if row.TurnIndex > maxIndex {
-			maxIndex = row.TurnIndex
-		}
-	}
-	return maxIndex, nil
-}
-
 func apiRequestLogTurnHasExportMember(tx *gorm.DB, turnRecordId int64) (bool, error) {
 	if turnRecordId <= 0 {
 		return false, nil
@@ -678,30 +771,14 @@ func apiRequestLogTurnHasExportMember(tx *gorm.DB, turnRecordId int64) (bool, er
 	return count > 0, nil
 }
 
-func lockAPIRequestLogTurnExportMember(tx *gorm.DB, turnRecordId int64) (bool, error) {
-	if turnRecordId <= 0 {
+func apiRequestLogTurnIsFrozen(tx *gorm.DB, turn *APIRequestLogTurn) (bool, error) {
+	if turn == nil || turn.Id <= 0 {
 		return false, nil
 	}
-	var member APIRequestLogExportMember
-	query := tx.Where("turn_record_id = ?", turnRecordId)
-	if tx.Dialector != nil && tx.Dialector.Name() == "mysql" {
-		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	if turn.ExportedVersion > 0 {
+		return true, nil
 	}
-	err := query.First(&member).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func lockAPIRequestLogTurnForExportCoordination(tx *gorm.DB, turnRecordId int64) error {
-	if tx == nil || turnRecordId <= 0 || tx.Dialector == nil || tx.Dialector.Name() != "postgres" {
-		return nil
-	}
-	return tx.Exec("SELECT pg_advisory_xact_lock(?)", apiRequestLogTurnLockNamespace^turnRecordId).Error
+	return apiRequestLogTurnHasExportMember(tx, turn.Id)
 }
 
 func resolveAPIRequestLogSourceItems(db *gorm.DB, logId int, items []APIRequestLogItem) ([]APIRequestLogItem, error) {
@@ -861,8 +938,12 @@ func upsertAPIRequestLogTurnRequest(tx *gorm.DB, turnRecordId int64, log *APIReq
 	}
 	var request APIRequestLogTurnRequest
 	err = tx.Where("log_id = ?", log.Id).First(&request).Error
+	needsReindex := false
+	isNew := false
+	previousCreatedAt := request.CreatedAt
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		request = APIRequestLogTurnRequest{LogId: log.Id, TurnRecordId: turnRecordId}
+		isNew = true
 	} else if err != nil {
 		return nil, err
 	} else if request.TurnRecordId != turnRecordId {
@@ -880,17 +961,36 @@ func upsertAPIRequestLogTurnRequest(tx *gorm.DB, turnRecordId int64, log *APIReq
 	request.InputFingerprint = APIRequestLogBody(inputJSON)
 	request.ContextFingerprint = APIRequestLogBody(contextJSON)
 	if request.Id == 0 {
+		var last APIRequestLogTurnRequest
+		result := tx.Where("turn_record_id = ?", turnRecordId).
+			Order("created_at DESC").Order("log_id DESC").Order("id DESC").
+			Limit(1).Find(&last)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		if result.RowsAffected == 0 {
+			request.Sequence = 1
+		} else if last.Sequence > 0 && (request.CreatedAt > last.CreatedAt || (request.CreatedAt == last.CreatedAt && request.LogId > last.LogId)) {
+			request.Sequence = last.Sequence + 1
+		} else {
+			needsReindex = true
+		}
 		if err := tx.Create(&request).Error; err != nil {
 			return nil, err
 		}
 	} else if err := tx.Save(&request).Error; err != nil {
 		return nil, err
 	}
-	if err := reindexAPIRequestLogTurnRequests(tx, turnRecordId); err != nil {
-		return nil, err
+	if !isNew && previousCreatedAt != request.CreatedAt {
+		needsReindex = true
 	}
-	if err := tx.First(&request, request.Id).Error; err != nil {
-		return nil, err
+	if needsReindex {
+		if err := reindexAPIRequestLogTurnRequests(tx, turnRecordId); err != nil {
+			return nil, err
+		}
+		if err := tx.First(&request, request.Id).Error; err != nil {
+			return nil, err
+		}
 	}
 	return &request, nil
 }
@@ -1259,8 +1359,22 @@ func bulkUpdateAPIRequestLogOrdering(tx *gorm.DB, table interface{}, column stri
 }
 
 func refreshAPIRequestLogTurn(tx *gorm.DB, turn *APIRequestLogTurn, log *APIRequestLog, meta APIRequestLogTurnMeta) error {
-	var requests []APIRequestLogTurnRequest
-	if err := tx.Where("turn_record_id = ?", turn.Id).Find(&requests).Error; err != nil {
+	type requestAggregate struct {
+		RequestCount     int `gorm:"column:request_count"`
+		PromptTokens     int `gorm:"column:prompt_tokens"`
+		CompletionTokens int `gorm:"column:completion_tokens"`
+		TokenUsed        int `gorm:"column:token_used"`
+		Quota            int `gorm:"column:quota"`
+	}
+	var aggregate requestAggregate
+	if err := tx.Model(&APIRequestLogTurnRequest{}).
+		Where("turn_record_id = ?", turn.Id).
+		Select(
+			"COUNT(*) AS request_count, COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, " +
+				"COALESCE(SUM(completion_tokens), 0) AS completion_tokens, COALESCE(SUM(token_used), 0) AS token_used, " +
+				"COALESCE(SUM(quota), 0) AS quota",
+		).
+		Scan(&aggregate).Error; err != nil {
 		return err
 	}
 	var itemCount int64
@@ -1279,28 +1393,22 @@ func refreshAPIRequestLogTurn(tx *gorm.DB, turn *APIRequestLogTurn, log *APIRequ
 	attribution := strongerAPIRequestLogTurnAttribution(turn.Attribution, meta.Attribution)
 	completionSignal := strongerAPIRequestLogTurnCompletionSignal(turn.CompletionSignal, meta.CompletionSignal)
 	updates := map[string]interface{}{
-		"protocol":          firstNonEmptyTurnValue(turn.Protocol, meta.Protocol),
-		"window_id":         firstNonEmptyTurnValue(turn.WindowId, meta.WindowId),
-		"request_kind":      firstNonEmptyTurnValue(turn.RequestKind, meta.RequestKind),
-		"started_at":        startedAt,
-		"completed_at":      completedAt,
-		"completion_status": status,
-		"completion_signal": completionSignal,
-		"attribution":       attribution,
-		"request_count":     len(requests),
-		"item_count":        int(itemCount),
+		"protocol":                firstNonEmptyTurnValue(turn.Protocol, meta.Protocol),
+		"window_id":               firstNonEmptyTurnValue(turn.WindowId, meta.WindowId),
+		"request_kind":            firstNonEmptyTurnValue(turn.RequestKind, meta.RequestKind),
+		"started_at":              startedAt,
+		"completed_at":            completedAt,
+		"completion_status":       status,
+		"completion_signal":       completionSignal,
+		"attribution":             attribution,
+		"request_count":           aggregate.RequestCount,
+		"item_count":              int(itemCount),
+		"prompt_tokens":           aggregate.PromptTokens,
+		"completion_tokens":       aggregate.CompletionTokens,
+		"token_used":              aggregate.TokenUsed,
+		"quota":                   aggregate.Quota,
+		"materialization_version": gorm.Expr("materialization_version + 1"),
 	}
-	promptTokens, completionTokens, tokenUsed, quota := 0, 0, 0, 0
-	for _, request := range requests {
-		promptTokens += request.PromptTokens
-		completionTokens += request.CompletionTokens
-		tokenUsed += request.TokenUsed
-		quota += request.Quota
-	}
-	updates["prompt_tokens"] = promptTokens
-	updates["completion_tokens"] = completionTokens
-	updates["token_used"] = tokenUsed
-	updates["quota"] = quota
 	if turn.UserId == 0 && log.UserId != 0 {
 		updates["user_id"] = log.UserId
 	}
@@ -1561,11 +1669,6 @@ func apiRequestLogOwnerFingerprint(log *APIRequestLog) string {
 func apiRequestLogSHA256(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
-}
-
-func apiRequestLogUint64Hash(value string) uint64 {
-	digest := sha256.Sum256([]byte(value))
-	return binary.BigEndian.Uint64(digest[:8])
 }
 
 func marshalAPIRequestLogTurnFingerprints(values []string) (APIRequestLogBody, error) {

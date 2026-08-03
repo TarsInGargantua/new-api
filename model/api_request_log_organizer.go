@@ -154,6 +154,14 @@ func OpenAPIRequestLogOrganizerDB() (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+	poolConfig := requestLogConnectionPoolConfigFromEnv()
+	sqlDB.SetMaxIdleConns(poolConfig.MaxIdleConns)
+	sqlDB.SetMaxOpenConns(poolConfig.MaxOpenConns)
+	sqlDB.SetConnMaxLifetime(poolConfig.MaxLifetime)
 	db.Logger = logger.Default.LogMode(logger.Silent)
 	return db, nil
 }
@@ -918,7 +926,7 @@ func applyAPIRequestLogOrganizerDecision(tx *gorm.DB, decision *apiRequestLogOrg
 		return nil
 	}
 	if decision.Close != nil {
-		if err := lockAPIRequestLogOrganizerTurnForExportCoordination(
+		if err := lockAPIRequestLogOrganizerTurn(
 			tx,
 			decision.Close.OwnerFingerprint,
 			decision.Close.SessionID,
@@ -927,19 +935,20 @@ func applyAPIRequestLogOrganizerDecision(tx *gorm.DB, decision *apiRequestLogOrg
 			return err
 		}
 		updates := map[string]interface{}{
-			"completion_status": APIRequestLogTurnStatusCompleted,
-			"completed_at":      decision.Close.CompletedAt,
+			"completion_status":       APIRequestLogTurnStatusCompleted,
+			"completed_at":            decision.Close.CompletedAt,
+			"materialization_version": gorm.Expr("materialization_version + 1"),
 		}
 		if err := tx.Model(&APIRequestLogTurn{}).
 			Where("owner_fingerprint = ? AND session_id = ? AND turn_id = ?", decision.Close.OwnerFingerprint, decision.Close.SessionID, decision.Close.TurnID).
 			Where("completion_status <> ?", APIRequestLogTurnStatusCompleted).
-			Where("NOT " + apiRequestLogExportMemberExistsSQL()).
+			Where(apiRequestLogTurnAvailableForExportSQL()).
 			Updates(updates).Error; err != nil {
 			return err
 		}
 	}
 	if decision.Rename != nil && decision.Rename.FromTurnID != decision.Rename.ToTurnID {
-		if err := lockAPIRequestLogOrganizerTurnForExportCoordination(
+		if err := lockAPIRequestLogOrganizerTurn(
 			tx,
 			decision.Rename.OwnerFingerprint,
 			decision.Rename.SessionID,
@@ -956,8 +965,11 @@ func applyAPIRequestLogOrganizerDecision(tx *gorm.DB, decision *apiRequestLogOrg
 		if targetCount == 0 {
 			if err := tx.Model(&APIRequestLogTurn{}).
 				Where("owner_fingerprint = ? AND session_id = ? AND turn_id = ?", decision.Rename.OwnerFingerprint, decision.Rename.SessionID, decision.Rename.FromTurnID).
-				Where("NOT "+apiRequestLogExportMemberExistsSQL()).
-				Update("turn_id", decision.Rename.ToTurnID).Error; err != nil {
+				Where(apiRequestLogTurnAvailableForExportSQL()).
+				Updates(map[string]interface{}{
+					"turn_id":                 decision.Rename.ToTurnID,
+					"materialization_version": gorm.Expr("materialization_version + 1"),
+				}).Error; err != nil {
 				return err
 			}
 		}
@@ -967,21 +979,25 @@ func applyAPIRequestLogOrganizerDecision(tx *gorm.DB, decision *apiRequestLogOrg
 	return err
 }
 
-func lockAPIRequestLogOrganizerTurnForExportCoordination(tx *gorm.DB, ownerFingerprint, sessionId, turnId string) error {
-	if tx == nil || tx.Dialector == nil || tx.Dialector.Name() != "postgres" {
+func lockAPIRequestLogOrganizerTurn(tx *gorm.DB, ownerFingerprint, sessionId, turnId string) error {
+	if tx == nil {
 		return nil
 	}
 	var turn APIRequestLogTurn
-	err := tx.Select("id").
+	query := tx.Select("id").
 		Where("owner_fingerprint = ? AND session_id = ? AND turn_id = ?", ownerFingerprint, sessionId, turnId).
-		First(&turn).Error
+		Limit(1)
+	if tx.Dialector != nil && tx.Dialector.Name() != "sqlite" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	err := query.First(&turn).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	return lockAPIRequestLogTurnForExportCoordination(tx, turn.Id)
+	return nil
 }
 
 func materializeAPIRequestLogOrganizerTurn(tx *gorm.DB, log *APIRequestLog, meta APIRequestLogTurnMeta, items []APIRequestLogItem) (*APIRequestLogTurn, error) {
@@ -990,17 +1006,11 @@ func materializeAPIRequestLogOrganizerTurn(tx *gorm.DB, log *APIRequestLog, meta
 	if err != nil {
 		return nil, err
 	}
-	if err := lockAPIRequestLogTurnForExportCoordination(tx, turn.Id); err != nil {
+	exported, err := apiRequestLogTurnIsFrozen(tx, turn)
+	if err != nil {
 		return nil, err
 	}
-	var exportMemberCount int64
-	if err := tx.Model(&APIRequestLogExportMember{}).
-		Where("turn_record_id = ?", turn.Id).
-		Limit(1).
-		Count(&exportMemberCount).Error; err != nil {
-		return nil, err
-	}
-	if exportMemberCount > 0 {
+	if exported {
 		return turn, nil
 	}
 	priorInput, priorContext, err := latestAPIRequestLogTurnFingerprints(tx, turn.OwnerFingerprint, turn.SessionId, normalizeAPIRequestLogTurnTimestamp(log.CreatedAt), log.Id)

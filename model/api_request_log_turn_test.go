@@ -356,4 +356,7 @@ func TestMaterializeAPIRequestLogTurnFreezesClaimedTurnsAndSessionIndexes(t *tes
 	var persistedFrozen APIRequestLogTurn
 	require.NoError(t, db.First(&persistedFrozen, turn.Id).Error)
 	require.Equal(t, 1, persistedFrozen.TurnIndex)
+	var sessionState APIRequestLogTurnSessionState
+	require.NoError(t, db.Where("owner_fingerprint = ? AND session_id = ?", persistedFrozen.OwnerFingerprint, persistedFrozen.SessionId).First(&sessionState).Error)
+	require.Equal(t, 3, sessionState.NextTurnIndex)
 }
