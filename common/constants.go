@@ -121,6 +121,7 @@ var APIRequestLogEnabled = false
 var APIRequestLogRedactSecrets = true
 var APIRequestLogCaptureResponse = true
 var APIRequestLogAsyncWrite = false
+var APIRequestLogDeferredMaterialization = false
 var APIRequestLogQueueSize = 128
 var APIRequestLogWorkers = 2
 var APIRequestLogMaxBodyBytes = 4 * 1024 * 1024

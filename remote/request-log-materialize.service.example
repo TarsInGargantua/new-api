@@ -1,0 +1,17 @@
+[Unit]
+Description=Request Log Materialization Worker
+After=network.target mysql.service
+Requires=mysql.service
+
+[Service]
+Type=simple
+User=rwkv
+WorkingDirectory=/home/rwkv/request-log
+EnvironmentFile=/home/rwkv/request-log/.env
+ExecStart=/home/rwkv/request-log/bin/request-log-materialize -poll 500ms -lease 5m -backfill-batch 500
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

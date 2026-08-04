@@ -124,7 +124,10 @@ func EnsureAPIRequestLogMaterializedTables(db *gorm.DB) error {
 	if err := EnsureAPIRequestLogTurnTables(db); err != nil {
 		return err
 	}
-	return EnsureAPIRequestLogExportTables(db)
+	if err := EnsureAPIRequestLogExportTables(db); err != nil {
+		return err
+	}
+	return EnsureAPIRequestLogMaterializationJobTable(db)
 }
 
 func PreviewAPIRequestLogExport(db *gorm.DB, params APIRequestLogTurnQueryParams, includeInferred bool) (*APIRequestLogExportPreview, error) {
@@ -136,14 +139,14 @@ func PreviewAPIRequestLogExport(db *gorm.DB, params APIRequestLogTurnQueryParams
 	if err := eligible.Count(&preview.MatchedCount).Error; err != nil {
 		return nil, err
 	}
-	existsSQL := apiRequestLogExportMemberExistsSQL()
-	if err := eligible.Session(&gorm.Session{}).Where("NOT " + existsSQL).Count(&preview.AvailableCount).Error; err != nil {
+	exportedSQL := apiRequestLogTurnExportedSQL()
+	if err := eligible.Session(&gorm.Session{}).Where("NOT " + exportedSQL).Count(&preview.AvailableCount).Error; err != nil {
 		return nil, err
 	}
-	if err := eligible.Session(&gorm.Session{}).Where(existsSQL).Count(&preview.AlreadyExportedCount).Error; err != nil {
+	if err := eligible.Session(&gorm.Session{}).Where(exportedSQL).Count(&preview.AlreadyExportedCount).Error; err != nil {
 		return nil, err
 	}
-	available := eligible.Session(&gorm.Session{}).Where("NOT " + existsSQL)
+	available := eligible.Session(&gorm.Session{}).Where("NOT " + exportedSQL)
 	if err := available.Session(&gorm.Session{}).Where("attribution = ?", APIRequestLogTurnAttributionExact).Count(&preview.ExactCount).Error; err != nil {
 		return nil, err
 	}
@@ -197,7 +200,7 @@ func CreateAPIRequestLogExportBatch(db *gorm.DB, params APIRequestLogTurnQueryPa
 		for batch.CutoffTurnId > 0 {
 			var turnIds []int64
 			query := buildAPIRequestLogExportEligibleQuery(tx, params, includeInferred).
-				Where("NOT "+apiRequestLogExportMemberExistsSQL()).
+				Where(apiRequestLogTurnAvailableForExportSQL()).
 				Where(apiRequestLogTurnsTable+".id > ?", lastId).
 				Where(apiRequestLogTurnsTable+".id <= ?", batch.CutoffTurnId).
 				Order(apiRequestLogTurnsTable + ".id ASC").
@@ -592,10 +595,8 @@ func buildAPIRequestLogExportEligibleQuery(db *gorm.DB, params APIRequestLogTurn
 	return tx.Where("attribution = ?", APIRequestLogTurnAttributionExact)
 }
 
-// lockAPIRequestLogExportTurnIds rechecks eligibility and global membership.
-// Creating the batch before this call serializes SQLite write transactions.
-// PostgreSQL uses transaction-scoped advisory locks. MySQL writers lock the
-// export-member key before commit, so the viewer keeps read-only turn access.
+// lockAPIRequestLogExportTurnIds rechecks eligibility and freezes real turn
+// rows so materializers never need to lock a missing export-member key.
 func lockAPIRequestLogExportTurnIds(db *gorm.DB, params APIRequestLogTurnQueryParams, includeInferred bool, cutoffTurnId int64, candidateIds []int64) ([]int64, error) {
 	candidateIds = uniquePositiveInt64s(candidateIds)
 	if len(candidateIds) == 0 {
@@ -606,27 +607,38 @@ func lockAPIRequestLogExportTurnIds(db *gorm.DB, params APIRequestLogTurnQueryPa
 	if db.Dialector != nil {
 		dialect = db.Dialector.Name()
 	}
-	if dialect == "postgres" {
-		for _, turnId := range candidateIds {
-			if err := lockAPIRequestLogTurnForExportCoordination(db, turnId); err != nil {
-				return nil, err
-			}
-		}
-	}
 	query := buildAPIRequestLogExportEligibleQuery(db, params, includeInferred).
 		Where(apiRequestLogTurnsTable+".id IN ?", candidateIds).
 		Where(apiRequestLogTurnsTable+".id <= ?", cutoffTurnId).
-		Where("NOT " + apiRequestLogExportMemberExistsSQL()).
+		Where(apiRequestLogTurnAvailableForExportSQL()).
 		Order(apiRequestLogTurnsTable + ".id ASC")
+	if dialect != "sqlite" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
 	var lockedIds []int64
 	if err := query.Pluck(apiRequestLogTurnsTable+".id", &lockedIds).Error; err != nil {
 		return nil, err
+	}
+	if len(lockedIds) > 0 {
+		if err := db.Model(&APIRequestLogTurn{}).
+			Where("id IN ? AND exported_version = 0", lockedIds).
+			Update("exported_version", gorm.Expr("CASE WHEN materialization_version > 0 THEN materialization_version ELSE 1 END")).Error; err != nil {
+			return nil, err
+		}
 	}
 	return lockedIds, nil
 }
 
 func apiRequestLogExportMemberExistsSQL() string {
 	return "EXISTS (SELECT 1 FROM " + apiRequestLogExportMembersTable + " export_member WHERE export_member.turn_record_id = " + apiRequestLogTurnsTable + ".id)"
+}
+
+func apiRequestLogTurnExportedSQL() string {
+	return "(" + apiRequestLogTurnsTable + ".exported_version > 0 OR " + apiRequestLogExportMemberExistsSQL() + ")"
+}
+
+func apiRequestLogTurnAvailableForExportSQL() string {
+	return "(" + apiRequestLogTurnsTable + ".exported_version = 0 AND NOT " + apiRequestLogExportMemberExistsSQL() + ")"
 }
 
 func apiRequestLogExportFilterFromQuery(params APIRequestLogTurnQueryParams, includeInferred bool) APIRequestLogExportFilter {

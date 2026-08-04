@@ -249,6 +249,10 @@ func TestAPIRequestLogExportClaimFreezesTurnAgainstLateMaterialization(t *testin
 	require.NoError(t, err)
 	require.Equal(t, int64(1), batch.RowCount)
 	require.Equal(t, turn.Id, batch.CutoffTurnId)
+	require.NoError(t, db.First(&turn, turn.Id).Error)
+	require.Positive(t, turn.MaterializationVersion)
+	require.Equal(t, turn.MaterializationVersion, turn.ExportedVersion)
+	frozenVersion := turn.ExportedVersion
 
 	lateLog, lateItems := createAPIRequestLogTurnTestRequest(t, db, APIRequestLog{
 		UserId: 1, TokenId: 2, ModelName: "gpt-export", CreatedAt: 600, PromptTokens: 99,
@@ -263,6 +267,8 @@ func TestAPIRequestLogExportClaimFreezesTurnAgainstLateMaterialization(t *testin
 	require.Equal(t, 1, frozen.RequestCount)
 	require.Equal(t, 1, frozen.ItemCount)
 	require.Equal(t, 10, frozen.PromptTokens)
+	require.Equal(t, frozenVersion, frozen.MaterializationVersion)
+	require.Equal(t, frozenVersion, frozen.ExportedVersion)
 
 	page, err := GetAPIRequestLogExportBatchTurnPage(db, batch.Id, 0, 10)
 	require.NoError(t, err)

@@ -193,23 +193,25 @@ type APIRequestLogUsage struct {
 }
 
 type APIRequestLogStorageStatus struct {
-	HasTable              bool   `json:"has_table"`
-	Count                 int64  `json:"count"`
-	LastCreatedAt         int64  `json:"last_created_at,omitempty"`
-	LastRequestId         string `json:"last_request_id,omitempty"`
-	LastWriteError        string `json:"last_write_error,omitempty"`
-	LastWriteErrorAt      int64  `json:"last_write_error_at,omitempty"`
-	LogDBDialect          string `json:"log_db_dialect,omitempty"`
-	RequestLogDBDialect   string `json:"request_log_db_dialect,omitempty"`
-	EnsureMigrationFailed bool   `json:"ensure_migration_failed"`
-	AsyncWrite            bool   `json:"async_write"`
-	QueueDepth            int    `json:"queue_depth"`
-	QueueCapacity         int    `json:"queue_capacity"`
-	QueuedItemBytes       int64  `json:"queued_item_bytes"`
-	MaxQueueBytes         int64  `json:"max_queue_bytes"`
-	QueueDroppedJobs      int64  `json:"queue_dropped_jobs"`
-	QueueDroppedItems     int64  `json:"queue_dropped_items"`
-	QueueDroppedItemBytes int64  `json:"queue_dropped_item_bytes"`
+	HasTable                bool                                    `json:"has_table"`
+	Count                   int64                                   `json:"count"`
+	LastCreatedAt           int64                                   `json:"last_created_at,omitempty"`
+	LastRequestId           string                                  `json:"last_request_id,omitempty"`
+	LastWriteError          string                                  `json:"last_write_error,omitempty"`
+	LastWriteErrorAt        int64                                   `json:"last_write_error_at,omitempty"`
+	LogDBDialect            string                                  `json:"log_db_dialect,omitempty"`
+	RequestLogDBDialect     string                                  `json:"request_log_db_dialect,omitempty"`
+	EnsureMigrationFailed   bool                                    `json:"ensure_migration_failed"`
+	AsyncWrite              bool                                    `json:"async_write"`
+	QueueDepth              int                                     `json:"queue_depth"`
+	QueueCapacity           int                                     `json:"queue_capacity"`
+	QueuedItemBytes         int64                                   `json:"queued_item_bytes"`
+	MaxQueueBytes           int64                                   `json:"max_queue_bytes"`
+	QueueDroppedJobs        int64                                   `json:"queue_dropped_jobs"`
+	QueueDroppedItems       int64                                   `json:"queue_dropped_items"`
+	QueueDroppedItemBytes   int64                                   `json:"queue_dropped_item_bytes"`
+	DeferredMaterialization bool                                    `json:"deferred_materialization"`
+	MaterializationQueue    APIRequestLogMaterializationQueueStatus `json:"materialization_queue"`
 }
 
 var REQUEST_LOG_DB *gorm.DB
@@ -439,6 +441,9 @@ func createOrUpdateAPIRequestLogWithMaterializer(log *APIRequestLog, materialize
 		if log.TurnMeta == nil {
 			return nil
 		}
+		if common.APIRequestLogDeferredMaterialization {
+			return enqueueAPIRequestLogMaterialization(db, log)
+		}
 		return materializeRequestLogTurnOrMarkFailed(db, log, nil, materialize)
 	}
 
@@ -452,6 +457,9 @@ func createOrUpdateAPIRequestLogWithMaterializer(log *APIRequestLog, materialize
 		if log.TurnMeta == nil {
 			return nil
 		}
+		if common.APIRequestLogDeferredMaterialization {
+			return enqueueAPIRequestLogMaterialization(db, log)
+		}
 		return materializeRequestLogTurnOrMarkFailed(db, log, nil, materialize)
 	}
 	if asyncItems {
@@ -461,7 +469,7 @@ func createOrUpdateAPIRequestLogWithMaterializer(log *APIRequestLog, materialize
 		markAPIRequestLogItemsFailed(db, log, err)
 		return err
 	}
-	return materializeRequestLogTurnAndComplete(db, log, log.Items, materialize)
+	return finishAPIRequestLogItems(db, log, log.Items, materialize)
 }
 
 func shouldAsyncAPIRequestLogItems(log *APIRequestLog, hasItems bool) bool {
@@ -628,11 +636,26 @@ func apiRequestLogItemWorker(queue <-chan apiRequestLogItemWriteJob) {
 			_ = materializeAPIRequestLogTurnWriteFailure(job.DB, &job.Log)
 			continue
 		}
-		if err := materializeRequestLogTurnAndComplete(job.DB, &job.Log, job.Items, materializeAPIRequestLogTurnForWrite); err != nil {
+		if err := finishAPIRequestLogItems(job.DB, &job.Log, job.Items, materializeAPIRequestLogTurnForWrite); err != nil {
 			setAPIRequestLogLastWriteError(err)
 			continue
 		}
 	}
+}
+
+func finishAPIRequestLogItems(db *gorm.DB, log *APIRequestLog, items []APIRequestLogItem, materialize apiRequestLogTurnMaterializer) error {
+	if common.APIRequestLogDeferredMaterialization {
+		if err := enqueueAPIRequestLogMaterialization(db, log); err != nil {
+			return err
+		}
+		if err := updateAPIRequestLogItemsStatus(db, log.Id, APIRequestLogItemsOK, ""); err != nil {
+			return fmt.Errorf("mark request log items complete: %w", err)
+		}
+		log.ItemsStatus = APIRequestLogItemsOK
+		log.ItemsError = ""
+		return nil
+	}
+	return materializeRequestLogTurnAndComplete(db, log, items, materialize)
 }
 
 func materializeRequestLogTurnAndComplete(db *gorm.DB, log *APIRequestLog, items []APIRequestLogItem, materialize apiRequestLogTurnMaterializer) error {
@@ -704,6 +727,9 @@ func materializeAPIRequestLogTurnWriteFailure(db *gorm.DB, log *APIRequestLog) e
 			meta.CompletionStatus = APIRequestLogTurnStatusOpen
 		}
 		logCopy.TurnMeta = &meta
+	}
+	if common.APIRequestLogDeferredMaterialization {
+		return enqueueAPIRequestLogMaterialization(db, &logCopy)
 	}
 	return materializeAPIRequestLogTurnForWrite(db, &logCopy, nil)
 }
@@ -1116,12 +1142,13 @@ func apiRequestUsageFromRequestLog(log *APIRequestLog) *APIRequestLogUsage {
 
 func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 	status := &APIRequestLogStorageStatus{
-		AsyncWrite:            common.APIRequestLogAsyncWrite,
-		QueuedItemBytes:       atomic.LoadInt64(&apiRequestLogQueuedItemBytes),
-		MaxQueueBytes:         int64(common.APIRequestLogMaxQueueBytes),
-		QueueDroppedJobs:      atomic.LoadInt64(&apiRequestLogQueueDroppedJobs),
-		QueueDroppedItems:     atomic.LoadInt64(&apiRequestLogQueueDroppedItems),
-		QueueDroppedItemBytes: atomic.LoadInt64(&apiRequestLogQueueDroppedItemBytes),
+		AsyncWrite:              common.APIRequestLogAsyncWrite,
+		DeferredMaterialization: common.APIRequestLogDeferredMaterialization,
+		QueuedItemBytes:         atomic.LoadInt64(&apiRequestLogQueuedItemBytes),
+		MaxQueueBytes:           int64(common.APIRequestLogMaxQueueBytes),
+		QueueDroppedJobs:        atomic.LoadInt64(&apiRequestLogQueueDroppedJobs),
+		QueueDroppedItems:       atomic.LoadInt64(&apiRequestLogQueueDroppedItems),
+		QueueDroppedItemBytes:   atomic.LoadInt64(&apiRequestLogQueueDroppedItemBytes),
 	}
 	apiRequestLogItemQueueMu.Lock()
 	if apiRequestLogItemQueue != nil {
@@ -1141,6 +1168,11 @@ func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 	if db.Dialector != nil {
 		status.RequestLogDBDialect = db.Dialector.Name()
 	}
+	materializationQueue, err := GetAPIRequestLogMaterializationQueueStatus(db)
+	if err != nil {
+		return status, err
+	}
+	status.MaterializationQueue = materializationQueue
 
 	status.HasTable = db.Migrator().HasTable(&APIRequestLog{})
 	if !status.HasTable {

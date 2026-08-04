@@ -3,7 +3,8 @@
 This deployment splits request-log storage from the main application database:
 
 - `logs` remains in the existing main/log database.
-- `api_request_logs` and `api_request_log_items` use `REQUEST_LOG_SQL_DSN`.
+- `api_request_logs`, `api_request_log_items`, and the durable materialization queue use `REQUEST_LOG_SQL_DSN`.
+- The gateway synchronously persists raw parent/item rows; a remote worker materializes session turns afterward.
 - The standalone viewer reads turn data and has narrowly scoped write access to persistent export batch tables.
 
 ## Main Service Env
@@ -16,14 +17,15 @@ API_REQUEST_LOG_CAPTURE_RESPONSE=true
 API_REQUEST_LOG_REDACT_SECRETS=true
 API_REQUEST_LOG_ASYNC_WRITE=false
 API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE=false
+API_REQUEST_LOG_DEFERRED_MATERIALIZATION=true
 API_REQUEST_LOG_QUEUE_SIZE=128
 API_REQUEST_LOG_WORKERS=2
 API_REQUEST_LOG_MAX_BODY_BYTES=4194304
 API_REQUEST_LOG_MAX_ITEM_BYTES=1048576
 API_REQUEST_LOG_MAX_QUEUE_BYTES=67108864
 CALL_LOG_EXCLUDED_USERNAMES=ryan
-REQUEST_LOG_SQL_MAX_IDLE_CONNS=8
-REQUEST_LOG_SQL_MAX_OPEN_CONNS=32
+REQUEST_LOG_SQL_MAX_IDLE_CONNS=2
+REQUEST_LOG_SQL_MAX_OPEN_CONNS=8
 REQUEST_LOG_SQL_MAX_LIFETIME=300
 REQUEST_LOG_SQL_DSN=newapi_request_log_app:<password>@tcp(<REMOTE_PUBLIC_HOST>:3306)/newapi_request_logs?charset=utf8mb4&parseTime=true&loc=Local
 ```
@@ -34,10 +36,12 @@ Do not change `SQL_DSN` or `LOG_SQL_DSN` for this migration unless the main appl
 
 For high-concurrency or very large requests:
 
-- Keep `API_REQUEST_LOG_ASYNC_WRITE=false` for durable request-log capture. `CreateAPIRequestLog` returns only after the parent, parsed items, and turn mappings are persisted; `items_status=ok` therefore means all three completed.
+- Keep `API_REQUEST_LOG_ASYNC_WRITE=false` for durable raw capture. `CreateAPIRequestLog` returns only after the parent, parsed items, and durable materialization job are persisted.
+- Keep `API_REQUEST_LOG_DEFERRED_MATERIALIZATION=true` so request goroutines never wait on session/turn aggregation locks. In this mode, `items_status=ok` means raw items are durable; use the materialization queue status to verify turn completion.
+- Read-only model discovery requests (`GET /v1/models`, `GET /v1/models/:model`, `GET /v1beta/models`, and `GET /v1beta/openai/models`) bypass request-log capture so a remote log-database slowdown cannot block client startup. Inference requests continue to be captured.
 - The in-process item queue is volatile and can lose pending items on a crash or restart. It is enabled only when both `API_REQUEST_LOG_ASYNC_WRITE=true` and `API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE=true` explicitly accept that risk. Do not enable it for the current production deployment.
-- Queue size, worker count, and queue byte limits apply only when volatile async writes are explicitly enabled.
-- Keep the dedicated request-log pool below the MySQL connection limit. The defaults are 8 idle connections, 32 open connections, and a 300-second connection lifetime; each running gateway replica has its own pool.
+- Queue size, worker count, and queue byte limits apply only to volatile in-process item writes, not to the durable materialization queue.
+- Keep the dedicated request-log pool below the MySQL connection limit. For the current deployment, start each gateway replica at 2 idle / 8 open connections and the remote viewer/worker at 1 idle / 4 open connections.
 - `API_REQUEST_LOG_MAX_BODY_BYTES` limits captured request/response bytes before parsing. `0` disables body capture.
 - `API_REQUEST_LOG_MAX_ITEM_BYTES` truncates each parsed item before database insert. `0` disables item truncation.
 - `API_REQUEST_LOG_MAX_QUEUE_BYTES` caps queued item payload bytes in process memory. `0` disables this byte cap.
@@ -53,10 +57,14 @@ The request-log database contains:
 - `api_request_log_turns`: one materialized row per session turn, including exact/inferred/unknown attribution and completion state.
 - `api_request_log_turn_requests`: request-to-turn membership and per-request usage data.
 - `api_request_log_turn_items`: canonical turn-item mappings that reference `api_request_log_items`; item content is not copied.
+- `api_request_log_turn_session_states`: one short-lived allocation hotspot per owner/session, replacing range locks across all session turns.
+- `api_request_log_materialization_jobs`: durable pending/processing/retry/ok state and lease versions for the remote worker.
 - `api_request_log_export_batches` and `api_request_log_export_members`: immutable, globally deduplicated export membership and artifact state.
 - `api_request_log_organizer_states`: persistent high-water marks for resumable historical turn organization.
 
 The parent table intentionally does not store `request_body`, `response_body`, or `metadata`. Raw bodies are only used as parser input. If parsing fails, the unparsed text is written once as an item with `item_type=raw_unparsed`.
+
+`api_request_log_turns.materialization_version` increments after each committed turn refresh. Export claims lock the actual turn row and copy that value to `exported_version`; materializers no longer lock missing rows in `api_request_log_export_members`.
 
 ## Initialize Remote Database
 
@@ -77,6 +85,7 @@ CREATE USER IF NOT EXISTS 'request_log_viewer'@'localhost' IDENTIFIED BY '<stron
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES ON newapi_request_logs.* TO 'newapi_request_log_app'@'%';
 REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_turns TO 'request_log_viewer'@'localhost';
+GRANT UPDATE (exported_version) ON newapi_request_logs.api_request_log_turns TO 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_turn_requests TO 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_turn_items TO 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_items TO 'request_log_viewer'@'localhost';
@@ -91,6 +100,16 @@ Initialize tables:
 REQUEST_LOG_SQL_DSN='newapi_request_log_app:<password>@tcp(127.0.0.1:3306)/newapi_request_logs?charset=utf8mb4&parseTime=true&loc=Local' \
   ./request-log-migrate -init-only
 ```
+
+Verify MySQL memory and lock health independently:
+
+```sql
+SHOW VARIABLES LIKE 'innodb_buffer_pool_size';
+SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool_read%';
+SHOW GLOBAL STATUS LIKE 'Innodb_row_lock%';
+```
+
+Size the buffer pool for the MySQL host, not the Zeabur gateway container. A high buffer-pool hit rate confirms the I/O fix is active, but it does not resolve row-lock queues; `Innodb_row_lock_current_waits` should fall only after deferred materialization and the shortened turn transactions are deployed.
 
 ## Historical Migration
 
@@ -123,6 +142,46 @@ REQUEST_LOG_SQL_DSN='<new-request-log-dsn>' \
 ```
 
 Use `-after-id <legacy id>` to resume from a known legacy id. The migrator uses `source=legacy_api_request_logs` and `source_id=<old id>` for idempotent updates. It also hydrates usage fields from the old `logs` table by `usage_log_id` when available.
+
+## Remote Materialization Worker
+
+Build and install the worker on the MySQL host:
+
+```bash
+go build -o /home/rwkv/request-log/bin/request-log-materialize ./cmd/request-log-materialize
+sudo cp remote/request-log-materialize.service.example /etc/systemd/system/request-log-materialize.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now request-log-materialize
+```
+
+The remote environment must use the application account over localhost:
+
+```env
+REQUEST_LOG_SQL_DSN=newapi_request_log_app:<password>@tcp(127.0.0.1:3306)/newapi_request_logs?charset=utf8mb4&parseTime=true&loc=Local
+REQUEST_LOG_SQL_MAX_IDLE_CONNS=1
+REQUEST_LOG_SQL_MAX_OPEN_CONNS=4
+REQUEST_LOG_SQL_MAX_LIFETIME=300
+```
+
+The worker claims one short transaction at a time, processes the turn outside the claim transaction, and completes the job with a lease-version compare-and-swap. `-lease 5m` is a crashed-worker recovery lease, not a queue wait timeout. Keep it above the slowest observed single job; the current row-lock optimization should make normal jobs complete far below this value.
+
+Before draining historical rows, classify the backlog:
+
+```bash
+REQUEST_LOG_SQL_DSN='<request-log-app-dsn>' \
+  ./request-log-materialize -backlog-status
+```
+
+`recoverable` means a pending/failed parent still has raw item rows and can be queued. `parent_only` means the child rows are missing and turn materialization cannot reconstruct the request. The service command schedules recoverable rows in bounded groups only when its durable queue becomes empty:
+
+```bash
+REQUEST_LOG_SQL_DSN='<request-log-app-dsn>' \
+  ./request-log-materialize -poll 500ms -lease 5m -backfill-batch 500
+```
+
+For historical rows whose original turn metadata was never persisted, backlog recovery creates deterministic `unknown-session:<log_id>` / `unknown-turn:<log_id>` identities. Run the historical organizer instead when inferred 30-minute session grouping is preferred.
+
+Monitor the durable queue through `GET /api/request-log/status`. The response exposes `pending`, `processing`, `retry`, `oldest_pending_at`, and `oldest_pending_age_seconds`; alert on age rather than using a fixed 30-second assumption.
 
 ## Standalone Viewer
 

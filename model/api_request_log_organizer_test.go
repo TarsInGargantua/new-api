@@ -517,13 +517,9 @@ func setupAPIRequestLogOrganizerTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, db.AutoMigrate(
 		&APIRequestLog{},
 		&APIRequestLogItem{},
-		&APIRequestLogTurn{},
-		&APIRequestLogTurnRequest{},
-		&APIRequestLogTurnItem{},
-		&APIRequestLogExportBatch{},
-		&APIRequestLogExportMember{},
 		&APIRequestLogOrganizerState{},
 	))
+	require.NoError(t, EnsureAPIRequestLogMaterializedTables(db))
 	return db
 }
 
