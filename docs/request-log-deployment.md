@@ -38,6 +38,7 @@ For high-concurrency or very large requests:
 
 - Keep `API_REQUEST_LOG_ASYNC_WRITE=false` for durable raw capture. `CreateAPIRequestLog` returns only after the parent, parsed items, and durable materialization job are persisted.
 - Keep `API_REQUEST_LOG_DEFERRED_MATERIALIZATION=true` so request goroutines never wait on session/turn aggregation locks. In this mode, `items_status=ok` means raw items are durable; use the materialization queue status to verify turn completion.
+- Read-only model discovery requests (`GET /v1/models`, `GET /v1/models/:model`, `GET /v1beta/models`, and `GET /v1beta/openai/models`) bypass request-log capture so a remote log-database slowdown cannot block client startup. Inference requests continue to be captured.
 - The in-process item queue is volatile and can lose pending items on a crash or restart. It is enabled only when both `API_REQUEST_LOG_ASYNC_WRITE=true` and `API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE=true` explicitly accept that risk. Do not enable it for the current production deployment.
 - Queue size, worker count, and queue byte limits apply only to volatile in-process item writes, not to the durable materialization queue.
 - Keep the dedicated request-log pool below the MySQL connection limit. For the current deployment, start each gateway replica at 2 idle / 8 open connections and the remote viewer/worker at 1 idle / 4 open connections.

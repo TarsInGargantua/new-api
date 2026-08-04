@@ -94,7 +94,7 @@ func TestAPIRequestLogGlobalCaptureRecordsTokenRelayRequest(t *testing.T) {
 	}
 }
 
-func TestAPIRequestLogGlobalCaptureRecordsModelList(t *testing.T) {
+func TestAPIRequestLogGlobalCaptureSkipsModelDiscovery(t *testing.T) {
 	db := setupAPIRequestLogMiddlewareTest(t)
 
 	gin.SetMode(gin.TestMode)
@@ -117,22 +117,66 @@ func TestAPIRequestLogGlobalCaptureRecordsModelList(t *testing.T) {
 		t.Fatalf("expected 200, got %d", recorder.Code)
 	}
 
-	var logs []model.APIRequestLog
-	if err := db.Find(&logs).Error; err != nil {
+	var count int64
+	if err := db.Model(&model.APIRequestLog{}).Count(&count).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(logs) != 1 {
-		t.Fatalf("expected one request log, got %d", len(logs))
+	if count != 0 {
+		t.Fatalf("expected model discovery to bypass request logging, got %d logs", count)
 	}
-	if logs[0].RequestPath != "/v1/models" || logs[0].TokenName != "sdk-token" {
-		t.Fatalf("unexpected model list request log: %+v", logs[0])
+}
+
+func TestAPIRequestLogCaptureSkipsModelDiscovery(t *testing.T) {
+	db := setupAPIRequestLogMiddlewareTest(t)
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(BodyStorageCleanup())
+	router.GET("/v1/models/:model", APIRequestLogCapture(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"id": c.Param("model")})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/gpt-test", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
 	}
-	var items []model.APIRequestLogItem
-	if err := db.Where("log_id = ?", logs[0].Id).Order("seq asc").Find(&items).Error; err != nil {
+	var count int64
+	if err := db.Model(&model.APIRequestLog{}).Count(&count).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 0 {
-		t.Fatalf("model list responses are not training data, got %+v", items)
+	if count != 0 {
+		t.Fatalf("expected explicit capture middleware to bypass model discovery, got %d logs", count)
+	}
+}
+
+func TestIsAPIRequestLogModelDiscoveryRequest(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		want   bool
+	}{
+		{name: "OpenAI list", method: http.MethodGet, path: "/v1/models", want: true},
+		{name: "OpenAI retrieve", method: http.MethodGet, path: "/v1/models/gpt-test", want: true},
+		{name: "Gemini list", method: http.MethodGet, path: "/v1beta/models", want: true},
+		{name: "Gemini OpenAI compatible list", method: http.MethodGet, path: "/v1beta/openai/models", want: true},
+		{name: "trailing slash", method: http.MethodGet, path: "/v1/models/", want: true},
+		{name: "OpenAI non-GET", method: http.MethodPost, path: "/v1/models", want: false},
+		{name: "Gemini inference", method: http.MethodPost, path: "/v1beta/models/gemini-2.5-pro:generateContent", want: false},
+		{name: "chat completion", method: http.MethodPost, path: "/v1/chat/completions", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(tt.method, tt.path, nil)
+			if got := isAPIRequestLogModelDiscoveryRequest(ctx); got != tt.want {
+				t.Fatalf("isAPIRequestLogModelDiscoveryRequest(%s %s) = %t, want %t", tt.method, tt.path, got, tt.want)
+			}
+		})
 	}
 }
 

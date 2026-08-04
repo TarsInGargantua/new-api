@@ -12,6 +12,10 @@ import (
 
 func APIRequestLogCapture() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if isAPIRequestLogModelDiscoveryRequest(c) {
+			c.Next()
+			return
+		}
 		service.StartAPIRequestLogCapture(c)
 		c.Next()
 		service.RecordAPIRequestLog(c, nil, nil)
@@ -53,6 +57,9 @@ func shouldCaptureAPIRequestLogRequest(c *gin.Context) bool {
 	if c.Request.Method == http.MethodOptions {
 		return false
 	}
+	if isAPIRequestLogModelDiscoveryRequest(c) {
+		return false
+	}
 	path := c.Request.URL.Path
 	if isRealtimeRelayPath(path) || c.IsWebsocket() {
 		return false
@@ -61,6 +68,19 @@ func shouldCaptureAPIRequestLogRequest(c *gin.Context) bool {
 		return false
 	}
 	return hasAPIRequestCredential(c) && isRelayAPIPath(path)
+}
+
+func isAPIRequestLogModelDiscoveryRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil || c.Request.Method != http.MethodGet {
+		return false
+	}
+	path := strings.TrimSuffix(c.Request.URL.Path, "/")
+	switch path {
+	case "/v1/models", "/v1beta/models", "/v1beta/openai/models":
+		return true
+	default:
+		return strings.HasPrefix(path, "/v1/models/")
+	}
 }
 
 func isDashboardOrAssetPath(path string) bool {
