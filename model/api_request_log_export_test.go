@@ -269,7 +269,8 @@ func TestAPIRequestLogExportBatchResetReleasesTurnsAndKeepsHistoricalBatch(t *te
 	require.Equal(t, APIRequestLogExportBatchStatusCompleted, reset.Status)
 	require.Positive(t, reset.ResetAt)
 	require.Equal(t, int64(1), reset.ResetRows)
-	require.Equal(t, "/tmp/export-reset.jsonl", reset.ArtifactPath)
+	require.Empty(t, reset.ArtifactPath)
+	require.Positive(t, reset.ArtifactDeletedAt)
 	var members int64
 	require.NoError(t, db.Model(&APIRequestLogExportMember{}).Where("batch_id = ?", batch.Id).Count(&members).Error)
 	require.Zero(t, members)

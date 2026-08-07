@@ -185,14 +185,12 @@ Monitor the durable queue through `GET /api/request-log/status`. The response ex
 
 ## Standalone Viewer
 
-The viewer serves both static UI and APIs on `:3001`. It can stay private on the request-log host or an internal network; a public HTTP endpoint is not required for the main service to write request-log data.
+The viewer serves both static UI and APIs on `:3001` without an application login. Keep it private on the request-log host or an internal network; a public HTTP endpoint is not required for the main service to write request-log data.
 
 Required env:
 
 ```env
 REQUEST_LOG_VIEWER_ADDR=:3001
-REQUEST_LOG_VIEWER_USERNAME=admin
-REQUEST_LOG_VIEWER_PASSWORD=<strong-password>
 REQUEST_LOG_VIEWER_SQL_DSN=request_log_viewer:<password>@tcp(127.0.0.1:3306)/newapi_request_logs?charset=utf8mb4&parseTime=true&loc=Local
 REQUEST_LOG_VIEWER_EXPORT_DIR=/home/rwkv/request-log/exports
 ```
@@ -227,6 +225,8 @@ Viewer endpoints:
 - `POST /api/export-batches/:tag/retry`
 
 Turn time filters use `completed_at >= start_timestamp AND completed_at < end_timestamp`. Export batches ignore list pagination, default to exact completed turns, and globally exclude turns claimed by earlier batches. Add `include_inferred=true` only when inferred completed turns are intentionally included. Encrypted reasoning is never exported. The legacy `/api/export.jsonl` endpoint returns `410 Gone`.
+
+Resetting a completed historical export releases its source turns for a future export and deletes its JSONL artifact. The batch history and checksum remain visible, but the deleted artifact cannot be downloaded again.
 
 ## Historical Turn Organizer
 
@@ -272,7 +272,7 @@ Validation:
 ```bash
 mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u newapi_request_log_app -p newapi_request_logs -e 'SHOW TABLES;'
 mysql --protocol=tcp -h <PUBLIC_MYSQL_HOST> -P <PUBLIC_MYSQL_PORT> -u newapi_request_log_app -p newapi_request_logs -e 'SHOW TABLES;'
-curl -u "$REQUEST_LOG_VIEWER_USERNAME:$REQUEST_LOG_VIEWER_PASSWORD" http://127.0.0.1:3001/api/status
+curl http://127.0.0.1:3001/api/status
 ```
 
 External validation is only required for the MySQL endpoint used by Zeabur, such as a public router mapping to the remote MySQL service. If TCP connects but returns zero bytes, fix the cloud firewall, router NAT, or port forwarding before configuring Zeabur with the public DSN.

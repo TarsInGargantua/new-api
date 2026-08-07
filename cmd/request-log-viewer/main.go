@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/subtle"
 	"flag"
 	"fmt"
 	"net/http"
@@ -28,16 +27,10 @@ type pageData struct {
 
 func main() {
 	addr := flag.String("addr", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_ADDR"), ":3001"), "listen address")
-	username := flag.String("username", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_USERNAME"), "admin"), "basic auth username")
-	password := flag.String("password", os.Getenv("REQUEST_LOG_VIEWER_PASSWORD"), "basic auth password")
 	dsn := flag.String("dsn", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_SQL_DSN"), os.Getenv("REQUEST_LOG_SQL_DSN")), "request log database DSN")
 	exportDir := flag.String("export-dir", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_EXPORT_DIR"), "exports"), "persistent JSONL export directory")
 	flag.Parse()
 
-	if strings.TrimSpace(*password) == "" {
-		fmt.Fprintln(os.Stderr, "REQUEST_LOG_VIEWER_PASSWORD is required")
-		os.Exit(1)
-	}
 	if strings.TrimSpace(*dsn) == "" {
 		fmt.Fprintln(os.Stderr, "REQUEST_LOG_SQL_DSN or REQUEST_LOG_VIEWER_SQL_DSN is required")
 		os.Exit(1)
@@ -75,8 +68,7 @@ func main() {
 	mux.HandleFunc("/api/export.jsonl", serveJSONL)
 
 	fmt.Printf("request-log-viewer listening on %s\n", *addr)
-	handler := basicAuth(mux, *username, *password)
-	if err := http.ListenAndServe(*addr, handler); err != nil {
+	if err := http.ListenAndServe(*addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "listen: %v\n", err)
 		os.Exit(1)
 	}
@@ -171,20 +163,6 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
-}
-
-func basicAuth(next http.Handler, username string, password string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotUser, gotPass, ok := r.BasicAuth()
-		userOK := subtle.ConstantTimeCompare([]byte(gotUser), []byte(username)) == 1
-		passOK := subtle.ConstantTimeCompare([]byte(gotPass), []byte(password)) == 1
-		if !ok || !userOK || !passOK {
-			w.Header().Set("WWW-Authenticate", `Basic realm="request-log-viewer"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func queryInt(value string, fallback int) int {
@@ -1175,8 +1153,9 @@ const indexHTML = `<!doctype html>
     function batchActions(batch) {
       const actions = []
       if (batch.status === 'completed') {
-        actions.push('<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>')
-        if (!batch.reset_at) actions.push('<button type="button" data-reset="' + esc(batch.tag) + '">Reset export state</button>')
+        if (!batch.artifact_deleted_at) actions.push('<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>')
+        if (!batch.reset_at) actions.push('<button type="button" data-reset="' + esc(batch.tag) + '">重置为未导出</button>')
+        if (batch.reset_at && !batch.artifact_deleted_at) actions.push('<button type="button" data-delete-artifact="' + esc(batch.tag) + '">删除 JSONL</button>')
         if (batch.integrity_status === 'verified') {
           if (batch.cleaned_at) actions.push('<button type="button" data-delete="' + esc(batch.tag) + '">Delete</button>')
           else actions.push('<button type="button" data-clean="' + esc(batch.tag) + '">Mark cleaned</button>')
@@ -1192,7 +1171,7 @@ const indexHTML = `<!doctype html>
     function renderBatchRow(batch) {
       return [
         '<div class="batch-row">',
-        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · reset ' + esc(beijingTime(batch.reset_at)) + ' (' + esc(batch.reset_rows || 0) + ' released)' : '') + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div>' + batchProgress(batch) + '</div>',
+        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · reset ' + esc(beijingTime(batch.reset_at)) + ' (' + esc(batch.reset_rows || 0) + ' released)' : '') + (batch.artifact_deleted_at ? ' · JSONL 已删除' : '') + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div>' + batchProgress(batch) + '</div>',
         '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batch.status || 'pending') + '</span>',
         '<div>' + batchActions(batch) + '</div>',
         '</div>'
@@ -1253,11 +1232,25 @@ const indexHTML = `<!doctype html>
       })
       batchListEl.querySelectorAll('[data-reset]').forEach(button => {
         button.onclick = async () => {
-          if (!window.confirm('Reset this historical batch to not exported? The JSONL and history entry stay, but its source turns become eligible for a future export.')) return
+          if (!window.confirm('确认重置这条历史导出吗？系统会删除已整理的 JSONL 文件，但保留历史记录；关联轮次将变为“未导出”，后续可以重新导出。')) return
           button.disabled = true
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.reset) + '/reset', { method:'POST' })
             await Promise.all([loadBatches(), loadRows(), loadExportPreview()])
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-delete-artifact]').forEach(button => {
+        button.onclick = async () => {
+          if (!window.confirm('确认删除这条已重置历史导出的 JSONL 文件吗？历史记录会保留，删除后无法下载该文件。')) return
+          button.disabled = true
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.deleteArtifact) + '/delete-artifact', { method:'POST' })
+            await loadBatches()
           } catch (err) {
             exportPreviewEl.textContent = err.message
           } finally {
