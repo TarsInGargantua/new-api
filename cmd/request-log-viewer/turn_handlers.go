@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/model"
 
@@ -15,8 +17,9 @@ import (
 )
 
 type requestLogViewerServer struct {
-	db      *gorm.DB
-	exports *requestLogExportWorker
+	db               *gorm.DB
+	exports          *requestLogExportWorker
+	exportMutationMu sync.Mutex
 }
 
 func (s *requestLogViewerServer) serveTurns(w http.ResponseWriter, r *http.Request) {
@@ -152,12 +155,13 @@ func (s *requestLogViewerServer) serveExportBatchAction(w http.ResponseWriter, r
 			writeMethodNotAllowed(w, http.MethodPost)
 			return
 		}
-		batch, err := model.ResetAPIRequestLogExportBatch(s.db, tag)
-		if err != nil {
-			writeExportActionError(w, err)
+		s.serveExportBatchReset(w, tag)
+	case "delete-artifact":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
 			return
 		}
-		writeAPI(w, batch, nil)
+		s.serveResetExportArtifactDeletion(w, tag)
 	case "delete":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
@@ -169,7 +173,104 @@ func (s *requestLogViewerServer) serveExportBatchAction(w http.ResponseWriter, r
 	}
 }
 
+func (s *requestLogViewerServer) serveExportBatchReset(w http.ResponseWriter, tag string) {
+	s.exportMutationMu.Lock()
+	defer s.exportMutationMu.Unlock()
+
+	batch, err := model.GetAPIRequestLogExportBatchByTag(s.db, tag)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		writeAPIError(w, http.StatusNotFound, "export batch not found")
+		return
+	}
+	if err != nil {
+		writeAPI(w, nil, err)
+		return
+	}
+	if batch.Status != model.APIRequestLogExportBatchStatusCompleted {
+		writeAPIError(w, http.StatusConflict, "only completed export batches can be reset")
+		return
+	}
+	if batch.ResetAt > 0 {
+		writeAPIError(w, http.StatusConflict, model.ErrAPIRequestLogExportBatchAlreadyReset.Error())
+		return
+	}
+	staged, err := s.exports.StageArtifactDeletion(batch)
+	if err != nil {
+		writeAPI(w, nil, err)
+		return
+	}
+	reset, err := model.ResetAPIRequestLogExportBatch(s.db, tag)
+	if err != nil {
+		_ = staged.Restore()
+		writeExportActionError(w, err)
+		return
+	}
+	if err := staged.Finalize(); err != nil {
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Message: "export reset; staged JSONL cleanup failed: " + err.Error(), Data: reset})
+		return
+	}
+	writeAPI(w, reset, nil)
+}
+
+// serveResetExportArtifactDeletion supports historical batches reset before
+// artifact deletion became part of the reset operation.
+func (s *requestLogViewerServer) serveResetExportArtifactDeletion(w http.ResponseWriter, tag string) {
+	s.exportMutationMu.Lock()
+	defer s.exportMutationMu.Unlock()
+
+	batch, err := model.GetAPIRequestLogExportBatchByTag(s.db, tag)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		writeAPIError(w, http.StatusNotFound, "export batch not found")
+		return
+	}
+	if err != nil {
+		writeAPI(w, nil, err)
+		return
+	}
+	if batch.ResetAt <= 0 {
+		writeAPIError(w, http.StatusConflict, "only reset export batches can delete their JSONL artifact")
+		return
+	}
+	if batch.ArtifactDeletedAt > 0 {
+		writeAPIError(w, http.StatusConflict, "export JSONL artifact has already been deleted")
+		return
+	}
+	staged, err := s.exports.StageArtifactDeletion(batch)
+	if err != nil {
+		writeAPI(w, nil, err)
+		return
+	}
+	now := time.Now().UTC().Unix()
+	result := s.db.Model(&model.APIRequestLogExportBatch{}).
+		Where("id = ? AND reset_at > 0 AND artifact_deleted_at = 0", batch.Id).
+		Updates(map[string]interface{}{"artifact_path": "", "artifact_deleted_at": now})
+	if result.Error != nil {
+		_ = staged.Restore()
+		writeAPI(w, nil, result.Error)
+		return
+	}
+	if result.RowsAffected != 1 {
+		_ = staged.Restore()
+		writeAPIError(w, http.StatusConflict, "export JSONL artifact has already been deleted")
+		return
+	}
+	deleted, err := model.GetAPIRequestLogExportBatchByTag(s.db, tag)
+	if err != nil {
+		_ = staged.Restore()
+		writeAPI(w, nil, err)
+		return
+	}
+	if err := staged.Finalize(); err != nil {
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Message: "JSONL staged cleanup failed: " + err.Error(), Data: deleted})
+		return
+	}
+	writeAPI(w, deleted, nil)
+}
+
 func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, tag string) {
+	s.exportMutationMu.Lock()
+	defer s.exportMutationMu.Unlock()
+
 	batch, err := model.GetAPIRequestLogExportBatchByTag(s.db, tag)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		writeAPIError(w, http.StatusNotFound, "export batch not found")
@@ -187,10 +288,14 @@ func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, t
 		writeAPIError(w, http.StatusConflict, model.ErrAPIRequestLogExportBatchNotCleaned.Error())
 		return
 	}
-	staged, err := s.exports.StageArtifactDeletion(batch)
-	if err != nil {
-		writeAPI(w, nil, err)
-		return
+	staged := &stagedExportArtifactDeletion{}
+	if batch.ArtifactDeletedAt <= 0 {
+		var err error
+		staged, err = s.exports.StageArtifactDeletion(batch)
+		if err != nil {
+			writeAPI(w, nil, err)
+			return
+		}
 	}
 	deleted, err := model.DeleteAPIRequestLogExportBatch(s.db, tag)
 	if err != nil {
@@ -232,6 +337,10 @@ func (s *requestLogViewerServer) serveExportDownload(w http.ResponseWriter, r *h
 	}
 	if batch.Status != model.APIRequestLogExportBatchStatusCompleted {
 		writeAPIError(w, http.StatusConflict, "export batch is not completed")
+		return
+	}
+	if batch.ArtifactDeletedAt > 0 {
+		writeAPIError(w, http.StatusGone, "export JSONL artifact was deleted when this batch was reset")
 		return
 	}
 	path, err := s.exports.ArtifactPath(batch)

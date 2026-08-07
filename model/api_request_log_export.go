@@ -80,6 +80,7 @@ type APIRequestLogExportBatch struct {
 	CleanedAt          int64                     `json:"cleaned_at,omitempty" gorm:"bigint;index"`
 	ResetAt            int64                     `json:"reset_at,omitempty" gorm:"bigint;index"`
 	ResetRows          int64                     `json:"reset_rows" gorm:"default:0"`
+	ArtifactDeletedAt  int64                     `json:"artifact_deleted_at,omitempty" gorm:"bigint;index"`
 	BuildOwner         string                    `json:"-" gorm:"type:varchar(191);index;default:''"`
 	LeaseExpiresAt     int64                     `json:"lease_expires_at,omitempty" gorm:"bigint;index;default:0"`
 	BuildAttempt       int                       `json:"build_attempt" gorm:"default:0"`
@@ -443,6 +444,7 @@ func ClaimAPIRequestLogExportBatch(db *gorm.DB, tag, owner string, leaseDuration
 			"integrity_checked_at": 0,
 			"integrity_error":      "",
 			"cleaned_at":           0,
+			"artifact_deleted_at":  0,
 		})
 	if result.Error != nil {
 		return nil, result.Error
@@ -573,6 +575,7 @@ func MarkAPIRequestLogExportBatchCompleted(db *gorm.DB, tag, owner, artifactPath
 			"integrity_checked_at": now,
 			"integrity_error":      "",
 			"cleaned_at":           0,
+			"artifact_deleted_at":  0,
 		})
 	if result.Error != nil {
 		return nil, result.Error
@@ -635,6 +638,7 @@ func RetryAPIRequestLogExportBatchPending(db *gorm.DB, tag string) (*APIRequestL
 			"integrity_checked_at": 0,
 			"integrity_error":      "",
 			"cleaned_at":           0,
+			"artifact_deleted_at":  0,
 			"build_owner":          "",
 			"lease_expires_at":     0,
 		})
@@ -731,9 +735,10 @@ func MarkAPIRequestLogExportBatchCleaned(db *gorm.DB, tag string) (*APIRequestLo
 }
 
 // ResetAPIRequestLogExportBatch releases a completed batch's source turns for
-// a future export while retaining the JSONL artifact and its historical batch
-// metadata. Deleting the member branch is required in addition to clearing
-// exported_version because either marker makes a turn ineligible for export.
+// a future export and records that the matching JSONL was deleted by the
+// viewer. Historical batch metadata and its checksum are retained. Deleting
+// the member branch is required in addition to clearing exported_version
+// because either marker makes a turn ineligible for export.
 func ResetAPIRequestLogExportBatch(db *gorm.DB, tag string) (*APIRequestLogExportBatch, error) {
 	if db == nil {
 		return nil, errors.New("request log database is not initialized")
@@ -796,7 +801,12 @@ func ResetAPIRequestLogExportBatch(db *gorm.DB, tag string) (*APIRequestLogExpor
 		now := time.Now().UTC().Unix()
 		result := tx.Model(&APIRequestLogExportBatch{}).
 			Where("id = ? AND reset_at = 0", batch.Id).
-			Updates(map[string]interface{}{"reset_at": now, "reset_rows": int64(len(turnIds))})
+			Updates(map[string]interface{}{
+				"reset_at":            now,
+				"reset_rows":          int64(len(turnIds)),
+				"artifact_path":       "",
+				"artifact_deleted_at": now,
+			})
 		if result.Error != nil {
 			return result.Error
 		}

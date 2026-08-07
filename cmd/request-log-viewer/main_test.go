@@ -198,11 +198,20 @@ func TestRequestLogViewerResetsCompletedExportBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	completed := waitForCompletedExport(t, db, batch.Tag)
+	artifactPath := completed.ArtifactPath
 
 	resetRecorder := httptest.NewRecorder()
 	server.serveExportBatchAction(resetRecorder, httptest.NewRequest(http.MethodPost, "/api/export-batches/"+batch.Tag+"/reset", nil))
-	if resetRecorder.Code != http.StatusOK || !strings.Contains(resetRecorder.Body.String(), `"reset_at":`) {
+	if resetRecorder.Code != http.StatusOK || !strings.Contains(resetRecorder.Body.String(), `"reset_at":`) || !strings.Contains(resetRecorder.Body.String(), `"artifact_deleted_at":`) {
 		t.Fatalf("unexpected reset response: status=%d body=%s", resetRecorder.Code, resetRecorder.Body.String())
+	}
+	if _, err := os.Stat(artifactPath); !os.IsNotExist(err) {
+		t.Fatalf("reset should delete the JSONL artifact, stat err=%v", err)
+	}
+	downloadRecorder := httptest.NewRecorder()
+	server.serveExportBatchAction(downloadRecorder, httptest.NewRequest(http.MethodGet, "/api/export-batches/"+batch.Tag+"/download", nil))
+	if downloadRecorder.Code != http.StatusGone {
+		t.Fatalf("reset artifact download should be gone, got status=%d body=%s", downloadRecorder.Code, downloadRecorder.Body.String())
 	}
 	var storedTurn model.APIRequestLogTurn
 	if err := db.First(&storedTurn, turn.Id).Error; err != nil {
@@ -223,6 +232,32 @@ func TestRequestLogViewerResetsCompletedExportBatch(t *testing.T) {
 	server.serveExportBatchAction(secondReset, httptest.NewRequest(http.MethodPost, "/api/export-batches/"+batch.Tag+"/reset", nil))
 	if secondReset.Code != http.StatusConflict {
 		t.Fatalf("expected second reset conflict, got status=%d body=%s", secondReset.Code, secondReset.Body.String())
+	}
+}
+
+func TestRequestLogViewerDeletesArtifactForPreviouslyResetBatch(t *testing.T) {
+	server, db := setupRequestLogViewerTest(t)
+	turn := seedRequestLogViewerTurn(t, db)
+	batch, err := model.CreateAPIRequestLogExportBatch(db, model.APIRequestLogTurnQueryParams{SessionId: turn.SessionId}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitForCompletedExport(t, db, batch.Tag)
+	artifactPath := completed.ArtifactPath
+	if err := db.Model(&model.APIRequestLogExportBatch{}).Where("id = ?", completed.Id).Updates(map[string]interface{}{
+		"reset_at":   time.Now().UTC().Unix(),
+		"reset_rows": completed.RowCount,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	deleteArtifactRecorder := httptest.NewRecorder()
+	server.serveExportBatchAction(deleteArtifactRecorder, httptest.NewRequest(http.MethodPost, "/api/export-batches/"+batch.Tag+"/delete-artifact", nil))
+	if deleteArtifactRecorder.Code != http.StatusOK || !strings.Contains(deleteArtifactRecorder.Body.String(), `"artifact_deleted_at":`) {
+		t.Fatalf("unexpected delete artifact response: status=%d body=%s", deleteArtifactRecorder.Code, deleteArtifactRecorder.Body.String())
+	}
+	if _, err := os.Stat(artifactPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy reset artifact should be deleted, stat err=%v", err)
 	}
 }
 

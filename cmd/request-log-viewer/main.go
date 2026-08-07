@@ -1153,8 +1153,9 @@ const indexHTML = `<!doctype html>
     function batchActions(batch) {
       const actions = []
       if (batch.status === 'completed') {
-        actions.push('<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>')
-        if (!batch.reset_at) actions.push('<button type="button" data-reset="' + esc(batch.tag) + '">Reset export state</button>')
+        if (!batch.artifact_deleted_at) actions.push('<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>')
+        if (!batch.reset_at) actions.push('<button type="button" data-reset="' + esc(batch.tag) + '">重置为未导出</button>')
+        if (batch.reset_at && !batch.artifact_deleted_at) actions.push('<button type="button" data-delete-artifact="' + esc(batch.tag) + '">删除 JSONL</button>')
         if (batch.integrity_status === 'verified') {
           if (batch.cleaned_at) actions.push('<button type="button" data-delete="' + esc(batch.tag) + '">Delete</button>')
           else actions.push('<button type="button" data-clean="' + esc(batch.tag) + '">Mark cleaned</button>')
@@ -1170,7 +1171,7 @@ const indexHTML = `<!doctype html>
     function renderBatchRow(batch) {
       return [
         '<div class="batch-row">',
-        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · reset ' + esc(beijingTime(batch.reset_at)) + ' (' + esc(batch.reset_rows || 0) + ' released)' : '') + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div>' + batchProgress(batch) + '</div>',
+        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · reset ' + esc(beijingTime(batch.reset_at)) + ' (' + esc(batch.reset_rows || 0) + ' released)' : '') + (batch.artifact_deleted_at ? ' · JSONL 已删除' : '') + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div>' + batchProgress(batch) + '</div>',
         '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batch.status || 'pending') + '</span>',
         '<div>' + batchActions(batch) + '</div>',
         '</div>'
@@ -1231,11 +1232,25 @@ const indexHTML = `<!doctype html>
       })
       batchListEl.querySelectorAll('[data-reset]').forEach(button => {
         button.onclick = async () => {
-          if (!window.confirm('Reset this historical batch to not exported? The JSONL and history entry stay, but its source turns become eligible for a future export.')) return
+          if (!window.confirm('确认重置这条历史导出吗？系统会删除已整理的 JSONL 文件，但保留历史记录；关联轮次将变为“未导出”，后续可以重新导出。')) return
           button.disabled = true
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.reset) + '/reset', { method:'POST' })
             await Promise.all([loadBatches(), loadRows(), loadExportPreview()])
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-delete-artifact]').forEach(button => {
+        button.onclick = async () => {
+          if (!window.confirm('确认删除这条已重置历史导出的 JSONL 文件吗？历史记录会保留，删除后无法下载该文件。')) return
+          button.disabled = true
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.deleteArtifact) + '/delete-artifact', { method:'POST' })
+            await loadBatches()
           } catch (err) {
             exportPreviewEl.textContent = err.message
           } finally {

@@ -226,6 +226,8 @@ Viewer endpoints:
 
 Turn time filters use `completed_at >= start_timestamp AND completed_at < end_timestamp`. Export batches ignore list pagination, default to exact completed turns, and globally exclude turns claimed by earlier batches. Add `include_inferred=true` only when inferred completed turns are intentionally included. Encrypted reasoning is never exported. The legacy `/api/export.jsonl` endpoint returns `410 Gone`.
 
+Resetting a completed historical export releases its source turns for a future export and deletes its JSONL artifact. The batch history and checksum remain visible, but the deleted artifact cannot be downloaded again.
+
 ## Historical Turn Organizer
 
 Initialize the materialized tables with the migration-capable application account:
