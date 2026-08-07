@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -1474,22 +1475,10 @@ func getAPIRequestLogTurnDetailsByIds(db *gorm.DB, ids []int64) ([]*APIRequestLo
 	}
 	sourceById := map[int]APIRequestLogItem{}
 	if len(sourceIds) > 0 {
-		// A single export page can reference many thousands of raw items. Keep
-		// each IN query bounded so one batch cannot monopolize MySQL's parser,
-		// connection, or memory while the export lease is held.
-		const sourceItemBatchSize = 500
-		for start := 0; start < len(sourceIds); start += sourceItemBatchSize {
-			end := start + sourceItemBatchSize
-			if end > len(sourceIds) {
-				end = len(sourceIds)
-			}
-			var sourceItems []APIRequestLogItem
-			if err := db.Where("id IN ?", sourceIds[start:end]).Find(&sourceItems).Error; err != nil {
-				return nil, err
-			}
-			for _, sourceItem := range sourceItems {
-				sourceById[sourceItem.Id] = sourceItem
-			}
+		var err error
+		sourceById, err = loadAPIRequestLogTurnSourceItems(db, sourceIds)
+		if err != nil {
+			return nil, err
 		}
 	}
 	for _, mapping := range mappings {
@@ -1555,6 +1544,70 @@ func getAPIRequestLogTurnDetailsByIds(db *gorm.DB, ids []int64) ([]*APIRequestLo
 		}
 	}
 	return ordered, nil
+}
+
+// loadAPIRequestLogTurnSourceItems keeps IN lists small while reading a few
+// batches concurrently. High-density turns otherwise spend most export time
+// waiting on dozens of independent round trips. Concurrency is deliberately
+// capped at four and SQLite remains serial for compatibility with its single
+// writer/connection test and deployment modes.
+func loadAPIRequestLogTurnSourceItems(db *gorm.DB, sourceIds []int) (map[int]APIRequestLogItem, error) {
+	const sourceItemBatchSize = 500
+	const maxWorkers = 4
+	result := make(map[int]APIRequestLogItem, len(sourceIds))
+	if len(sourceIds) == 0 {
+		return result, nil
+	}
+	workerCount := (len(sourceIds) + sourceItemBatchSize - 1) / sourceItemBatchSize
+	if workerCount > maxWorkers {
+		workerCount = maxWorkers
+	}
+	if db != nil && db.Dialector != nil && db.Dialector.Name() == "sqlite" {
+		workerCount = 1
+	}
+	type sourceItemLoadResult struct {
+		items []APIRequestLogItem
+		err   error
+	}
+	jobs := make(chan []int)
+	results := make(chan sourceItemLoadResult, workerCount)
+	var workers sync.WaitGroup
+	for index := 0; index < workerCount; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for ids := range jobs {
+				var items []APIRequestLogItem
+				err := db.Session(&gorm.Session{NewDB: true}).Where("id IN ?", ids).Find(&items).Error
+				results <- sourceItemLoadResult{items: items, err: err}
+			}
+		}()
+	}
+	go func() {
+		for start := 0; start < len(sourceIds); start += sourceItemBatchSize {
+			end := start + sourceItemBatchSize
+			if end > len(sourceIds) {
+				end = len(sourceIds)
+			}
+			jobs <- sourceIds[start:end]
+		}
+		close(jobs)
+		workers.Wait()
+		close(results)
+	}()
+	var firstErr error
+	for loaded := range results {
+		if loaded.err != nil && firstErr == nil {
+			firstErr = loaded.err
+		}
+		for _, item := range loaded.items {
+			result[item.Id] = item
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return result, nil
 }
 
 func apiRequestLogTurnItemAllowed(item APIRequestLogItem) bool {

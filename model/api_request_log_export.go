@@ -66,6 +66,7 @@ type APIRequestLogExportBatch struct {
 	SchemaVersion      int                       `json:"schema_version" gorm:"default:1"`
 	Error              string                    `json:"error,omitempty" gorm:"type:text"`
 	RowCount           int64                     `json:"row_count" gorm:"default:0"`
+	ProcessedRows      int64                     `json:"processed_rows" gorm:"default:0"`
 	FilterJSON         APIRequestLogBody         `json:"-"`
 	Filter             APIRequestLogExportFilter `json:"filter" gorm:"-"`
 	IncludeInferred    bool                      `json:"include_inferred"`
@@ -433,6 +434,7 @@ func ClaimAPIRequestLogExportBatch(db *gorm.DB, tag, owner string, leaseDuration
 			"artifact_path":        "",
 			"sha256":               "",
 			"error":                "",
+			"processed_rows":       0,
 			"completed_at":         0,
 			"integrity_status":     APIRequestLogExportIntegrityPending,
 			"integrity_checked_at": 0,
@@ -511,6 +513,34 @@ func RenewAPIRequestLogExportBatchLease(db *gorm.DB, tag, owner string, leaseDur
 	return GetAPIRequestLogExportBatchByTag(db, tag)
 }
 
+// UpdateAPIRequestLogExportBatchProgress persists worker progress so viewers
+// can render a restart-safe progress indicator instead of inferring progress
+// from a lease or a transient in-memory counter.
+func UpdateAPIRequestLogExportBatchProgress(db *gorm.DB, tag, owner string, processedRows int64) (*APIRequestLogExportBatch, error) {
+	if db == nil {
+		return nil, errors.New("request log database is not initialized")
+	}
+	tag = strings.TrimSpace(tag)
+	owner = strings.TrimSpace(owner)
+	if tag == "" || owner == "" {
+		return nil, errors.New("export batch tag and build owner are required")
+	}
+	if processedRows < 0 {
+		return nil, errors.New("processed export row count cannot be negative")
+	}
+	now := time.Now().UTC().Unix()
+	result := db.Model(&APIRequestLogExportBatch{}).
+		Where("tag = ? AND status = ? AND build_owner = ? AND lease_expires_at > ?", tag, APIRequestLogExportBatchStatusBuilding, owner, now).
+		Update("processed_rows", processedRows)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, apiRequestLogExportTransitionError(db, tag, ErrAPIRequestLogExportBatchLeaseLost)
+	}
+	return GetAPIRequestLogExportBatchByTag(db, tag)
+}
+
 func MarkAPIRequestLogExportBatchCompleted(db *gorm.DB, tag, owner, artifactPath, sha256 string, rowCount int64) (*APIRequestLogExportBatch, error) {
 	batch, err := GetAPIRequestLogExportBatchByTag(db, tag)
 	if err != nil {
@@ -533,6 +563,7 @@ func MarkAPIRequestLogExportBatchCompleted(db *gorm.DB, tag, owner, artifactPath
 			"artifact_path":        artifactPath,
 			"sha256":               strings.ToLower(strings.TrimSpace(sha256)),
 			"error":                "",
+			"processed_rows":       rowCount,
 			"completed_at":         now,
 			"lease_expires_at":     0,
 			"integrity_status":     APIRequestLogExportIntegrityVerified,
@@ -595,6 +626,7 @@ func RetryAPIRequestLogExportBatchPending(db *gorm.DB, tag string) (*APIRequestL
 			"artifact_path":        "",
 			"sha256":               "",
 			"error":                "",
+			"processed_rows":       0,
 			"completed_at":         0,
 			"integrity_status":     APIRequestLogExportIntegrityPending,
 			"integrity_checked_at": 0,

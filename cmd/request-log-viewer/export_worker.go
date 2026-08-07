@@ -175,6 +175,9 @@ func (w *requestLogExportWorker) buildClaimed(batch *model.APIRequestLogExportBa
 			}
 			rowCount++
 		}
+		if _, err := model.UpdateAPIRequestLogExportBatchProgress(w.db, batch.Tag, w.owner, rowCount); err != nil {
+			return err
+		}
 		sequence = page.NextSequence
 		if !page.HasMore {
 			break

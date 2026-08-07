@@ -672,6 +672,9 @@ const indexHTML = `<!doctype html>
     }
     .batch-tag { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:12px/1.4 "IBM Plex Mono", monospace; }
     .batch-meta { color:var(--faint); font-size:11px; }
+    .batch-progress { display:grid; grid-template-columns:auto minmax(90px, 1fr); align-items:center; gap:8px; margin-top:7px; color:var(--muted); font-size:11px; }
+    .batch-progress-track { height:6px; overflow:hidden; border:1px solid var(--line-soft); border-radius:999px; background:var(--code); }
+    .batch-progress-fill { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg, var(--accent-dim), var(--accent)); transition:width .25s ease; }
     pre {
       margin:0;
       padding:12px;
@@ -1145,6 +1148,16 @@ const indexHTML = `<!doctype html>
       if (batch.integrity_status === 'broken') return 'broken'
       return 'unverified'
     }
+    function batchProgress(batch) {
+      if (!['pending', 'building'].includes(batch.status)) return ''
+      const total = Math.max(0, Number(batch.row_count || 0))
+      const processed = Math.max(0, Math.min(total || Number.MAX_SAFE_INTEGER, Number(batch.processed_rows || 0)))
+      const percent = total > 0 ? Math.min(100, Math.round(processed * 100 / total)) : 0
+      const label = batch.status === 'pending'
+        ? 'Queued · ' + String(total) + ' turns'
+        : 'Exporting ' + String(processed) + ' / ' + String(total) + ' turns · ' + String(percent) + '%'
+      return '<div class="batch-progress"><span>' + esc(label) + '</span><div class="batch-progress-track" aria-label="' + esc(label) + '"><i class="batch-progress-fill" style="width:' + String(percent) + '%"></i></div></div>'
+    }
     function batchActions(batch) {
       const actions = []
       if (batch.status === 'completed') {
@@ -1166,7 +1179,7 @@ const indexHTML = `<!doctype html>
       const batches = data.items || []
       batchListEl.innerHTML = batches.map(batch => [
         '<div class="batch-row">',
-        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div></div>',
+        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div>' + batchProgress(batch) + '</div>',
         '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batch.status || 'pending') + '</span>',
         '<div>' + batchActions(batch) + '</div>',
         '</div>'
