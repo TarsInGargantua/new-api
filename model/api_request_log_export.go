@@ -825,6 +825,18 @@ func ResetAPIRequestLogExportBatch(db *gorm.DB, tag string) (*APIRequestLogExpor
 // deleting an artifact never causes an already-processed turn to be exported
 // again by accident.
 func DeleteAPIRequestLogExportBatch(db *gorm.DB, tag string) (*APIRequestLogExportBatch, error) {
+	return deleteAPIRequestLogExportBatch(db, tag, true)
+}
+
+// ForceDeleteAPIRequestLogExportBatch removes a completed export's history
+// branch regardless of its cleaned marker. It is for the Viewer’s explicitly
+// confirmed historical-record deletion action; it does not change any turn’s
+// exported_version.
+func ForceDeleteAPIRequestLogExportBatch(db *gorm.DB, tag string) (*APIRequestLogExportBatch, error) {
+	return deleteAPIRequestLogExportBatch(db, tag, false)
+}
+
+func deleteAPIRequestLogExportBatch(db *gorm.DB, tag string, requireCleaned bool) (*APIRequestLogExportBatch, error) {
 	if db == nil {
 		return nil, errors.New("request log database is not initialized")
 	}
@@ -840,7 +852,7 @@ func DeleteAPIRequestLogExportBatch(db *gorm.DB, tag string) (*APIRequestLogExpo
 		if deleted.Status != APIRequestLogExportBatchStatusCompleted {
 			return errors.New("only completed export batches can be deleted")
 		}
-		if deleted.CleanedAt <= 0 {
+		if requireCleaned && deleted.CleanedAt <= 0 {
 			return ErrAPIRequestLogExportBatchNotCleaned
 		}
 		if err := tx.Where("batch_id = ?", deleted.Id).Delete(&APIRequestLogExportMember{}).Error; err != nil {

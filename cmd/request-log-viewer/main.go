@@ -91,7 +91,7 @@ func serveStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	result := viewerStatus{}
 	if model.REQUEST_LOG_DB == nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "request log database is not initialized")
+		writeAPIError(w, http.StatusServiceUnavailable, "请求日志数据库尚未初始化")
 		return
 	}
 	if model.REQUEST_LOG_DB.Dialector != nil {
@@ -115,11 +115,11 @@ func serveFilterOptions(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveLegacyRequestLogs(w http.ResponseWriter, r *http.Request) {
-	writeAPIError(w, http.StatusGone, "request-level views are disabled; use /api/turns")
+	writeAPIError(w, http.StatusGone, "请求级查看功能已停用，请使用 /api/turns")
 }
 
 func serveJSONL(w http.ResponseWriter, r *http.Request) {
-	writeAPIError(w, http.StatusGone, "request-level export is disabled; create a turn export batch")
+	writeAPIError(w, http.StatusGone, "请求级导出功能已停用，请创建轮次导出批次")
 }
 
 func queryList(values map[string][]string, key string) []string {
@@ -191,11 +191,11 @@ func firstNonEmpty(values ...string) string {
 }
 
 const indexHTML = `<!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Request Log Viewer</title>
+  <title>轮次日志查看器</title>
   <style>
     :root {
       color-scheme: dark;
@@ -758,76 +758,76 @@ const indexHTML = `<!doctype html>
   <header>
     <div class="brand">
       <div class="mark"></div>
-      <h1>Turn Log Viewer</h1>
+      <h1>轮次日志查看器</h1>
     </div>
-    <div id="status" class="status">Loading...</div>
+    <div id="status" class="status">正在加载…</div>
     <div class="actions">
-      <button id="refresh">Refresh</button>
-      <button id="export">Exports</button>
+      <button id="refresh">刷新</button>
+      <button id="export">导出管理</button>
     </div>
   </header>
   <main>
     <aside>
       <div class="filters">
         <div class="filter-field" data-filter="model_name">
-          <button class="select-button" id="modelFilter" type="button"><strong>All models</strong><span>Model</span></button>
+          <button class="select-button" id="modelFilter" type="button"><strong>全部模型</strong><span>模型</span></button>
           <div class="select-menu" id="modelMenu"></div>
         </div>
         <div class="filter-field" data-filter="username">
-          <button class="select-button" id="userFilter" type="button"><strong>All users</strong><span>User</span></button>
+          <button class="select-button" id="userFilter" type="button"><strong>全部用户</strong><span>用户</span></button>
           <div class="select-menu" id="userMenu"></div>
         </div>
-        <input id="sessionFilter" type="search" placeholder="Session ID">
-        <input id="turnFilter" type="search" placeholder="Turn ID">
-        <select id="attributionFilter" aria-label="Attribution">
-          <option value="">All confidence</option>
-          <option value="exact">Exact</option>
-          <option value="inferred">Inferred</option>
-          <option value="unknown">Unknown</option>
+        <input id="sessionFilter" type="search" placeholder="会话标识">
+        <input id="turnFilter" type="search" placeholder="轮次标识">
+        <select id="attributionFilter" aria-label="归因置信度">
+          <option value="">全部置信度</option>
+          <option value="exact">精确</option>
+          <option value="inferred">推断</option>
+          <option value="unknown">未知</option>
         </select>
-        <select id="turnStatusFilter" aria-label="Turn status">
-          <option value="">All states</option>
-          <option value="completed">Completed</option>
-          <option value="open">Open</option>
-          <option value="unknown">Unknown</option>
+        <select id="turnStatusFilter" aria-label="轮次状态">
+          <option value="">全部状态</option>
+          <option value="completed">已完成</option>
+          <option value="open">进行中</option>
+          <option value="unknown">未知</option>
         </select>
-        <select id="exportedFilter" aria-label="Export status">
-          <option value="">All export states</option>
-          <option value="false">Not exported</option>
-          <option value="true">Exported</option>
+        <select id="exportedFilter" aria-label="导出状态">
+          <option value="">全部导出状态</option>
+          <option value="false">未导出</option>
+          <option value="true">已导出</option>
         </select>
         <div class="time-range">
-          <label class="time-field" for="startTime"><span>Start</span><input id="startTime" type="datetime-local"></label>
-          <label class="time-field" for="endTime"><span>End</span><input id="endTime" type="datetime-local"></label>
-          <button id="clearTime" class="clear-time" type="button">Clear time</button>
+          <label class="time-field" for="startTime"><span>开始时间</span><input id="startTime" type="datetime-local"></label>
+          <label class="time-field" for="endTime"><span>结束时间</span><input id="endTime" type="datetime-local"></label>
+          <button id="clearTime" class="clear-time" type="button">清除时间</button>
         </div>
       </div>
       <div class="list-scroll">
         <table>
-          <thead><tr><th>Ended</th><th>Session / turn</th><th>Model</th><th>User</th><th>State</th></tr></thead>
+          <thead><tr><th>结束时间</th><th>会话 / 轮次</th><th>模型</th><th>用户</th><th>状态</th></tr></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>
       <div class="pager">
-        <div id="pageInfo" class="pager-info">Page 1</div>
+        <div id="pageInfo" class="pager-info">第 1 页</div>
         <div class="pager-controls">
-          <button id="prevPage" type="button">Prev</button>
-          <input id="pageJump" class="page-jump" type="number" min="1" inputmode="numeric" aria-label="Jump to page" placeholder="Page">
-          <button id="jumpPage" type="button">Go</button>
-          <button id="nextPage" type="button">Next</button>
+          <button id="prevPage" type="button">上一页</button>
+          <input id="pageJump" class="page-jump" type="number" min="1" inputmode="numeric" aria-label="跳转页码" placeholder="页码">
+          <button id="jumpPage" type="button">跳转</button>
+          <button id="nextPage" type="button">下一页</button>
         </div>
       </div>
     </aside>
-    <section id="detail" class="detail"><div class="empty">Select a turn.</div></section>
+    <section id="detail" class="detail"><div class="empty">请选择一条轮次记录。</div></section>
   </main>
   <dialog id="exportDialog">
-    <div class="export-head"><h2>Export batches</h2><button id="closeExport" class="icon-button" type="button" title="Close" aria-label="Close">&times;</button></div>
+    <div class="export-head"><h2>导出批次</h2><button id="closeExport" class="icon-button" type="button" title="关闭" aria-label="关闭">&times;</button></div>
     <div class="export-body">
       <div class="export-controls">
-        <label class="toggle"><input id="includeInferred" type="checkbox">Include inferred completed turns</label>
-        <button id="createExport" type="button">Create batch</button>
+        <label class="toggle"><input id="includeInferred" type="checkbox">包含推断归因的已完成轮次</label>
+        <button id="createExport" type="button">创建导出批次</button>
       </div>
-      <div id="exportPreview" class="export-preview">Loading preview...</div>
+      <div id="exportPreview" class="export-preview">正在加载预览…</div>
       <div id="batchList" class="batch-list"></div>
     </div>
   </dialog>
@@ -896,14 +896,30 @@ const indexHTML = `<!doctype html>
       if (displayContent.tool_call_id === callId) delete displayContent.tool_call_id
       return JSON.stringify(displayContent, null, 2)
     }
+    const completionStatusLabel = value => ({ completed:'已完成', open:'进行中', unknown:'未知', pending:'等待中', failed:'失败', final:'最终', initial:'初始', in_progress:'处理中', incomplete:'未完成', analysis:'分析', commentary:'说明' }[String(value || '').toLowerCase()] || String(value || '未知'))
+    const attributionLabel = value => ({ exact:'精确', inferred:'推断', unknown:'未知' }[String(value || '').toLowerCase()] || String(value || '未知'))
+    const batchStatusLabel = value => ({ pending:'排队中', building:'导出中', completed:'已完成', failed:'失败' }[String(value || '').toLowerCase()] || String(value || '未知'))
+    const roleLabel = value => ({ user:'用户', system:'系统', assistant:'助手', developer:'开发者', tool:'工具' }[String(value || '').toLowerCase()] || String(value || ''))
+    const itemTypeLabel = value => ({ message:'消息', reasoning:'推理', tool_call:'工具调用', tool_result:'工具结果', function_call:'函数调用', function_result:'函数结果' }[String(value || '').toLowerCase()] || String(value || '条目'))
+    const phaseLabel = value => ({ input:'输入', output:'输出' }[String(value || '').toLowerCase()] || String(value || ''))
+    const localizedError = value => String(value || '')
+      .replace(/batch member (\d+)/g, '批次成员 $1')
+      .replace(/export member (\d+)/g, '导出成员 $1')
+      .replace(/export data integrity check failed/g, '导出数据完整性校验失败')
+      .replace(/turn (\d+) has invalid completed timestamps or status/g, '轮次 $1 的完成时间或状态无效')
+      .replace(/turn (\d+) has (\d+) stored requests but (\d+) readable requests/g, '轮次 $1 记录的请求数为 $2，但可读取请求数为 $3')
+      .replace(/turn (\d+) has (\d+) stored items but (\d+) readable items/g, '轮次 $1 记录的条目数为 $2，但可读取条目数为 $3')
+      .replace(/references missing turn (\d+)/g, '引用了不存在的轮次 $1')
+      .replace(/export artifact build failed/g, '导出文件生成失败')
+      .replace(/checksum mismatch/g, '校验和不匹配')
     const detailLoadingHTML = () => [
       '<div class="loading-card" aria-live="polite">',
-      '<div class="loading-copy"><span class="loader"></span><span>Loading turn</span></div>',
+      '<div class="loading-copy"><span class="loader"></span><span>正在加载轮次记录</span></div>',
       '<div class="loading-lines"><i></i><i></i><i></i></div>',
       '</div>'
     ].join('')
-    const detailErrorHTML = message => '<div class="empty">Failed to load turn: ' + esc(message || 'unknown error') + '</div>'
-    const emptyItemsHTML = () => '<div class="empty">No current-turn items.</div>'
+    const detailErrorHTML = message => '<div class="empty">加载轮次记录失败：' + esc(localizedError(message) || '未知错误') + '</div>'
+    const emptyItemsHTML = () => '<div class="empty">该轮次暂无条目。</div>'
     const timestampFromLocalInput = value => {
       if (!value) return 0
       const date = new Date(value)
@@ -937,7 +953,7 @@ const indexHTML = `<!doctype html>
     async function api(path, options = {}) {
       const res = await fetch(path, options)
       const json = await res.json().catch(() => ({ success:false, message:res.statusText }))
-      if (!json.success) throw new Error(json.message || 'request failed')
+      if (!json.success) throw new Error(localizedError(json.message) || '请求失败')
       return json.data
     }
     function closeMenus(except) {
@@ -946,14 +962,14 @@ const indexHTML = `<!doctype html>
       })
     }
     function labelFor(key) {
-      return key === 'model_name' ? 'models' : 'users'
+      return key === 'model_name' ? '个模型' : '个用户'
     }
     function updateSelectButton(key) {
       const field = document.querySelector('.filter-field[data-filter="' + key + '"]')
       const strong = field.querySelector('.select-button strong')
       const selected = Array.from(state.selected[key])
       if (selected.length === 0) {
-        strong.textContent = key === 'model_name' ? 'All models' : 'All users'
+        strong.textContent = key === 'model_name' ? '全部模型' : '全部用户'
       } else if (selected.length === 1) {
         strong.textContent = selected[0]
       } else {
@@ -970,10 +986,10 @@ const indexHTML = `<!doctype html>
       actions.className = 'select-actions'
       const all = document.createElement('button')
       all.type = 'button'
-      all.textContent = 'Select all'
+      all.textContent = '全选'
       const clear = document.createElement('button')
       clear.type = 'button'
-      clear.textContent = 'Clear'
+      clear.textContent = '清除'
       actions.appendChild(all)
       actions.appendChild(clear)
       menu.appendChild(actions)
@@ -982,7 +998,7 @@ const indexHTML = `<!doctype html>
       if (list.length === 0) {
         const empty = document.createElement('div')
         empty.className = 'empty'
-        empty.textContent = 'No options'
+        empty.textContent = '暂无可选项'
         menu.appendChild(empty)
       }
       list.forEach(value => {
@@ -1036,15 +1052,15 @@ const indexHTML = `<!doctype html>
     async function loadStatus() {
       const data = await api('/api/status')
       const count = data.turn_count ?? data.count ?? 0
-      const dropped = data.queue_dropped_jobs ? ' · ' + String(data.queue_dropped_jobs) + ' queue drops' : ''
-      statusEl.textContent = data.has_turn_table === false ? 'turn table missing' : String(count) + ' turns - ' + (data.request_log_db_dialect || 'db') + dropped
+      const dropped = data.queue_dropped_jobs ? ' · 丢弃 ' + String(data.queue_dropped_jobs) + ' 个队列任务' : ''
+      statusEl.textContent = data.has_turn_table === false ? '轮次表不存在' : '共 ' + String(count) + ' 条轮次 · 数据库：' + (data.request_log_db_dialect || '未知') + dropped
     }
     function updatePager() {
       const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize))
       if (state.page > totalPages) state.page = totalPages
       const start = state.total === 0 ? 0 : (state.page - 1) * state.pageSize + 1
       const end = Math.min(state.total, state.page * state.pageSize)
-      pageInfoEl.textContent = 'Page ' + state.page + ' / ' + totalPages + ' · ' + start + '-' + end + ' of ' + state.total
+      pageInfoEl.textContent = '第 ' + state.page + ' / ' + totalPages + ' 页 · 第 ' + start + '-' + end + ' 条，共 ' + state.total + ' 条'
       pageJumpEl.max = String(totalPages)
       if (document.activeElement !== pageJumpEl) pageJumpEl.value = String(state.page)
       prevPageEl.disabled = state.page <= 1
@@ -1057,16 +1073,16 @@ const indexHTML = `<!doctype html>
       state.pageSize = data.page_size || state.pageSize
       updatePager()
       if (!data.items || data.items.length === 0) {
-        rowsEl.innerHTML = '<tr><td colspan="5"><div class="empty">No turns.</div></td></tr>'
+        rowsEl.innerHTML = '<tr><td colspan="5"><div class="empty">暂无轮次记录。</div></td></tr>'
         return
       }
       rowsEl.innerHTML = data.items.map(row => [
         '<tr data-id="' + esc(row.id) + '" class="' + (row.id === selectedId ? 'selected' : '') + '">',
-        '<td><div class="time">' + (row.completed_at ? new Date(row.completed_at * 1000).toLocaleString() : 'Open') + '</div></td>',
-        '<td><div class="model">' + esc(row.session_id || 'unknown') + '</div><div class="subline">#' + esc(row.turn_index || '-') + ' · ' + esc(row.turn_id || '-') + '</div></td>',
+        '<td><div class="time">' + (row.completed_at ? new Date(row.completed_at * 1000).toLocaleString('zh-CN') : '进行中') + '</div></td>',
+        '<td><div class="model">' + esc(row.session_id || '未知') + '</div><div class="subline">#' + esc(row.turn_index || '-') + ' · ' + esc(row.turn_id || '-') + '</div></td>',
         '<td><div class="model">' + esc(row.model_name || '-') + '</div><div class="subline">' + esc(row.token_name || '') + '</div></td>',
-        '<td><div>' + esc(row.username || '-') + '</div><div class="subline">' + esc(row.request_count || 0) + ' requests</div></td>',
-        '<td><span class="pill ' + esc(row.completion_status || 'unknown') + '">' + esc(row.completion_status || 'unknown') + '</span><div class="subline">' + esc(row.attribution || 'unknown') + (row.exported ? ' · exported' : '') + '</div></td>',
+        '<td><div>' + esc(row.username || '-') + '</div><div class="subline">' + esc(row.request_count || 0) + ' 个请求</div></td>',
+        '<td><span class="pill ' + esc(row.completion_status || 'unknown') + '">' + esc(completionStatusLabel(row.completion_status)) + '</span><div class="subline">' + esc(attributionLabel(row.attribution)) + (row.exported ? ' · 已导出' : '') + '</div></td>',
         '</tr>'
       ].join('')).join('')
       rowsEl.querySelectorAll('tr').forEach(row => row.onclick = () => loadDetail(Number(row.dataset.id)))
@@ -1085,15 +1101,15 @@ const indexHTML = `<!doctype html>
             '<article class="item" data-phase="' + esc(item.phase || '') + '">',
             '<div class="item-head">',
             '<div class="item-primary">',
-            item.role ? '<span class="role-badge ' + roleClass(item.role) + '">' + esc(item.role) + '</span>' : '',
-            '<div class="item-title">' + esc(item.item_type || 'item') + '</div>',
-            callId ? '<span class="call-id" title="' + esc(callId) + '"><span class="call-id-label">call_id</span><code>' + esc(callId) + '</code></span>' : '',
+            item.role ? '<span class="role-badge ' + roleClass(item.role) + '">' + esc(roleLabel(item.role)) + '</span>' : '',
+            '<div class="item-title">' + esc(itemTypeLabel(item.item_type)) + '</div>',
+            callId ? '<span class="call-id" title="' + esc(callId) + '"><span class="call-id-label">调用标识</span><code>' + esc(callId) + '</code></span>' : '',
             '</div>',
             '<div class="item-meta">',
             '<span class="pill">' + esc(item.seq) + '</span>',
-            '<span class="pill">' + esc(item.phase) + '</span>',
-            item.message_phase ? '<span class="pill ' + esc(item.message_phase) + '">' + esc(item.message_phase) + '</span>' : '',
-            item.item_status ? '<span class="pill ' + esc(item.item_status) + '">' + esc(item.item_status) + '</span>' : '',
+            '<span class="pill">' + esc(phaseLabel(item.phase)) + '</span>',
+            item.message_phase ? '<span class="pill ' + esc(item.message_phase) + '">' + esc(completionStatusLabel(item.message_phase)) + '</span>' : '',
+            item.item_status ? '<span class="pill ' + esc(item.item_status) + '">' + esc(completionStatusLabel(item.item_status)) + '</span>' : '',
             item.name ? '<span class="item-context">' + esc(item.name) + '</span>' : '',
             item.source ? '<span class="item-context">' + esc(item.source) + '</span>' : '',
             '</div>',
@@ -1104,14 +1120,14 @@ const indexHTML = `<!doctype html>
         }).join('') || emptyItemsHTML()
         detailEl.innerHTML = [
           '<div class="detail-head">',
-          '<div class="detail-title"><h2>' + esc(log.model_name || '-') + '</h2><div class="request-id">' + esc(log.session_id || 'unknown') + ' / ' + esc(log.turn_id || '-') + '</div></div>',
-          '<span class="pill ' + esc(log.completion_status || 'unknown') + '">' + esc(log.completion_status || 'unknown') + ' · ' + esc(log.attribution || 'unknown') + '</span>',
+          '<div class="detail-title"><h2>' + esc(log.model_name || '-') + '</h2><div class="request-id">' + esc(log.session_id || '未知') + ' / ' + esc(log.turn_id || '-') + '</div></div>',
+          '<span class="pill ' + esc(log.completion_status || 'unknown') + '">' + esc(completionStatusLabel(log.completion_status)) + ' · ' + esc(attributionLabel(log.attribution)) + '</span>',
           '</div>',
           '<div class="summary">',
-          '<div class="metric"><span>Items</span><strong>' + esc((log.items || []).length) + '</strong></div>',
-          '<div class="metric"><span>Requests</span><strong>' + esc(log.request_count || 0) + '</strong></div>',
-          '<div class="metric"><span>Tokens</span><strong>' + esc(log.token_used || 0) + '</strong></div>',
-          '<div class="metric"><span>Cost</span><strong>' + esc(log.quota || 0) + '</strong></div>',
+          '<div class="metric"><span>条目</span><strong>' + esc((log.items || []).length) + '</strong></div>',
+          '<div class="metric"><span>请求</span><strong>' + esc(log.request_count || 0) + '</strong></div>',
+          '<div class="metric"><span>令牌</span><strong>' + esc(log.token_used || 0) + '</strong></div>',
+          '<div class="metric"><span>额度</span><strong>' + esc(log.quota || 0) + '</strong></div>',
           '</div>',
           '<div class="items">' + itemHtml + '</div>'
         ].join('')
@@ -1124,21 +1140,21 @@ const indexHTML = `<!doctype html>
       const p = qs(false)
       p.set('include_inferred', String(includeInferredEl.checked))
       const data = await api('/api/export-preview?' + p)
-      const fragments = [String(data.available_count || 0) + ' verified, unexported turns match the current filters.']
+      const fragments = ['当前筛选条件下有 ' + String(data.available_count || 0) + ' 条已校验且未导出的轮次。']
       if (data.broken_count) {
         const reasons = []
-        if (data.broken_time_count) reasons.push(String(data.broken_time_count) + ' invalid time/status')
-        if (data.broken_request_count) reasons.push(String(data.broken_request_count) + ' request mismatch')
-        if (data.broken_item_count) reasons.push(String(data.broken_item_count) + ' item mismatch')
-        fragments.push(String(data.broken_count) + ' potentially broken completed turns are excluded' + (reasons.length ? ' (' + reasons.join(', ') + ')' : '') + '.')
+        if (data.broken_time_count) reasons.push(String(data.broken_time_count) + ' 条时间或状态异常')
+        if (data.broken_request_count) reasons.push(String(data.broken_request_count) + ' 条请求数量不一致')
+        if (data.broken_item_count) reasons.push(String(data.broken_item_count) + ' 条条目数量不一致')
+        fragments.push('另有 ' + String(data.broken_count) + ' 条可能异常的已完成轮次已排除' + (reasons.length ? '（' + reasons.join('，') + '）' : '') + '。')
       }
       exportPreviewEl.textContent = fragments.join(' ')
     }
     const beijingTime = value => value ? new Date(value * 1000).toLocaleString('zh-CN', { timeZone:'Asia/Shanghai', hour12:false }) + ' 北京时间' : ''
     function batchIntegrityLabel(batch) {
-      if (batch.integrity_status === 'verified') return 'verified'
-      if (batch.integrity_status === 'broken') return 'broken'
-      return 'unverified'
+      if (batch.integrity_status === 'verified') return '已验证'
+      if (batch.integrity_status === 'broken') return '异常'
+      return '待复核'
     }
     function batchProgress(batch) {
       if (!['pending', 'building'].includes(batch.status)) return ''
@@ -1146,33 +1162,33 @@ const indexHTML = `<!doctype html>
       const processed = Math.max(0, Math.min(total || Number.MAX_SAFE_INTEGER, Number(batch.processed_rows || 0)))
       const percent = total > 0 ? Math.min(100, Math.round(processed * 100 / total)) : 0
       const label = batch.status === 'pending'
-        ? 'Queued · ' + String(total) + ' turns'
-        : 'Exporting ' + String(processed) + ' / ' + String(total) + ' turns · ' + String(percent) + '%'
+        ? '排队中 · ' + String(total) + ' 条轮次'
+        : '正在导出 ' + String(processed) + ' / ' + String(total) + ' 条轮次 · ' + String(percent) + '%'
       return '<div class="batch-progress"><span>' + esc(label) + '</span><div class="batch-progress-track" aria-label="' + esc(label) + '"><i class="batch-progress-fill" style="width:' + String(percent) + '%"></i></div></div>'
     }
     function batchActions(batch) {
       const actions = []
       if (batch.status === 'completed') {
-        if (!batch.artifact_deleted_at) actions.push('<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>')
+        if (!batch.artifact_deleted_at) actions.push('<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">下载导出文件</button></a>')
         if (!batch.reset_at) actions.push('<button type="button" data-reset="' + esc(batch.tag) + '">重置为未导出</button>')
-        if (batch.reset_at && !batch.artifact_deleted_at) actions.push('<button type="button" data-delete-artifact="' + esc(batch.tag) + '">删除 JSONL</button>')
+        if (batch.reset_at && !batch.artifact_deleted_at) actions.push('<button type="button" data-delete-artifact="' + esc(batch.tag) + '">删除导出文件</button>')
         if (batch.integrity_status === 'verified') {
-          if (batch.cleaned_at) actions.push('<button type="button" data-delete="' + esc(batch.tag) + '">Delete</button>')
-          else actions.push('<button type="button" data-clean="' + esc(batch.tag) + '">Mark cleaned</button>')
+          if (!batch.cleaned_at) actions.push('<button type="button" data-clean="' + esc(batch.tag) + '">标记已清洗</button>')
         } else if (!batch.reset_at) {
-          actions.push('<button type="button" data-audit="' + esc(batch.tag) + '">Audit</button>')
+          actions.push('<button type="button" data-audit="' + esc(batch.tag) + '" title="重新检查导出轮次、请求和条目是否完整一致">完整性复核</button>')
         }
+        actions.push('<button type="button" data-delete-history="' + esc(batch.tag) + '">删除历史记录</button>')
       }
       if (batch.status === 'failed') {
-        actions.push('<button type="button" data-retry="' + esc(batch.tag) + '">Retry</button>')
+        actions.push('<button type="button" data-retry="' + esc(batch.tag) + '">重试</button>')
       }
       return actions.join('')
     }
     function renderBatchRow(batch) {
       return [
         '<div class="batch-row">',
-        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · reset ' + esc(beijingTime(batch.reset_at)) + ' (' + esc(batch.reset_rows || 0) + ' released)' : '') + (batch.artifact_deleted_at ? ' · JSONL 已删除' : '') + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div>' + batchProgress(batch) + '</div>',
-        '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batch.status || 'pending') + '</span>',
+        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' 条轮次 · 完整性：' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · 已于 ' + esc(beijingTime(batch.reset_at)) + ' 重置（释放 ' + esc(batch.reset_rows || 0) + ' 条）' : '') + (batch.artifact_deleted_at ? ' · 导出文件已删除' : '') + (batch.cleaned_at ? ' · 已于 ' + esc(beijingTime(batch.cleaned_at)) + ' 标记为已清洗' : '') + (batch.integrity_error ? ' · ' + esc(localizedError(batch.integrity_error)) : '') + (batch.error ? ' · ' + esc(localizedError(batch.error)) : '') + '</div>' + batchProgress(batch) + '</div>',
+        '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batchStatusLabel(batch.status)) + '</span>',
         '<div>' + batchActions(batch) + '</div>',
         '</div>'
       ].join('')
@@ -1184,9 +1200,9 @@ const indexHTML = `<!doctype html>
       const historicalBatches = batches.filter(batch => batch.status === 'completed')
       const activeHTML = activeBatches.length
         ? activeBatches.map(renderBatchRow).join('')
-        : '<div class="batch-meta">No active or failed export batches.</div>'
+        : '<div class="batch-meta">暂无进行中或失败的导出批次。</div>'
       const historyHTML = historicalBatches.length
-        ? '<details class="history-exports"><summary>Historical exports (' + esc(historicalBatches.length) + ')</summary><div class="history-export-list">' + historicalBatches.map(renderBatchRow).join('') + '</div></details>'
+        ? '<details class="history-exports"><summary>历史导出（' + esc(historicalBatches.length) + '）</summary><div class="history-export-list">' + historicalBatches.map(renderBatchRow).join('') + '</div></details>'
         : ''
       batchListEl.innerHTML = activeHTML + historyHTML
       batchListEl.querySelectorAll('[data-retry]').forEach(button => {
@@ -1207,7 +1223,7 @@ const indexHTML = `<!doctype html>
           button.disabled = true
           try {
             const batch = await api('/api/export-batches/' + encodeURIComponent(button.dataset.audit) + '/audit', { method:'POST' })
-            exportPreviewEl.textContent = batch.integrity_status === 'verified' ? 'Audit passed.' : 'Audit found broken data: ' + (batch.integrity_error || 'see batch details')
+            exportPreviewEl.textContent = batch.integrity_status === 'verified' ? '完整性复核通过。' : '完整性复核发现异常：' + (localizedError(batch.integrity_error) || '请查看批次详情。')
             await loadBatches()
           } catch (err) {
             exportPreviewEl.textContent = err.message
@@ -1218,7 +1234,7 @@ const indexHTML = `<!doctype html>
       })
       batchListEl.querySelectorAll('[data-clean]').forEach(button => {
         button.onclick = async () => {
-          if (!window.confirm('Confirm that downstream processing or cold backup is complete. This enables deletion of this export batch.')) return
+          if (!window.confirm('确认下游处理或冷备份已完成吗？确认后可以删除该导出批次。')) return
           button.disabled = true
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.clean) + '/mark-cleaned', { method:'POST' })
@@ -1232,11 +1248,15 @@ const indexHTML = `<!doctype html>
       })
       batchListEl.querySelectorAll('[data-reset]').forEach(button => {
         button.onclick = async () => {
-          if (!window.confirm('确认重置这条历史导出吗？系统会删除已整理的 JSONL 文件，但保留历史记录；关联轮次将变为“未导出”，后续可以重新导出。')) return
+          if (!window.confirm('确认重置这条历史导出吗？系统会删除已整理的导出文件，但保留历史记录；关联轮次将变为“未导出”，后续可以重新导出。')) return
           button.disabled = true
+          exportPreviewEl.textContent = '正在重置导出批次…'
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.reset) + '/reset', { method:'POST' })
-            await Promise.all([loadBatches(), loadRows(), loadExportPreview()])
+            exportPreviewEl.textContent = '导出批次已重置，正在刷新列表…'
+            await Promise.all([loadBatches(), loadRows()])
+            exportPreviewEl.textContent = '导出批次已重置，正在刷新可导出数量…'
+            loadExportPreview().catch(err => { exportPreviewEl.textContent = err.message })
           } catch (err) {
             exportPreviewEl.textContent = err.message
           } finally {
@@ -1246,7 +1266,7 @@ const indexHTML = `<!doctype html>
       })
       batchListEl.querySelectorAll('[data-delete-artifact]').forEach(button => {
         button.onclick = async () => {
-          if (!window.confirm('确认删除这条已重置历史导出的 JSONL 文件吗？历史记录会保留，删除后无法下载该文件。')) return
+          if (!window.confirm('确认删除这条已重置历史导出的文件吗？历史记录会保留，删除后无法再下载。')) return
           button.disabled = true
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.deleteArtifact) + '/delete-artifact', { method:'POST' })
@@ -1260,11 +1280,28 @@ const indexHTML = `<!doctype html>
       })
       batchListEl.querySelectorAll('[data-delete]').forEach(button => {
         button.onclick = async () => {
-          if (!window.confirm('Delete this cleaned export JSONL and its batch branch? Original turns remain marked exported and will not be exported again.')) return
+          if (!window.confirm('确认删除这条已清洗导出的文件和批次记录吗？原始轮次仍会保持已导出状态，不会再次导出。')) return
           button.disabled = true
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.delete) + '/delete', { method:'POST' })
             await loadBatches()
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-delete-history]').forEach(button => {
+        button.onclick = async () => {
+          if (!window.confirm('确认删除这条历史记录吗？系统会删除该批次记录及未删除的导出文件。此操作不可恢复，但不会改变轮次当前的导出状态。')) return
+          button.disabled = true
+          exportPreviewEl.textContent = '正在删除历史记录…'
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.deleteHistory) + '/delete-history', { method:'POST' })
+            await Promise.all([loadBatches(), loadRows()])
+            exportPreviewEl.textContent = '历史记录已删除。'
+            loadExportPreview().catch(err => { exportPreviewEl.textContent = err.message })
           } catch (err) {
             exportPreviewEl.textContent = err.message
           } finally {
@@ -1278,7 +1315,7 @@ const indexHTML = `<!doctype html>
     }
     async function openExports() {
       exportDialogEl.showModal()
-      exportPreviewEl.textContent = 'Loading preview...'
+      exportPreviewEl.textContent = '正在加载预览…'
       await Promise.all([loadExportPreview(), loadBatches()])
     }
     document.addEventListener('click', () => closeMenus())
@@ -1293,7 +1330,7 @@ const indexHTML = `<!doctype html>
       p.set('include_inferred', String(includeInferredEl.checked))
       try {
         const batch = await api('/api/export-batches?' + p, { method:'POST' })
-        exportPreviewEl.textContent = 'Created ' + batch.tag + ' with ' + String(batch.row_count || 0) + ' turns.'
+        exportPreviewEl.textContent = '已创建导出批次 ' + batch.tag + '，共 ' + String(batch.row_count || 0) + ' 条轮次。'
         await Promise.all([loadBatches(), loadRows()])
       } catch (err) {
         exportPreviewEl.textContent = err.message

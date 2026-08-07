@@ -212,6 +212,7 @@ type APIRequestLogStorageStatus struct {
 	QueueDroppedItemBytes   int64                                   `json:"queue_dropped_item_bytes"`
 	DeferredMaterialization bool                                    `json:"deferred_materialization"`
 	MaterializationQueue    APIRequestLogMaterializationQueueStatus `json:"materialization_queue"`
+	Outbox                  APIRequestLogOutboxStatus               `json:"outbox"`
 }
 
 var REQUEST_LOG_DB *gorm.DB
@@ -252,11 +253,6 @@ func InitRequestLogDB() error {
 		db = db.Debug()
 	}
 	REQUEST_LOG_DB = db
-	if REQUEST_LOG_DB.Dialector != nil && REQUEST_LOG_DB.Dialector.Name() == "mysql" {
-		if err := checkMySQLChineseSupport(REQUEST_LOG_DB); err != nil {
-			return err
-		}
-	}
 	sqlDB, err := REQUEST_LOG_DB.DB()
 	if err != nil {
 		return err
@@ -265,6 +261,23 @@ func InitRequestLogDB() error {
 	sqlDB.SetMaxIdleConns(poolConfig.MaxIdleConns)
 	sqlDB.SetMaxOpenConns(poolConfig.MaxOpenConns)
 	sqlDB.SetConnMaxLifetime(poolConfig.MaxLifetime)
+	if common.APIRequestLogOutboxEnabled {
+		if err := EnsureAPIRequestLogOutboxTable(); err != nil {
+			return err
+		}
+	}
+
+	// The durable outbox must let the gateway start even while the remote log
+	// database is unavailable. Its worker will retry delivery after startup.
+	if common.APIRequestLogOutboxEnabled {
+		startAPIRequestLogOutboxWorkers()
+		return nil
+	}
+	if REQUEST_LOG_DB.Dialector != nil && REQUEST_LOG_DB.Dialector.Name() == "mysql" {
+		if err := checkMySQLChineseSupport(REQUEST_LOG_DB); err != nil {
+			return err
+		}
+	}
 	if common.GetEnvOrDefaultBool("REQUEST_LOG_DB_READ_ONLY", false) {
 		return nil
 	}
@@ -378,10 +391,15 @@ func CreateAPIRequestLog(log *APIRequestLog) error {
 	if log == nil || common.IsCallLogExcludedUsername(log.Username) {
 		return nil
 	}
+	normalizeAPIRequestLog(log)
+	if common.APIRequestLogOutboxEnabled {
+		err := enqueueAPIRequestLogOutbox(log)
+		setAPIRequestLogLastWriteError(err)
+		return err
+	}
 	if err := EnsureAPIRequestLogTable(); err != nil {
 		return err
 	}
-	normalizeAPIRequestLog(log)
 	err := createOrUpdateAPIRequestLog(log)
 	setAPIRequestLogLastWriteError(err)
 	return err
@@ -1150,6 +1168,11 @@ func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 		QueueDroppedItems:       atomic.LoadInt64(&apiRequestLogQueueDroppedItems),
 		QueueDroppedItemBytes:   atomic.LoadInt64(&apiRequestLogQueueDroppedItemBytes),
 	}
+	outboxStatus, err := GetAPIRequestLogOutboxStatus()
+	if err != nil {
+		return status, err
+	}
+	status.Outbox = outboxStatus
 	apiRequestLogItemQueueMu.Lock()
 	if apiRequestLogItemQueue != nil {
 		status.QueueDepth = len(apiRequestLogItemQueue)
@@ -1167,6 +1190,9 @@ func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 	}
 	if db.Dialector != nil {
 		status.RequestLogDBDialect = db.Dialector.Name()
+	}
+	if common.APIRequestLogOutboxEnabled {
+		return status, nil
 	}
 	materializationQueue, err := GetAPIRequestLogMaterializationQueueStatus(db)
 	if err != nil {

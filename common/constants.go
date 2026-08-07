@@ -122,6 +122,16 @@ var APIRequestLogRedactSecrets = true
 var APIRequestLogCaptureResponse = true
 var APIRequestLogAsyncWrite = false
 var APIRequestLogDeferredMaterialization = false
+
+// APIRequestLogOutboxEnabled writes captured request logs to the primary,
+// same-region database first. A background worker then persists them to the
+// dedicated request-log database, so remote database latency is not part of
+// the client request tail latency.
+var APIRequestLogOutboxEnabled = false
+var APIRequestLogOutboxWorkers = 1
+var APIRequestLogOutboxBatchSize = 8
+var APIRequestLogOutboxPollIntervalMS = 200
+var APIRequestLogOutboxLeaseSeconds = 900
 var APIRequestLogQueueSize = 128
 var APIRequestLogWorkers = 2
 var APIRequestLogMaxBodyBytes = 4 * 1024 * 1024
@@ -183,6 +193,10 @@ var BatchUpdateEnabled = false
 var BatchUpdateInterval int
 
 var RelayTimeout int // unit is second
+// RelayResponseHeaderTimeout bounds the time spent waiting for an upstream to
+// send response headers. Unlike RelayTimeout it does not terminate an active
+// streaming response after headers have been received.
+var RelayResponseHeaderTimeout int // unit is second
 
 var RelayMaxIdleConns int
 var RelayMaxIdleConnsPerHost int

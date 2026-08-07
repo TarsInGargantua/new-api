@@ -44,12 +44,12 @@ func (s *requestLogViewerServer) serveTurnDetail(w http.ResponseWriter, r *http.
 	idText := strings.TrimPrefix(r.URL.Path, "/api/turns/")
 	id, err := strconv.ParseInt(idText, 10, 64)
 	if err != nil || id <= 0 {
-		writeAPIError(w, http.StatusBadRequest, "invalid turn id")
+		writeAPIError(w, http.StatusBadRequest, "轮次标识无效")
 		return
 	}
 	detail, err := model.GetAPIRequestLogTurnById(s.db, id)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		writeAPIError(w, http.StatusNotFound, "turn not found")
+		writeAPIError(w, http.StatusNotFound, "未找到轮次记录")
 		return
 	}
 	writeAPI(w, detail, err)
@@ -167,7 +167,13 @@ func (s *requestLogViewerServer) serveExportBatchAction(w http.ResponseWriter, r
 			writeMethodNotAllowed(w, http.MethodPost)
 			return
 		}
-		s.serveExportBatchDelete(w, tag)
+		s.serveExportBatchDelete(w, tag, false)
+	case "delete-history":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.serveExportBatchDelete(w, tag, true)
 	default:
 		http.NotFound(w, r)
 	}
@@ -179,7 +185,7 @@ func (s *requestLogViewerServer) serveExportBatchReset(w http.ResponseWriter, ta
 
 	batch, err := model.GetAPIRequestLogExportBatchByTag(s.db, tag)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		writeAPIError(w, http.StatusNotFound, "export batch not found")
+		writeAPIError(w, http.StatusNotFound, "未找到导出批次")
 		return
 	}
 	if err != nil {
@@ -187,11 +193,11 @@ func (s *requestLogViewerServer) serveExportBatchReset(w http.ResponseWriter, ta
 		return
 	}
 	if batch.Status != model.APIRequestLogExportBatchStatusCompleted {
-		writeAPIError(w, http.StatusConflict, "only completed export batches can be reset")
+		writeAPIError(w, http.StatusConflict, "仅已完成的导出批次可以重置")
 		return
 	}
 	if batch.ResetAt > 0 {
-		writeAPIError(w, http.StatusConflict, model.ErrAPIRequestLogExportBatchAlreadyReset.Error())
+		writeAPIError(w, http.StatusConflict, "该导出批次已经重置")
 		return
 	}
 	staged, err := s.exports.StageArtifactDeletion(batch)
@@ -206,7 +212,7 @@ func (s *requestLogViewerServer) serveExportBatchReset(w http.ResponseWriter, ta
 		return
 	}
 	if err := staged.Finalize(); err != nil {
-		writeJSON(w, http.StatusOK, apiResponse{Success: true, Message: "export reset; staged JSONL cleanup failed: " + err.Error(), Data: reset})
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Message: "导出批次已重置，但暂存的导出文件清理失败：" + err.Error(), Data: reset})
 		return
 	}
 	writeAPI(w, reset, nil)
@@ -220,7 +226,7 @@ func (s *requestLogViewerServer) serveResetExportArtifactDeletion(w http.Respons
 
 	batch, err := model.GetAPIRequestLogExportBatchByTag(s.db, tag)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		writeAPIError(w, http.StatusNotFound, "export batch not found")
+		writeAPIError(w, http.StatusNotFound, "未找到导出批次")
 		return
 	}
 	if err != nil {
@@ -228,11 +234,11 @@ func (s *requestLogViewerServer) serveResetExportArtifactDeletion(w http.Respons
 		return
 	}
 	if batch.ResetAt <= 0 {
-		writeAPIError(w, http.StatusConflict, "only reset export batches can delete their JSONL artifact")
+		writeAPIError(w, http.StatusConflict, "仅已重置的导出批次可以删除导出文件")
 		return
 	}
 	if batch.ArtifactDeletedAt > 0 {
-		writeAPIError(w, http.StatusConflict, "export JSONL artifact has already been deleted")
+		writeAPIError(w, http.StatusConflict, "导出文件已经删除")
 		return
 	}
 	staged, err := s.exports.StageArtifactDeletion(batch)
@@ -251,7 +257,7 @@ func (s *requestLogViewerServer) serveResetExportArtifactDeletion(w http.Respons
 	}
 	if result.RowsAffected != 1 {
 		_ = staged.Restore()
-		writeAPIError(w, http.StatusConflict, "export JSONL artifact has already been deleted")
+		writeAPIError(w, http.StatusConflict, "导出文件已经删除")
 		return
 	}
 	deleted, err := model.GetAPIRequestLogExportBatchByTag(s.db, tag)
@@ -261,19 +267,19 @@ func (s *requestLogViewerServer) serveResetExportArtifactDeletion(w http.Respons
 		return
 	}
 	if err := staged.Finalize(); err != nil {
-		writeJSON(w, http.StatusOK, apiResponse{Success: true, Message: "JSONL staged cleanup failed: " + err.Error(), Data: deleted})
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Message: "导出文件暂存清理失败：" + err.Error(), Data: deleted})
 		return
 	}
 	writeAPI(w, deleted, nil)
 }
 
-func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, tag string) {
+func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, tag string, force bool) {
 	s.exportMutationMu.Lock()
 	defer s.exportMutationMu.Unlock()
 
 	batch, err := model.GetAPIRequestLogExportBatchByTag(s.db, tag)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		writeAPIError(w, http.StatusNotFound, "export batch not found")
+		writeAPIError(w, http.StatusNotFound, "未找到导出批次")
 		return
 	}
 	if err != nil {
@@ -281,11 +287,11 @@ func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, t
 		return
 	}
 	if batch.Status != model.APIRequestLogExportBatchStatusCompleted {
-		writeAPIError(w, http.StatusConflict, "only completed export batches can be deleted")
+		writeAPIError(w, http.StatusConflict, "仅已完成的导出批次可以删除")
 		return
 	}
-	if batch.CleanedAt <= 0 {
-		writeAPIError(w, http.StatusConflict, model.ErrAPIRequestLogExportBatchNotCleaned.Error())
+	if !force && batch.CleanedAt <= 0 {
+		writeAPIError(w, http.StatusConflict, "导出批次须先标记为已清洗后才能删除")
 		return
 	}
 	staged := &stagedExportArtifactDeletion{}
@@ -297,7 +303,11 @@ func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, t
 			return
 		}
 	}
-	deleted, err := model.DeleteAPIRequestLogExportBatch(s.db, tag)
+	deleteBatch := model.DeleteAPIRequestLogExportBatch
+	if force {
+		deleteBatch = model.ForceDeleteAPIRequestLogExportBatch
+	}
+	deleted, err := deleteBatch(s.db, tag)
 	if err != nil {
 		_ = staged.Restore()
 		writeExportActionError(w, err)
@@ -307,7 +317,7 @@ func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, t
 		// The database branch is already gone and the artifact is no longer
 		// reachable from the viewer. Keep this as a successful delete while
 		// surfacing the cleanup problem for an operator to remove the staged file.
-		writeJSON(w, http.StatusOK, apiResponse{Success: true, Message: "batch deleted; staged artifact cleanup failed: " + err.Error(), Data: deleted})
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Message: "导出批次已删除，但暂存的导出文件清理失败：" + err.Error(), Data: deleted})
 		return
 	}
 	writeAPI(w, deleted, nil)
@@ -315,11 +325,19 @@ func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, t
 
 func writeExportActionError(w http.ResponseWriter, err error) {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		writeAPIError(w, http.StatusNotFound, "export batch not found")
+		writeAPIError(w, http.StatusNotFound, "未找到导出批次")
 		return
 	}
-	if errors.Is(err, model.ErrAPIRequestLogExportBatchNotCleaned) || errors.Is(err, model.ErrAPIRequestLogExportBatchNotClaimable) || errors.Is(err, model.ErrAPIRequestLogExportBatchAlreadyReset) {
-		writeAPIError(w, http.StatusConflict, err.Error())
+	if errors.Is(err, model.ErrAPIRequestLogExportBatchNotCleaned) {
+		writeAPIError(w, http.StatusConflict, "导出批次须先标记为已清洗后才能删除")
+		return
+	}
+	if errors.Is(err, model.ErrAPIRequestLogExportBatchNotClaimable) {
+		writeAPIError(w, http.StatusConflict, "当前导出批次不可重试")
+		return
+	}
+	if errors.Is(err, model.ErrAPIRequestLogExportBatchAlreadyReset) {
+		writeAPIError(w, http.StatusConflict, "该导出批次已经重置")
 		return
 	}
 	writeAPI(w, nil, err)
@@ -328,7 +346,7 @@ func writeExportActionError(w http.ResponseWriter, err error) {
 func (s *requestLogViewerServer) serveExportDownload(w http.ResponseWriter, r *http.Request, tag string) {
 	batch, err := model.GetAPIRequestLogExportBatchByTag(s.db, tag)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		writeAPIError(w, http.StatusNotFound, "export batch not found")
+		writeAPIError(w, http.StatusNotFound, "未找到导出批次")
 		return
 	}
 	if err != nil {
@@ -336,11 +354,11 @@ func (s *requestLogViewerServer) serveExportDownload(w http.ResponseWriter, r *h
 		return
 	}
 	if batch.Status != model.APIRequestLogExportBatchStatusCompleted {
-		writeAPIError(w, http.StatusConflict, "export batch is not completed")
+		writeAPIError(w, http.StatusConflict, "导出批次尚未完成")
 		return
 	}
 	if batch.ArtifactDeletedAt > 0 {
-		writeAPIError(w, http.StatusGone, "export JSONL artifact was deleted when this batch was reset")
+		writeAPIError(w, http.StatusGone, "该批次重置时已删除导出文件")
 		return
 	}
 	path, err := s.exports.ArtifactPath(batch)
@@ -350,7 +368,7 @@ func (s *requestLogViewerServer) serveExportDownload(w http.ResponseWriter, r *h
 	}
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		writeAPIError(w, http.StatusNotFound, "export artifact is missing")
+		writeAPIError(w, http.StatusNotFound, "导出文件不存在")
 		return
 	}
 	if err != nil {
@@ -414,5 +432,5 @@ func queryBool(value string) bool {
 
 func writeMethodNotAllowed(w http.ResponseWriter, methods ...string) {
 	w.Header().Set("Allow", strings.Join(methods, ", "))
-	writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+	writeAPIError(w, http.StatusMethodNotAllowed, "不支持的请求方法")
 }
