@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,8 +21,11 @@ import (
 )
 
 const (
-	requestLogExportPageSize     = 100
-	requestLogExportLease        = 2 * time.Minute
+	// A turn can reference hundreds of raw items. Keep pages small enough that
+	// one export never creates a giant source-item IN query or loses its lease
+	// while MySQL is under load.
+	requestLogExportPageSize     = 25
+	requestLogExportLease        = 10 * time.Minute
 	requestLogExportPollInterval = time.Second
 )
 
@@ -30,6 +34,11 @@ type requestLogExportWorker struct {
 	dir   string
 	owner string
 	wake  chan struct{}
+}
+
+type stagedExportArtifactDeletion struct {
+	originalPath string
+	stagedPath   string
 }
 
 func newRequestLogExportWorker(db *gorm.DB, dir string) (*requestLogExportWorker, error) {
@@ -151,6 +160,9 @@ func (w *requestLogExportWorker) buildClaimed(batch *model.APIRequestLogExportBa
 			return err
 		}
 		for _, member := range page.Items {
+			if err := model.ValidateAPIRequestLogTurnForExport(member.Turn); err != nil {
+				return fmt.Errorf("export member %d: %w", member.Sequence, err)
+			}
 			line, err := common.Marshal(trainingTurnJSONLRecord(member.Turn))
 			if err != nil {
 				return err
@@ -212,6 +224,22 @@ func (w *requestLogExportWorker) ArtifactPath(batch *model.APIRequestLogExportBa
 	if w == nil || batch == nil {
 		return "", errors.New("export worker is not initialized")
 	}
+	absPath, err := w.exportArtifactPath(batch)
+	if err != nil {
+		return "", err
+	}
+	if err := verifyFileSHA256(absPath, batch.SHA256); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	}
+	return absPath, nil
+}
+
+func (w *requestLogExportWorker) exportArtifactPath(batch *model.APIRequestLogExportBatch) (string, error) {
+	if w == nil || batch == nil {
+		return "", errors.New("export worker is not initialized")
+	}
 	path := strings.TrimSpace(batch.ArtifactPath)
 	if path == "" {
 		return "", errors.New("export artifact path is empty")
@@ -224,12 +252,51 @@ func (w *requestLogExportWorker) ArtifactPath(batch *model.APIRequestLogExportBa
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", errors.New("export artifact path is outside the export directory")
 	}
-	if err := verifyFileSHA256(absPath, batch.SHA256); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return "", err
-		}
-	}
 	return absPath, nil
+}
+
+// StageArtifactDeletion hides an artifact with an atomic rename before the
+// matching database branch is removed. If the database transaction fails, the
+// caller can restore it without risking an unrecoverable delete.
+func (w *requestLogExportWorker) StageArtifactDeletion(batch *model.APIRequestLogExportBatch) (*stagedExportArtifactDeletion, error) {
+	path, err := w.exportArtifactPath(batch)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return &stagedExportArtifactDeletion{}, nil
+	} else if err != nil {
+		return nil, err
+	}
+	stagedPath := filepath.Join(w.dir, "."+filepath.Base(path)+".deleting-"+strconv.FormatInt(time.Now().UTC().UnixNano(), 10))
+	if err := os.Rename(path, stagedPath); err != nil {
+		return nil, err
+	}
+	if err := syncDirectory(w.dir); err != nil {
+		_ = os.Rename(stagedPath, path)
+		return nil, err
+	}
+	return &stagedExportArtifactDeletion{originalPath: path, stagedPath: stagedPath}, nil
+}
+
+func (s *stagedExportArtifactDeletion) Restore() error {
+	if s == nil || s.stagedPath == "" {
+		return nil
+	}
+	if err := os.Rename(s.stagedPath, s.originalPath); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(s.originalPath))
+}
+
+func (s *stagedExportArtifactDeletion) Finalize() error {
+	if s == nil || s.stagedPath == "" {
+		return nil
+	}
+	if err := os.Remove(s.stagedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncDirectory(filepath.Dir(s.stagedPath))
 }
 
 func newRequestLogExportWorkerOwner() (string, error) {

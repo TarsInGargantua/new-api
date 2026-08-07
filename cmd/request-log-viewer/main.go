@@ -423,6 +423,7 @@ const indexHTML = `<!doctype html>
     .pager-info { color:var(--muted); font-size:12px; white-space:nowrap; }
     .pager-controls { display:flex; align-items:center; gap:8px; }
     .pager button { padding:6px 9px; }
+    .page-jump { width:76px; padding:6px 8px; }
     .pager button:disabled {
       cursor:not-allowed;
       color:var(--faint);
@@ -816,6 +817,8 @@ const indexHTML = `<!doctype html>
         <div id="pageInfo" class="pager-info">Page 1</div>
         <div class="pager-controls">
           <button id="prevPage" type="button">Prev</button>
+          <input id="pageJump" class="page-jump" type="number" min="1" inputmode="numeric" aria-label="Jump to page" placeholder="Page">
+          <button id="jumpPage" type="button">Go</button>
           <button id="nextPage" type="button">Next</button>
         </div>
       </div>
@@ -840,6 +843,8 @@ const indexHTML = `<!doctype html>
     const pageInfoEl = document.getElementById('pageInfo')
     const prevPageEl = document.getElementById('prevPage')
     const nextPageEl = document.getElementById('nextPage')
+    const pageJumpEl = document.getElementById('pageJump')
+    const jumpPageEl = document.getElementById('jumpPage')
     const startTimeEl = document.getElementById('startTime')
     const endTimeEl = document.getElementById('endTime')
     const clearTimeEl = document.getElementById('clearTime')
@@ -1045,6 +1050,8 @@ const indexHTML = `<!doctype html>
       const start = state.total === 0 ? 0 : (state.page - 1) * state.pageSize + 1
       const end = Math.min(state.total, state.page * state.pageSize)
       pageInfoEl.textContent = 'Page ' + state.page + ' / ' + totalPages + ' · ' + start + '-' + end + ' of ' + state.total
+      pageJumpEl.max = String(totalPages)
+      if (document.activeElement !== pageJumpEl) pageJumpEl.value = String(state.page)
       prevPageEl.disabled = state.page <= 1
       nextPageEl.disabled = state.page >= totalPages
     }
@@ -1122,23 +1129,44 @@ const indexHTML = `<!doctype html>
       const p = qs(false)
       p.set('include_inferred', String(includeInferredEl.checked))
       const data = await api('/api/export-preview?' + p)
-      exportPreviewEl.textContent = String(data.available_count || 0) + ' unexported turns match the current filters.'
+      const fragments = [String(data.available_count || 0) + ' verified, unexported turns match the current filters.']
+      if (data.broken_count) {
+        const reasons = []
+        if (data.broken_time_count) reasons.push(String(data.broken_time_count) + ' invalid time/status')
+        if (data.broken_request_count) reasons.push(String(data.broken_request_count) + ' request mismatch')
+        if (data.broken_item_count) reasons.push(String(data.broken_item_count) + ' item mismatch')
+        fragments.push(String(data.broken_count) + ' potentially broken completed turns are excluded' + (reasons.length ? ' (' + reasons.join(', ') + ')' : '') + '.')
+      }
+      exportPreviewEl.textContent = fragments.join(' ')
+    }
+    const beijingTime = value => value ? new Date(value * 1000).toLocaleString('zh-CN', { timeZone:'Asia/Shanghai', hour12:false }) + ' 北京时间' : ''
+    function batchIntegrityLabel(batch) {
+      if (batch.integrity_status === 'verified') return 'verified'
+      if (batch.integrity_status === 'broken') return 'broken'
+      return 'unverified'
     }
     function batchActions(batch) {
+      const actions = []
       if (batch.status === 'completed') {
-        return '<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>'
+        actions.push('<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>')
+        if (batch.integrity_status === 'verified') {
+          if (batch.cleaned_at) actions.push('<button type="button" data-delete="' + esc(batch.tag) + '">Delete</button>')
+          else actions.push('<button type="button" data-clean="' + esc(batch.tag) + '">Mark cleaned</button>')
+        } else {
+          actions.push('<button type="button" data-audit="' + esc(batch.tag) + '">Audit</button>')
+        }
       }
       if (batch.status === 'failed') {
-        return '<button type="button" data-retry="' + esc(batch.tag) + '">Retry</button>'
+        actions.push('<button type="button" data-retry="' + esc(batch.tag) + '">Retry</button>')
       }
-      return ''
+      return actions.join('')
     }
     async function loadBatches() {
       const data = await api('/api/export-batches?p=1&page_size=50')
       const batches = data.items || []
       batchListEl.innerHTML = batches.map(batch => [
         '<div class="batch-row">',
-        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns' + (batch.error ? ' · ' + esc(batch.error) : '') + '</div></div>',
+        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div></div>',
         '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batch.status || 'pending') + '</span>',
         '<div>' + batchActions(batch) + '</div>',
         '</div>'
@@ -1148,6 +1176,48 @@ const indexHTML = `<!doctype html>
           button.disabled = true
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.retry) + '/retry', { method:'POST' })
+            await loadBatches()
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-audit]').forEach(button => {
+        button.onclick = async () => {
+          button.disabled = true
+          try {
+            const batch = await api('/api/export-batches/' + encodeURIComponent(button.dataset.audit) + '/audit', { method:'POST' })
+            exportPreviewEl.textContent = batch.integrity_status === 'verified' ? 'Audit passed.' : 'Audit found broken data: ' + (batch.integrity_error || 'see batch details')
+            await loadBatches()
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-clean]').forEach(button => {
+        button.onclick = async () => {
+          if (!window.confirm('Confirm that downstream processing or cold backup is complete. This enables deletion of this export batch.')) return
+          button.disabled = true
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.clean) + '/mark-cleaned', { method:'POST' })
+            await loadBatches()
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-delete]').forEach(button => {
+        button.onclick = async () => {
+          if (!window.confirm('Delete this cleaned export JSONL and its batch branch? Original turns remain marked exported and will not be exported again.')) return
+          button.disabled = true
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.delete) + '/delete', { method:'POST' })
             await loadBatches()
           } catch (err) {
             exportPreviewEl.textContent = err.message
@@ -1195,6 +1265,20 @@ const indexHTML = `<!doctype html>
       if (state.page >= totalPages) return
       state.page++
       loadRows()
+    }
+    function jumpToPage() {
+      const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize))
+      const requested = Number.parseInt(pageJumpEl.value, 10)
+      if (!Number.isInteger(requested) || requested < 1) {
+        pageJumpEl.value = String(state.page)
+        return
+      }
+      state.page = Math.min(requested, totalPages)
+      loadRows()
+    }
+    jumpPageEl.onclick = jumpToPage
+    pageJumpEl.onkeydown = event => {
+      if (event.key === 'Enter') jumpToPage()
     }
     function applyTimeFilter() {
       state.time.start = startTimeEl.value

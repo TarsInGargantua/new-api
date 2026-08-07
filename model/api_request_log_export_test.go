@@ -18,9 +18,17 @@ func createAPIRequestLogExportTestTurn(t *testing.T, db *gorm.DB, sessionId, tur
 	turn := APIRequestLogTurn{
 		SessionId: sessionId, TurnId: turnId, Protocol: "codex", TurnIndex: 1,
 		StartedAt: completedAt - 10, CompletedAt: completedAt, CompletionStatus: status, Attribution: attribution,
-		Username: "alice", ModelName: "gpt-export", ItemCount: 1,
+		Username: "alice", ModelName: "gpt-export", RequestCount: 1, ItemCount: 1,
 	}
 	require.NoError(t, db.Create(&turn).Error)
+	log := APIRequestLog{Source: APIRequestLogSourceLive, ModelName: "gpt-export", CreatedAt: completedAt - 10}
+	require.NoError(t, db.Create(&log).Error)
+	item := APIRequestLogItem{LogId: log.Id, Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: "export input"}
+	require.NoError(t, db.Create(&item).Error)
+	request := APIRequestLogTurnRequest{TurnRecordId: turn.Id, LogId: log.Id, Sequence: 1, CreatedAt: completedAt - 10}
+	require.NoError(t, db.Create(&request).Error)
+	mapping := APIRequestLogTurnItem{TurnRecordId: turn.Id, RequestRecordId: request.Id, SourceItemId: item.Id, Ordinal: 1, CanonicalKey: "export-" + turnId}
+	require.NoError(t, db.Create(&mapping).Error)
 	return turn
 }
 
@@ -42,7 +50,7 @@ func TestAPIRequestLogExportBatchClaimsFullFilterWithoutDuplicates(t *testing.T)
 
 	batch, err := CreateAPIRequestLogExportBatch(db, filter, false)
 	require.NoError(t, err)
-	require.Regexp(t, regexp.MustCompile(`^turn-export-\d{8}T\d{6}\.\d{3}Z-[0-9a-f]{6}$`), batch.Tag)
+	require.Regexp(t, regexp.MustCompile(`^turn-export-\d{8}-\d{4}-\d{6}-[0-9a-f]{6}$`), batch.Tag)
 	require.Equal(t, APIRequestLogExportBatchStatusPending, batch.Status)
 	require.Equal(t, int64(2), batch.RowCount, "list pagination must not limit a batch")
 	require.Equal(t, second.Id, batch.CutoffTurnId)
@@ -171,7 +179,8 @@ func TestAPIRequestLogExportExcludesCompletedTurnsWithoutItems(t *testing.T) {
 
 	preview, err := PreviewAPIRequestLogExport(db, APIRequestLogTurnQueryParams{ModelName: "gpt-export"}, false)
 	require.NoError(t, err)
-	require.Equal(t, int64(1), preview.MatchedCount)
+	require.Equal(t, int64(2), preview.MatchedCount)
+	require.Equal(t, int64(1), preview.BrokenCount)
 	require.Equal(t, int64(1), preview.AvailableCount)
 
 	batch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{ModelName: "gpt-export"}, false)
@@ -181,6 +190,64 @@ func TestAPIRequestLogExportExcludesCompletedTurnsWithoutItems(t *testing.T) {
 	var member APIRequestLogExportMember
 	require.NoError(t, db.Where("batch_id = ?", batch.Id).First(&member).Error)
 	require.Equal(t, eligible.Id, member.TurnRecordId)
+}
+
+func TestAPIRequestLogExportExcludesPotentiallyBrokenCompletedTurns(t *testing.T) {
+	db := setupAPIRequestLogTurnTestDB(t)
+	good := createAPIRequestLogExportTestTurn(t, db, "good-session", "good-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 200)
+	broken := createAPIRequestLogExportTestTurn(t, db, "broken-session", "broken-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 201)
+	require.NoError(t, db.Model(&broken).Update("request_count", 2).Error)
+
+	preview, err := PreviewAPIRequestLogExport(db, APIRequestLogTurnQueryParams{ModelName: "gpt-export"}, false)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), preview.MatchedCount)
+	require.Equal(t, int64(1), preview.SafeMatchedCount)
+	require.Equal(t, int64(1), preview.BrokenCount)
+	require.Equal(t, int64(1), preview.BrokenRequestCount)
+	require.Equal(t, int64(1), preview.AvailableCount)
+
+	batch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{ModelName: "gpt-export"}, false)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), batch.RowCount)
+	var member APIRequestLogExportMember
+	require.NoError(t, db.Where("batch_id = ?", batch.Id).First(&member).Error)
+	require.Equal(t, good.Id, member.TurnRecordId)
+}
+
+func TestAPIRequestLogExportUsesBeijingRangeTagAndRequiresCleanedMarkerForDeletion(t *testing.T) {
+	db := setupAPIRequestLogTurnTestDB(t)
+	turn := createAPIRequestLogExportTestTurn(t, db, "cleanup-session", "cleanup-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 200)
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	filter := APIRequestLogExportFilter{
+		StartTimestamp: time.Date(2026, time.July, 1, 0, 0, 0, 0, location).Unix(),
+		EndTimestamp:   time.Date(2026, time.July, 18, 0, 0, 0, 0, location).Unix(),
+	}
+	tag, err := newAPIRequestLogExportTag(time.Date(2026, time.July, 18, 1, 2, 3, 0, time.UTC), filter)
+	require.NoError(t, err)
+	require.Regexp(t, regexp.MustCompile(`^turn-export-20260701-0718-\d{6}-[0-9a-f]{6}$`), tag)
+
+	batch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{SessionId: turn.SessionId}, false)
+	require.NoError(t, err)
+	building, err := ClaimAPIRequestLogExportBatch(db, batch.Tag, "worker-cleanup", time.Minute)
+	require.NoError(t, err)
+	completed, err := MarkAPIRequestLogExportBatchCompleted(db, batch.Tag, building.BuildOwner, "/tmp/export-cleanup.jsonl", strings.Repeat("a", 64), batch.RowCount)
+	require.NoError(t, err)
+	require.Equal(t, APIRequestLogExportIntegrityVerified, completed.IntegrityStatus)
+
+	_, err = DeleteAPIRequestLogExportBatch(db, batch.Tag)
+	require.ErrorIs(t, err, ErrAPIRequestLogExportBatchNotCleaned)
+	cleaned, err := MarkAPIRequestLogExportBatchCleaned(db, batch.Tag)
+	require.NoError(t, err)
+	require.Positive(t, cleaned.CleanedAt)
+	deleted, err := DeleteAPIRequestLogExportBatch(db, batch.Tag)
+	require.NoError(t, err)
+	require.Equal(t, batch.Tag, deleted.Tag)
+	_, err = GetAPIRequestLogExportBatchByTag(db, batch.Tag)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	var members int64
+	require.NoError(t, db.Model(&APIRequestLogExportMember{}).Where("batch_id = ?", batch.Id).Count(&members).Error)
+	require.Zero(t, members)
 }
 
 func TestAPIRequestLogExportBatchLeaseTakeoverAndRetryPreserveMembers(t *testing.T) {
