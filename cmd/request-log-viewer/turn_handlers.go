@@ -167,7 +167,13 @@ func (s *requestLogViewerServer) serveExportBatchAction(w http.ResponseWriter, r
 			writeMethodNotAllowed(w, http.MethodPost)
 			return
 		}
-		s.serveExportBatchDelete(w, tag)
+		s.serveExportBatchDelete(w, tag, false)
+	case "delete-history":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.serveExportBatchDelete(w, tag, true)
 	default:
 		http.NotFound(w, r)
 	}
@@ -267,7 +273,7 @@ func (s *requestLogViewerServer) serveResetExportArtifactDeletion(w http.Respons
 	writeAPI(w, deleted, nil)
 }
 
-func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, tag string) {
+func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, tag string, force bool) {
 	s.exportMutationMu.Lock()
 	defer s.exportMutationMu.Unlock()
 
@@ -284,7 +290,7 @@ func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, t
 		writeAPIError(w, http.StatusConflict, "仅已完成的导出批次可以删除")
 		return
 	}
-	if batch.CleanedAt <= 0 {
+	if !force && batch.CleanedAt <= 0 {
 		writeAPIError(w, http.StatusConflict, "导出批次须先标记为已清洗后才能删除")
 		return
 	}
@@ -297,7 +303,11 @@ func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, t
 			return
 		}
 	}
-	deleted, err := model.DeleteAPIRequestLogExportBatch(s.db, tag)
+	deleteBatch := model.DeleteAPIRequestLogExportBatch
+	if force {
+		deleteBatch = model.ForceDeleteAPIRequestLogExportBatch
+	}
+	deleted, err := deleteBatch(s.db, tag)
 	if err != nil {
 		_ = staged.Restore()
 		writeExportActionError(w, err)

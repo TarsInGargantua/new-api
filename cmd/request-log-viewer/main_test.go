@@ -80,7 +80,7 @@ func TestRequestLogViewerIndexUsesChineseExportLabels(t *testing.T) {
 		t.Fatalf("unexpected index status: %d", recorder.Code)
 	}
 	body := recorder.Body.String()
-	for _, expected := range []string{"轮次日志查看器", "导出批次", "历史导出", "完整性复核", "标记已清洗", "重置为未导出", "确认重置这条历史导出吗"} {
+	for _, expected := range []string{"轮次日志查看器", "导出批次", "历史导出", "完整性复核", "标记已清洗", "重置为未导出", "删除历史记录", "确认重置这条历史导出吗"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("missing Chinese viewer label %q", expected)
 		}
@@ -206,6 +206,35 @@ func TestRequestLogViewerAuditsCleansAndDeletesExportBatch(t *testing.T) {
 	}
 	if _, err := model.GetAPIRequestLogExportBatchByTag(db, batch.Tag); !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("batch should be deleted, err=%v", err)
+	}
+}
+
+func TestRequestLogViewerDeletesHistoricalRecordWithoutCleanedMarker(t *testing.T) {
+	server, db := setupRequestLogViewerTest(t)
+	turn := seedRequestLogViewerTurn(t, db)
+	batch, err := model.CreateAPIRequestLogExportBatch(db, model.APIRequestLogTurnQueryParams{SessionId: turn.SessionId}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitForCompletedExport(t, db, batch.Tag)
+
+	deleteRecorder := httptest.NewRecorder()
+	server.serveExportBatchAction(deleteRecorder, httptest.NewRequest(http.MethodPost, "/api/export-batches/"+batch.Tag+"/delete-history", nil))
+	if deleteRecorder.Code != http.StatusOK {
+		t.Fatalf("unexpected historical delete response: status=%d body=%s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+	if _, err := os.Stat(completed.ArtifactPath); !os.IsNotExist(err) {
+		t.Fatalf("historical delete should remove artifact, stat err=%v", err)
+	}
+	if _, err := model.GetAPIRequestLogExportBatchByTag(db, batch.Tag); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("historical batch should be deleted, err=%v", err)
+	}
+	var storedTurn model.APIRequestLogTurn
+	if err := db.First(&storedTurn, turn.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if storedTurn.ExportedVersion <= 0 {
+		t.Fatalf("historical delete must not change turn export state, got %d", storedTurn.ExportedVersion)
 	}
 }
 

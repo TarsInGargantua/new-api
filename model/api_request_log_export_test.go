@@ -285,6 +285,29 @@ func TestAPIRequestLogExportBatchResetReleasesTurnsAndKeepsHistoricalBatch(t *te
 	require.ErrorIs(t, err, ErrAPIRequestLogExportBatchAlreadyReset)
 }
 
+func TestForceDeleteAPIRequestLogExportBatchKeepsTurnExportState(t *testing.T) {
+	db := setupAPIRequestLogTurnTestDB(t)
+	turn := createAPIRequestLogExportTestTurn(t, db, "force-delete-session", "force-delete-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 200)
+	batch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{SessionId: turn.SessionId}, false)
+	require.NoError(t, err)
+	building, err := ClaimAPIRequestLogExportBatch(db, batch.Tag, "worker-force-delete", time.Minute)
+	require.NoError(t, err)
+	_, err = MarkAPIRequestLogExportBatchCompleted(db, batch.Tag, building.BuildOwner, "/tmp/export-force-delete.jsonl", strings.Repeat("a", 64), batch.RowCount)
+	require.NoError(t, err)
+
+	deleted, err := ForceDeleteAPIRequestLogExportBatch(db, batch.Tag)
+	require.NoError(t, err)
+	require.Equal(t, batch.Tag, deleted.Tag)
+	_, err = GetAPIRequestLogExportBatchByTag(db, batch.Tag)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	var members int64
+	require.NoError(t, db.Model(&APIRequestLogExportMember{}).Where("batch_id = ?", batch.Id).Count(&members).Error)
+	require.Zero(t, members)
+	var storedTurn APIRequestLogTurn
+	require.NoError(t, db.First(&storedTurn, turn.Id).Error)
+	require.Positive(t, storedTurn.ExportedVersion)
+}
+
 func TestAPIRequestLogExportBatchLeaseTakeoverAndRetryPreserveMembers(t *testing.T) {
 	db := setupAPIRequestLogTurnTestDB(t)
 	createAPIRequestLogExportTestTurn(t, db, "lease-session", "lease-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 100)

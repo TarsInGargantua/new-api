@@ -1173,11 +1173,11 @@ const indexHTML = `<!doctype html>
         if (!batch.reset_at) actions.push('<button type="button" data-reset="' + esc(batch.tag) + '">重置为未导出</button>')
         if (batch.reset_at && !batch.artifact_deleted_at) actions.push('<button type="button" data-delete-artifact="' + esc(batch.tag) + '">删除导出文件</button>')
         if (batch.integrity_status === 'verified') {
-          if (batch.cleaned_at) actions.push('<button type="button" data-delete="' + esc(batch.tag) + '">删除批次</button>')
-          else actions.push('<button type="button" data-clean="' + esc(batch.tag) + '">标记已清洗</button>')
+          if (!batch.cleaned_at) actions.push('<button type="button" data-clean="' + esc(batch.tag) + '">标记已清洗</button>')
         } else if (!batch.reset_at) {
           actions.push('<button type="button" data-audit="' + esc(batch.tag) + '" title="重新检查导出轮次、请求和条目是否完整一致">完整性复核</button>')
         }
+        actions.push('<button type="button" data-delete-history="' + esc(batch.tag) + '">删除历史记录</button>')
       }
       if (batch.status === 'failed') {
         actions.push('<button type="button" data-retry="' + esc(batch.tag) + '">重试</button>')
@@ -1250,9 +1250,13 @@ const indexHTML = `<!doctype html>
         button.onclick = async () => {
           if (!window.confirm('确认重置这条历史导出吗？系统会删除已整理的导出文件，但保留历史记录；关联轮次将变为“未导出”，后续可以重新导出。')) return
           button.disabled = true
+          exportPreviewEl.textContent = '正在重置导出批次…'
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.reset) + '/reset', { method:'POST' })
-            await Promise.all([loadBatches(), loadRows(), loadExportPreview()])
+            exportPreviewEl.textContent = '导出批次已重置，正在刷新列表…'
+            await Promise.all([loadBatches(), loadRows()])
+            exportPreviewEl.textContent = '导出批次已重置，正在刷新可导出数量…'
+            loadExportPreview().catch(err => { exportPreviewEl.textContent = err.message })
           } catch (err) {
             exportPreviewEl.textContent = err.message
           } finally {
@@ -1281,6 +1285,23 @@ const indexHTML = `<!doctype html>
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.delete) + '/delete', { method:'POST' })
             await loadBatches()
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-delete-history]').forEach(button => {
+        button.onclick = async () => {
+          if (!window.confirm('确认删除这条历史记录吗？系统会删除该批次记录及未删除的导出文件。此操作不可恢复，但不会改变轮次当前的导出状态。')) return
+          button.disabled = true
+          exportPreviewEl.textContent = '正在删除历史记录…'
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.deleteHistory) + '/delete-history', { method:'POST' })
+            await Promise.all([loadBatches(), loadRows()])
+            exportPreviewEl.textContent = '历史记录已删除。'
+            loadExportPreview().catch(err => { exportPreviewEl.textContent = err.message })
           } catch (err) {
             exportPreviewEl.textContent = err.message
           } finally {
