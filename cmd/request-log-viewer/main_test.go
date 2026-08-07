@@ -190,6 +190,42 @@ func TestRequestLogViewerAuditsCleansAndDeletesExportBatch(t *testing.T) {
 	}
 }
 
+func TestRequestLogViewerResetsCompletedExportBatch(t *testing.T) {
+	server, db := setupRequestLogViewerTest(t)
+	turn := seedRequestLogViewerTurn(t, db)
+	batch, err := model.CreateAPIRequestLogExportBatch(db, model.APIRequestLogTurnQueryParams{SessionId: turn.SessionId}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitForCompletedExport(t, db, batch.Tag)
+
+	resetRecorder := httptest.NewRecorder()
+	server.serveExportBatchAction(resetRecorder, httptest.NewRequest(http.MethodPost, "/api/export-batches/"+batch.Tag+"/reset", nil))
+	if resetRecorder.Code != http.StatusOK || !strings.Contains(resetRecorder.Body.String(), `"reset_at":`) {
+		t.Fatalf("unexpected reset response: status=%d body=%s", resetRecorder.Code, resetRecorder.Body.String())
+	}
+	var storedTurn model.APIRequestLogTurn
+	if err := db.First(&storedTurn, turn.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if storedTurn.ExportedVersion != 0 {
+		t.Fatalf("turn should be released for a future export, got exported version %d", storedTurn.ExportedVersion)
+	}
+	var members int64
+	if err := db.Model(&model.APIRequestLogExportMember{}).Where("batch_id = ?", completed.Id).Count(&members).Error; err != nil {
+		t.Fatal(err)
+	}
+	if members != 0 {
+		t.Fatalf("expected reset batch members to be removed, got %d", members)
+	}
+
+	secondReset := httptest.NewRecorder()
+	server.serveExportBatchAction(secondReset, httptest.NewRequest(http.MethodPost, "/api/export-batches/"+batch.Tag+"/reset", nil))
+	if secondReset.Code != http.StatusConflict {
+		t.Fatalf("expected second reset conflict, got status=%d body=%s", secondReset.Code, secondReset.Body.String())
+	}
+}
+
 func TestRequestLogExportWorkerEnqueueIsNonBlockingAndCoalesced(t *testing.T) {
 	worker := &requestLogExportWorker{wake: make(chan struct{}, 1)}
 	done := make(chan struct{})

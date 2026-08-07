@@ -147,6 +147,17 @@ func (s *requestLogViewerServer) serveExportBatchAction(w http.ResponseWriter, r
 			return
 		}
 		writeAPI(w, batch, nil)
+	case "reset":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		batch, err := model.ResetAPIRequestLogExportBatch(s.db, tag)
+		if err != nil {
+			writeExportActionError(w, err)
+			return
+		}
+		writeAPI(w, batch, nil)
 	case "delete":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
@@ -202,7 +213,7 @@ func writeExportActionError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusNotFound, "export batch not found")
 		return
 	}
-	if errors.Is(err, model.ErrAPIRequestLogExportBatchNotCleaned) || errors.Is(err, model.ErrAPIRequestLogExportBatchNotClaimable) {
+	if errors.Is(err, model.ErrAPIRequestLogExportBatchNotCleaned) || errors.Is(err, model.ErrAPIRequestLogExportBatchNotClaimable) || errors.Is(err, model.ErrAPIRequestLogExportBatchAlreadyReset) {
 		writeAPIError(w, http.StatusConflict, err.Error())
 		return
 	}

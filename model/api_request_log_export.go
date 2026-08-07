@@ -39,6 +39,7 @@ var (
 	ErrAPIRequestLogExportBatchLeaseLost    = errors.New("export batch lease is no longer owned")
 	ErrAPIRequestLogExportDataBroken        = errors.New("export data integrity check failed")
 	ErrAPIRequestLogExportBatchNotCleaned   = errors.New("export batch must be marked cleaned before deletion")
+	ErrAPIRequestLogExportBatchAlreadyReset = errors.New("export batch has already been reset")
 )
 
 type APIRequestLogExportFilter struct {
@@ -77,6 +78,8 @@ type APIRequestLogExportBatch struct {
 	IntegrityCheckedAt int64                     `json:"integrity_checked_at,omitempty" gorm:"bigint;index"`
 	IntegrityError     string                    `json:"integrity_error,omitempty" gorm:"type:text"`
 	CleanedAt          int64                     `json:"cleaned_at,omitempty" gorm:"bigint;index"`
+	ResetAt            int64                     `json:"reset_at,omitempty" gorm:"bigint;index"`
+	ResetRows          int64                     `json:"reset_rows" gorm:"default:0"`
 	BuildOwner         string                    `json:"-" gorm:"type:varchar(191);index;default:''"`
 	LeaseExpiresAt     int64                     `json:"lease_expires_at,omitempty" gorm:"bigint;index;default:0"`
 	BuildAttempt       int                       `json:"build_attempt" gorm:"default:0"`
@@ -723,6 +726,86 @@ func MarkAPIRequestLogExportBatchCleaned(db *gorm.DB, tag string) (*APIRequestLo
 			return nil, errors.New("only completed export batches can be marked cleaned")
 		}
 		return nil, errors.New("audit the export batch successfully before marking it cleaned")
+	}
+	return GetAPIRequestLogExportBatchByTag(db, tag)
+}
+
+// ResetAPIRequestLogExportBatch releases a completed batch's source turns for
+// a future export while retaining the JSONL artifact and its historical batch
+// metadata. Deleting the member branch is required in addition to clearing
+// exported_version because either marker makes a turn ineligible for export.
+func ResetAPIRequestLogExportBatch(db *gorm.DB, tag string) (*APIRequestLogExportBatch, error) {
+	if db == nil {
+		return nil, errors.New("request log database is not initialized")
+	}
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return nil, errors.New("export batch tag is required")
+	}
+
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		dialect := ""
+		if tx.Dialector != nil {
+			dialect = tx.Dialector.Name()
+		}
+
+		batchQuery := tx.Where("tag = ?", tag)
+		if dialect != "sqlite" {
+			batchQuery = batchQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		var batch APIRequestLogExportBatch
+		if err := batchQuery.First(&batch).Error; err != nil {
+			return err
+		}
+		if batch.Status != APIRequestLogExportBatchStatusCompleted {
+			return errors.New("only completed export batches can be reset")
+		}
+		if batch.ResetAt > 0 {
+			return ErrAPIRequestLogExportBatchAlreadyReset
+		}
+
+		var turnIds []int64
+		if err := tx.Model(&APIRequestLogExportMember{}).
+			Where("batch_id = ?", batch.Id).
+			Order("sequence ASC").
+			Pluck("turn_record_id", &turnIds).Error; err != nil {
+			return err
+		}
+		turnIds = uniquePositiveInt64s(turnIds)
+		if len(turnIds) > 0 {
+			turnQuery := tx.Model(&APIRequestLogTurn{}).Where("id IN ?", turnIds)
+			if dialect != "sqlite" {
+				turnQuery = turnQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			var lockedTurnIds []int64
+			if err := turnQuery.Pluck("id", &lockedTurnIds).Error; err != nil {
+				return err
+			}
+			if len(lockedTurnIds) != len(turnIds) {
+				return fmt.Errorf("%w: export batch contains missing turns", ErrAPIRequestLogExportDataBroken)
+			}
+			if err := tx.Model(&APIRequestLogTurn{}).
+				Where("id IN ?", turnIds).
+				Update("exported_version", 0).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("batch_id = ?", batch.Id).Delete(&APIRequestLogExportMember{}).Error; err != nil {
+			return err
+		}
+		now := time.Now().UTC().Unix()
+		result := tx.Model(&APIRequestLogExportBatch{}).
+			Where("id = ? AND reset_at = 0", batch.Id).
+			Updates(map[string]interface{}{"reset_at": now, "reset_rows": int64(len(turnIds))})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrAPIRequestLogExportBatchAlreadyReset
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return GetAPIRequestLogExportBatchByTag(db, tag)
 }

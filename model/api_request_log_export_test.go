@@ -254,6 +254,36 @@ func TestAPIRequestLogExportUsesBeijingRangeTagAndRequiresCleanedMarkerForDeleti
 	require.Zero(t, members)
 }
 
+func TestAPIRequestLogExportBatchResetReleasesTurnsAndKeepsHistoricalBatch(t *testing.T) {
+	db := setupAPIRequestLogTurnTestDB(t)
+	turn := createAPIRequestLogExportTestTurn(t, db, "reset-session", "reset-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 200)
+	batch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{SessionId: turn.SessionId}, false)
+	require.NoError(t, err)
+	building, err := ClaimAPIRequestLogExportBatch(db, batch.Tag, "worker-reset", time.Minute)
+	require.NoError(t, err)
+	_, err = MarkAPIRequestLogExportBatchCompleted(db, batch.Tag, building.BuildOwner, "/tmp/export-reset.jsonl", strings.Repeat("a", 64), batch.RowCount)
+	require.NoError(t, err)
+
+	reset, err := ResetAPIRequestLogExportBatch(db, batch.Tag)
+	require.NoError(t, err)
+	require.Equal(t, APIRequestLogExportBatchStatusCompleted, reset.Status)
+	require.Positive(t, reset.ResetAt)
+	require.Equal(t, int64(1), reset.ResetRows)
+	require.Equal(t, "/tmp/export-reset.jsonl", reset.ArtifactPath)
+	var members int64
+	require.NoError(t, db.Model(&APIRequestLogExportMember{}).Where("batch_id = ?", batch.Id).Count(&members).Error)
+	require.Zero(t, members)
+	var storedTurn APIRequestLogTurn
+	require.NoError(t, db.First(&storedTurn, turn.Id).Error)
+	require.Zero(t, storedTurn.ExportedVersion)
+	preview, err := PreviewAPIRequestLogExport(db, APIRequestLogTurnQueryParams{SessionId: turn.SessionId}, false)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), preview.AvailableCount)
+
+	_, err = ResetAPIRequestLogExportBatch(db, batch.Tag)
+	require.ErrorIs(t, err, ErrAPIRequestLogExportBatchAlreadyReset)
+}
+
 func TestAPIRequestLogExportBatchLeaseTakeoverAndRetryPreserveMembers(t *testing.T) {
 	db := setupAPIRequestLogTurnTestDB(t)
 	createAPIRequestLogExportTestTurn(t, db, "lease-session", "lease-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 100)

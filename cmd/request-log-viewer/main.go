@@ -662,6 +662,20 @@ const indexHTML = `<!doctype html>
     .toggle input { width:auto; accent-color:var(--accent); }
     .export-preview { color:var(--muted); font-size:13px; }
     .batch-list { display:grid; gap:8px; }
+    .history-exports {
+      border-top:1px solid var(--line);
+      margin-top:4px;
+      padding-top:8px;
+    }
+    .history-exports summary {
+      cursor:pointer;
+      color:var(--muted);
+      font-size:12px;
+      font-weight:700;
+      user-select:none;
+    }
+    .history-exports summary:hover { color:var(--accent); }
+    .history-export-list { display:grid; gap:8px; margin-top:8px; }
     .batch-row {
       display:grid;
       grid-template-columns:minmax(0,1fr) auto auto;
@@ -1162,10 +1176,11 @@ const indexHTML = `<!doctype html>
       const actions = []
       if (batch.status === 'completed') {
         actions.push('<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>')
+        if (!batch.reset_at) actions.push('<button type="button" data-reset="' + esc(batch.tag) + '">Reset export state</button>')
         if (batch.integrity_status === 'verified') {
           if (batch.cleaned_at) actions.push('<button type="button" data-delete="' + esc(batch.tag) + '">Delete</button>')
           else actions.push('<button type="button" data-clean="' + esc(batch.tag) + '">Mark cleaned</button>')
-        } else {
+        } else if (!batch.reset_at) {
           actions.push('<button type="button" data-audit="' + esc(batch.tag) + '">Audit</button>')
         }
       }
@@ -1174,16 +1189,27 @@ const indexHTML = `<!doctype html>
       }
       return actions.join('')
     }
-    async function loadBatches() {
-      const data = await api('/api/export-batches?p=1&page_size=50')
-      const batches = data.items || []
-      batchListEl.innerHTML = batches.map(batch => [
+    function renderBatchRow(batch) {
+      return [
         '<div class="batch-row">',
-        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div>' + batchProgress(batch) + '</div>',
+        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · reset ' + esc(beijingTime(batch.reset_at)) + ' (' + esc(batch.reset_rows || 0) + ' released)' : '') + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div>' + batchProgress(batch) + '</div>',
         '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batch.status || 'pending') + '</span>',
         '<div>' + batchActions(batch) + '</div>',
         '</div>'
-      ].join('')).join('') || '<div class="empty">No export batches.</div>'
+      ].join('')
+    }
+    async function loadBatches() {
+      const data = await api('/api/export-batches?p=1&page_size=1000')
+      const batches = data.items || []
+      const activeBatches = batches.filter(batch => batch.status !== 'completed')
+      const historicalBatches = batches.filter(batch => batch.status === 'completed')
+      const activeHTML = activeBatches.length
+        ? activeBatches.map(renderBatchRow).join('')
+        : '<div class="batch-meta">No active or failed export batches.</div>'
+      const historyHTML = historicalBatches.length
+        ? '<details class="history-exports"><summary>Historical exports (' + esc(historicalBatches.length) + ')</summary><div class="history-export-list">' + historicalBatches.map(renderBatchRow).join('') + '</div></details>'
+        : ''
+      batchListEl.innerHTML = activeHTML + historyHTML
       batchListEl.querySelectorAll('[data-retry]').forEach(button => {
         button.onclick = async () => {
           button.disabled = true
@@ -1218,6 +1244,20 @@ const indexHTML = `<!doctype html>
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.clean) + '/mark-cleaned', { method:'POST' })
             await loadBatches()
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-reset]').forEach(button => {
+        button.onclick = async () => {
+          if (!window.confirm('Reset this historical batch to not exported? The JSONL and history entry stay, but its source turns become eligible for a future export.')) return
+          button.disabled = true
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.reset) + '/reset', { method:'POST' })
+            await Promise.all([loadBatches(), loadRows(), loadExportPreview()])
           } catch (err) {
             exportPreviewEl.textContent = err.message
           } finally {
