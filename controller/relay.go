@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
+
+const relayAttemptedUpstreamTargetsKey = "relay_attempted_upstream_targets"
 
 func relayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
 	var err *types.NewAPIError
@@ -203,6 +206,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 
+		if isDuplicateRelayUpstreamTarget(c) {
+			logger.LogWarn(c, fmt.Sprintf("skip duplicate upstream target on retry: channel #%d", channel.Id))
+			continue
+		}
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
@@ -265,6 +272,30 @@ func addUsedChannel(c *gin.Context, channelId int) {
 	useChannel := c.GetStringSlice("use_channel")
 	useChannel = append(useChannel, fmt.Sprintf("%d", channelId))
 	c.Set("use_channel", useChannel)
+}
+
+// isDuplicateRelayUpstreamTarget skips a retry only when it resolves to the
+// same base URL and concrete credential as an earlier attempt. This prevents
+// two channel records that point at one broken upstream from extending the
+// request tail, while allowing a genuine standby endpoint or a different key.
+func isDuplicateRelayUpstreamTarget(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	baseURL := common.GetContextKeyString(c, constant.ContextKeyChannelBaseUrl)
+	apiKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+	if baseURL == "" || apiKey == "" {
+		return false
+	}
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(baseURL+"\x00"+apiKey)))
+	usedTargets := c.GetStringSlice(relayAttemptedUpstreamTargetsKey)
+	for _, used := range usedTargets {
+		if used == fingerprint {
+			return true
+		}
+	}
+	c.Set(relayAttemptedUpstreamTargetsKey, append(usedTargets, fingerprint))
+	return false
 }
 
 func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
