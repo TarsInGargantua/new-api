@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/subtle"
 	"flag"
 	"fmt"
 	"net/http"
@@ -28,16 +27,10 @@ type pageData struct {
 
 func main() {
 	addr := flag.String("addr", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_ADDR"), ":3001"), "listen address")
-	username := flag.String("username", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_USERNAME"), "admin"), "basic auth username")
-	password := flag.String("password", os.Getenv("REQUEST_LOG_VIEWER_PASSWORD"), "basic auth password")
 	dsn := flag.String("dsn", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_SQL_DSN"), os.Getenv("REQUEST_LOG_SQL_DSN")), "request log database DSN")
 	exportDir := flag.String("export-dir", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_EXPORT_DIR"), "exports"), "persistent JSONL export directory")
 	flag.Parse()
 
-	if strings.TrimSpace(*password) == "" {
-		fmt.Fprintln(os.Stderr, "REQUEST_LOG_VIEWER_PASSWORD is required")
-		os.Exit(1)
-	}
 	if strings.TrimSpace(*dsn) == "" {
 		fmt.Fprintln(os.Stderr, "REQUEST_LOG_SQL_DSN or REQUEST_LOG_VIEWER_SQL_DSN is required")
 		os.Exit(1)
@@ -75,8 +68,7 @@ func main() {
 	mux.HandleFunc("/api/export.jsonl", serveJSONL)
 
 	fmt.Printf("request-log-viewer listening on %s\n", *addr)
-	handler := basicAuth(mux, *username, *password)
-	if err := http.ListenAndServe(*addr, handler); err != nil {
+	if err := http.ListenAndServe(*addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "listen: %v\n", err)
 		os.Exit(1)
 	}
@@ -171,20 +163,6 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
-}
-
-func basicAuth(next http.Handler, username string, password string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotUser, gotPass, ok := r.BasicAuth()
-		userOK := subtle.ConstantTimeCompare([]byte(gotUser), []byte(username)) == 1
-		passOK := subtle.ConstantTimeCompare([]byte(gotPass), []byte(password)) == 1
-		if !ok || !userOK || !passOK {
-			w.Header().Set("WWW-Authenticate", `Basic realm="request-log-viewer"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func queryInt(value string, fallback int) int {
