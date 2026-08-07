@@ -21,6 +21,10 @@ const (
 	APIRequestLogExportBatchStatusCompleted = "completed"
 	APIRequestLogExportBatchStatusFailed    = "failed"
 
+	APIRequestLogExportIntegrityPending  = "pending"
+	APIRequestLogExportIntegrityVerified = "verified"
+	APIRequestLogExportIntegrityBroken   = "broken"
+
 	APIRequestLogExportSchemaVersion = 1
 )
 
@@ -33,6 +37,9 @@ const (
 var (
 	ErrAPIRequestLogExportBatchNotClaimable = errors.New("export batch is not claimable")
 	ErrAPIRequestLogExportBatchLeaseLost    = errors.New("export batch lease is no longer owned")
+	ErrAPIRequestLogExportDataBroken        = errors.New("export data integrity check failed")
+	ErrAPIRequestLogExportBatchNotCleaned   = errors.New("export batch must be marked cleaned before deletion")
+	ErrAPIRequestLogExportBatchAlreadyReset = errors.New("export batch has already been reset")
 )
 
 type APIRequestLogExportFilter struct {
@@ -51,24 +58,31 @@ type APIRequestLogExportFilter struct {
 }
 
 type APIRequestLogExportBatch struct {
-	Id              int64                     `json:"id" gorm:"primaryKey"`
-	Tag             string                    `json:"tag" gorm:"type:varchar(128);not null;uniqueIndex"`
-	Status          string                    `json:"status" gorm:"type:varchar(16);index;default:'pending'"`
-	CutoffTurnId    int64                     `json:"cutoff_turn_id" gorm:"default:0"`
-	ArtifactPath    string                    `json:"artifact_path,omitempty" gorm:"type:text"`
-	SHA256          string                    `json:"sha256,omitempty" gorm:"type:char(64);default:''"`
-	SchemaVersion   int                       `json:"schema_version" gorm:"default:1"`
-	Error           string                    `json:"error,omitempty" gorm:"type:text"`
-	RowCount        int64                     `json:"row_count" gorm:"default:0"`
-	FilterJSON      APIRequestLogBody         `json:"-"`
-	Filter          APIRequestLogExportFilter `json:"filter" gorm:"-"`
-	IncludeInferred bool                      `json:"include_inferred"`
-	CreatedAt       int64                     `json:"created_at" gorm:"autoCreateTime"`
-	UpdatedAt       int64                     `json:"updated_at" gorm:"autoUpdateTime"`
-	CompletedAt     int64                     `json:"completed_at,omitempty" gorm:"bigint;index"`
-	BuildOwner      string                    `json:"-" gorm:"type:varchar(191);index;default:''"`
-	LeaseExpiresAt  int64                     `json:"lease_expires_at,omitempty" gorm:"bigint;index;default:0"`
-	BuildAttempt    int                       `json:"build_attempt" gorm:"default:0"`
+	Id                 int64                     `json:"id" gorm:"primaryKey"`
+	Tag                string                    `json:"tag" gorm:"type:varchar(128);not null;uniqueIndex"`
+	Status             string                    `json:"status" gorm:"type:varchar(16);index;default:'pending'"`
+	CutoffTurnId       int64                     `json:"cutoff_turn_id" gorm:"default:0"`
+	ArtifactPath       string                    `json:"artifact_path,omitempty" gorm:"type:text"`
+	SHA256             string                    `json:"sha256,omitempty" gorm:"type:char(64);default:''"`
+	SchemaVersion      int                       `json:"schema_version" gorm:"default:1"`
+	Error              string                    `json:"error,omitempty" gorm:"type:text"`
+	RowCount           int64                     `json:"row_count" gorm:"default:0"`
+	ProcessedRows      int64                     `json:"processed_rows" gorm:"default:0"`
+	FilterJSON         APIRequestLogBody         `json:"-"`
+	Filter             APIRequestLogExportFilter `json:"filter" gorm:"-"`
+	IncludeInferred    bool                      `json:"include_inferred"`
+	CreatedAt          int64                     `json:"created_at" gorm:"autoCreateTime"`
+	UpdatedAt          int64                     `json:"updated_at" gorm:"autoUpdateTime"`
+	CompletedAt        int64                     `json:"completed_at,omitempty" gorm:"bigint;index"`
+	IntegrityStatus    string                    `json:"integrity_status" gorm:"type:varchar(16);index;default:'pending'"`
+	IntegrityCheckedAt int64                     `json:"integrity_checked_at,omitempty" gorm:"bigint;index"`
+	IntegrityError     string                    `json:"integrity_error,omitempty" gorm:"type:text"`
+	CleanedAt          int64                     `json:"cleaned_at,omitempty" gorm:"bigint;index"`
+	ResetAt            int64                     `json:"reset_at,omitempty" gorm:"bigint;index"`
+	ResetRows          int64                     `json:"reset_rows" gorm:"default:0"`
+	BuildOwner         string                    `json:"-" gorm:"type:varchar(191);index;default:''"`
+	LeaseExpiresAt     int64                     `json:"lease_expires_at,omitempty" gorm:"bigint;index;default:0"`
+	BuildAttempt       int                       `json:"build_attempt" gorm:"default:0"`
 }
 
 func (APIRequestLogExportBatch) TableName() string { return apiRequestLogExportBatchesTable }
@@ -85,6 +99,11 @@ func (APIRequestLogExportMember) TableName() string { return apiRequestLogExport
 
 type APIRequestLogExportPreview struct {
 	MatchedCount         int64 `json:"matched_count"`
+	SafeMatchedCount     int64 `json:"safe_matched_count"`
+	BrokenCount          int64 `json:"broken_count"`
+	BrokenTimeCount      int64 `json:"broken_time_count"`
+	BrokenRequestCount   int64 `json:"broken_request_count"`
+	BrokenItemCount      int64 `json:"broken_item_count"`
 	AvailableCount       int64 `json:"available_count"`
 	AlreadyExportedCount int64 `json:"already_exported_count"`
 	ExactCount           int64 `json:"exact_count"`
@@ -134,9 +153,27 @@ func PreviewAPIRequestLogExport(db *gorm.DB, params APIRequestLogTurnQueryParams
 	if db == nil {
 		return nil, errors.New("request log database is not initialized")
 	}
-	eligible := buildAPIRequestLogExportEligibleQuery(db, params, includeInferred)
+	candidate := buildAPIRequestLogExportCandidateQuery(db, params, includeInferred)
 	preview := &APIRequestLogExportPreview{}
-	if err := eligible.Count(&preview.MatchedCount).Error; err != nil {
+	if err := candidate.Count(&preview.MatchedCount).Error; err != nil {
+		return nil, err
+	}
+	brokenSQL := apiRequestLogTurnBrokenSQL()
+	broken := candidate.Session(&gorm.Session{}).Where(brokenSQL)
+	if err := broken.Count(&preview.BrokenCount).Error; err != nil {
+		return nil, err
+	}
+	if err := broken.Session(&gorm.Session{}).Where(apiRequestLogTurnBrokenTimeSQL()).Count(&preview.BrokenTimeCount).Error; err != nil {
+		return nil, err
+	}
+	if err := broken.Session(&gorm.Session{}).Where(apiRequestLogTurnBrokenRequestSQL()).Count(&preview.BrokenRequestCount).Error; err != nil {
+		return nil, err
+	}
+	if err := broken.Session(&gorm.Session{}).Where(apiRequestLogTurnBrokenItemSQL()).Count(&preview.BrokenItemCount).Error; err != nil {
+		return nil, err
+	}
+	eligible := candidate.Session(&gorm.Session{}).Where("NOT " + brokenSQL)
+	if err := eligible.Count(&preview.SafeMatchedCount).Error; err != nil {
 		return nil, err
 	}
 	exportedSQL := apiRequestLogTurnExportedSQL()
@@ -164,11 +201,11 @@ func CreateAPIRequestLogExportBatch(db *gorm.DB, params APIRequestLogTurnQueryPa
 	if db == nil {
 		return nil, errors.New("request log database is not initialized")
 	}
-	tag, err := newAPIRequestLogExportTag(time.Now().UTC())
+	filter := apiRequestLogExportFilterFromQuery(params, includeInferred)
+	tag, err := newAPIRequestLogExportTag(time.Now().UTC(), filter)
 	if err != nil {
 		return nil, err
 	}
-	filter := apiRequestLogExportFilterFromQuery(params, includeInferred)
 	filterJSON, err := common.Marshal(filter)
 	if err != nil {
 		return nil, err
@@ -180,6 +217,7 @@ func CreateAPIRequestLogExportBatch(db *gorm.DB, params APIRequestLogTurnQueryPa
 		FilterJSON:      APIRequestLogBody(filterJSON),
 		Filter:          filter,
 		IncludeInferred: includeInferred,
+		IntegrityStatus: APIRequestLogExportIntegrityPending,
 	}
 	err = db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(batch).Error; err != nil {
@@ -362,7 +400,7 @@ func GetAPIRequestLogExportBatchTurnPage(db *gorm.DB, batchId int64, afterSequen
 	for _, member := range members {
 		detail := detailById[member.TurnRecordId]
 		if detail == nil {
-			return nil, fmt.Errorf("export member %d references missing turn %d", member.Id, member.TurnRecordId)
+			return nil, fmt.Errorf("%w: export member %d references missing turn %d", ErrAPIRequestLogExportDataBroken, member.Id, member.TurnRecordId)
 		}
 		page.Items = append(page.Items, APIRequestLogExportBatchTurn{Sequence: member.Sequence, Turn: detail})
 		page.NextSequence = member.Sequence
@@ -392,14 +430,19 @@ func ClaimAPIRequestLogExportBatch(db *gorm.DB, tag, owner string, leaseDuration
 	result := db.Model(&APIRequestLogExportBatch{}).
 		Where("tag = ? AND (status = ? OR (status = ? AND lease_expires_at <= ?))", tag, APIRequestLogExportBatchStatusPending, APIRequestLogExportBatchStatusBuilding, now).
 		Updates(map[string]interface{}{
-			"status":           APIRequestLogExportBatchStatusBuilding,
-			"build_owner":      owner,
-			"lease_expires_at": leaseExpiresAt,
-			"build_attempt":    gorm.Expr("build_attempt + ?", 1),
-			"artifact_path":    "",
-			"sha256":           "",
-			"error":            "",
-			"completed_at":     0,
+			"status":               APIRequestLogExportBatchStatusBuilding,
+			"build_owner":          owner,
+			"lease_expires_at":     leaseExpiresAt,
+			"build_attempt":        gorm.Expr("build_attempt + ?", 1),
+			"artifact_path":        "",
+			"sha256":               "",
+			"error":                "",
+			"processed_rows":       0,
+			"completed_at":         0,
+			"integrity_status":     APIRequestLogExportIntegrityPending,
+			"integrity_checked_at": 0,
+			"integrity_error":      "",
+			"cleaned_at":           0,
 		})
 	if result.Error != nil {
 		return nil, result.Error
@@ -473,6 +516,34 @@ func RenewAPIRequestLogExportBatchLease(db *gorm.DB, tag, owner string, leaseDur
 	return GetAPIRequestLogExportBatchByTag(db, tag)
 }
 
+// UpdateAPIRequestLogExportBatchProgress persists worker progress so viewers
+// can render a restart-safe progress indicator instead of inferring progress
+// from a lease or a transient in-memory counter.
+func UpdateAPIRequestLogExportBatchProgress(db *gorm.DB, tag, owner string, processedRows int64) (*APIRequestLogExportBatch, error) {
+	if db == nil {
+		return nil, errors.New("request log database is not initialized")
+	}
+	tag = strings.TrimSpace(tag)
+	owner = strings.TrimSpace(owner)
+	if tag == "" || owner == "" {
+		return nil, errors.New("export batch tag and build owner are required")
+	}
+	if processedRows < 0 {
+		return nil, errors.New("processed export row count cannot be negative")
+	}
+	now := time.Now().UTC().Unix()
+	result := db.Model(&APIRequestLogExportBatch{}).
+		Where("tag = ? AND status = ? AND build_owner = ? AND lease_expires_at > ?", tag, APIRequestLogExportBatchStatusBuilding, owner, now).
+		Update("processed_rows", processedRows)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, apiRequestLogExportTransitionError(db, tag, ErrAPIRequestLogExportBatchLeaseLost)
+	}
+	return GetAPIRequestLogExportBatchByTag(db, tag)
+}
+
 func MarkAPIRequestLogExportBatchCompleted(db *gorm.DB, tag, owner, artifactPath, sha256 string, rowCount int64) (*APIRequestLogExportBatch, error) {
 	batch, err := GetAPIRequestLogExportBatchByTag(db, tag)
 	if err != nil {
@@ -491,12 +562,17 @@ func MarkAPIRequestLogExportBatchCompleted(db *gorm.DB, tag, owner, artifactPath
 	result := db.Model(&APIRequestLogExportBatch{}).
 		Where("tag = ? AND status = ? AND build_owner = ? AND lease_expires_at > ?", strings.TrimSpace(tag), APIRequestLogExportBatchStatusBuilding, strings.TrimSpace(owner), now).
 		Updates(map[string]interface{}{
-			"status":           APIRequestLogExportBatchStatusCompleted,
-			"artifact_path":    artifactPath,
-			"sha256":           strings.ToLower(strings.TrimSpace(sha256)),
-			"error":            "",
-			"completed_at":     now,
-			"lease_expires_at": 0,
+			"status":               APIRequestLogExportBatchStatusCompleted,
+			"artifact_path":        artifactPath,
+			"sha256":               strings.ToLower(strings.TrimSpace(sha256)),
+			"error":                "",
+			"processed_rows":       rowCount,
+			"completed_at":         now,
+			"lease_expires_at":     0,
+			"integrity_status":     APIRequestLogExportIntegrityVerified,
+			"integrity_checked_at": now,
+			"integrity_error":      "",
+			"cleaned_at":           0,
 		})
 	if result.Error != nil {
 		return nil, result.Error
@@ -516,13 +592,19 @@ func MarkAPIRequestLogExportBatchFailed(db *gorm.DB, tag, owner string, buildErr
 		message = buildError.Error()
 	}
 	now := time.Now().UTC().Unix()
+	updates := map[string]interface{}{
+		"status":           APIRequestLogExportBatchStatusFailed,
+		"error":            message,
+		"lease_expires_at": 0,
+	}
+	if errors.Is(buildError, ErrAPIRequestLogExportDataBroken) {
+		updates["integrity_status"] = APIRequestLogExportIntegrityBroken
+		updates["integrity_checked_at"] = now
+		updates["integrity_error"] = message
+	}
 	result := db.Model(&APIRequestLogExportBatch{}).
 		Where("tag = ? AND status = ? AND build_owner = ? AND lease_expires_at > ?", strings.TrimSpace(tag), APIRequestLogExportBatchStatusBuilding, strings.TrimSpace(owner), now).
-		Updates(map[string]interface{}{
-			"status":           APIRequestLogExportBatchStatusFailed,
-			"error":            message,
-			"lease_expires_at": 0,
-		})
+		Updates(updates)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -543,13 +625,18 @@ func RetryAPIRequestLogExportBatchPending(db *gorm.DB, tag string) (*APIRequestL
 	result := db.Model(&APIRequestLogExportBatch{}).
 		Where("tag = ? AND status = ?", tag, APIRequestLogExportBatchStatusFailed).
 		Updates(map[string]interface{}{
-			"status":           APIRequestLogExportBatchStatusPending,
-			"artifact_path":    "",
-			"sha256":           "",
-			"error":            "",
-			"completed_at":     0,
-			"build_owner":      "",
-			"lease_expires_at": 0,
+			"status":               APIRequestLogExportBatchStatusPending,
+			"artifact_path":        "",
+			"sha256":               "",
+			"error":                "",
+			"processed_rows":       0,
+			"completed_at":         0,
+			"integrity_status":     APIRequestLogExportIntegrityPending,
+			"integrity_checked_at": 0,
+			"integrity_error":      "",
+			"cleaned_at":           0,
+			"build_owner":          "",
+			"lease_expires_at":     0,
 		})
 	if result.Error != nil {
 		return nil, result.Error
@@ -558,6 +645,240 @@ func RetryAPIRequestLogExportBatchPending(db *gorm.DB, tag string) (*APIRequestL
 		return nil, apiRequestLogExportTransitionError(db, tag, ErrAPIRequestLogExportBatchNotClaimable)
 	}
 	return GetAPIRequestLogExportBatchByTag(db, tag)
+}
+
+// AuditAPIRequestLogExportBatch re-reads a completed batch's immutable member
+// list and records whether every turn still has a complete exportable graph.
+// It is intentionally explicit for historical batches: no slow audit runs on
+// normal list requests.
+func AuditAPIRequestLogExportBatch(db *gorm.DB, tag string) (*APIRequestLogExportBatch, error) {
+	if db == nil {
+		return nil, errors.New("request log database is not initialized")
+	}
+	batch, err := GetAPIRequestLogExportBatchByTag(db, tag)
+	if err != nil {
+		return nil, err
+	}
+	if batch.Status != APIRequestLogExportBatchStatusCompleted {
+		return nil, errors.New("only completed export batches can be audited")
+	}
+	var sequence int64
+	var integrityErr error
+	for {
+		page, pageErr := GetAPIRequestLogExportBatchTurnPage(db, batch.Id, sequence, apiRequestLogExportClaimSize)
+		if pageErr != nil {
+			if errors.Is(pageErr, ErrAPIRequestLogExportDataBroken) {
+				integrityErr = pageErr
+				break
+			}
+			return nil, pageErr
+		}
+		for _, member := range page.Items {
+			if err := ValidateAPIRequestLogTurnForExport(member.Turn); err != nil {
+				integrityErr = fmt.Errorf("batch member %d: %w", member.Sequence, err)
+				break
+			}
+		}
+		if integrityErr != nil || !page.HasMore {
+			break
+		}
+		sequence = page.NextSequence
+	}
+	now := time.Now().UTC().Unix()
+	updates := map[string]interface{}{
+		"integrity_status":     APIRequestLogExportIntegrityVerified,
+		"integrity_checked_at": now,
+		"integrity_error":      "",
+	}
+	if integrityErr != nil {
+		updates["integrity_status"] = APIRequestLogExportIntegrityBroken
+		updates["integrity_error"] = truncateAPIRequestLogExportError(integrityErr.Error())
+	}
+	if err := db.Model(&APIRequestLogExportBatch{}).Where("id = ? AND status = ?", batch.Id, APIRequestLogExportBatchStatusCompleted).Updates(updates).Error; err != nil {
+		return nil, err
+	}
+	return GetAPIRequestLogExportBatchByTag(db, batch.Tag)
+}
+
+// MarkAPIRequestLogExportBatchCleaned records that downstream processing or a
+// cold backup has completed. Deleting an export is gated on this marker.
+func MarkAPIRequestLogExportBatchCleaned(db *gorm.DB, tag string) (*APIRequestLogExportBatch, error) {
+	if db == nil {
+		return nil, errors.New("request log database is not initialized")
+	}
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return nil, errors.New("export batch tag is required")
+	}
+	now := time.Now().UTC().Unix()
+	result := db.Model(&APIRequestLogExportBatch{}).
+		Where("tag = ? AND status = ? AND integrity_status = ?", tag, APIRequestLogExportBatchStatusCompleted, APIRequestLogExportIntegrityVerified).
+		Update("cleaned_at", now)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		batch, err := GetAPIRequestLogExportBatchByTag(db, tag)
+		if err != nil {
+			return nil, err
+		}
+		if batch.Status != APIRequestLogExportBatchStatusCompleted {
+			return nil, errors.New("only completed export batches can be marked cleaned")
+		}
+		return nil, errors.New("audit the export batch successfully before marking it cleaned")
+	}
+	return GetAPIRequestLogExportBatchByTag(db, tag)
+}
+
+// ResetAPIRequestLogExportBatch releases a completed batch's source turns for
+// a future export while retaining the JSONL artifact and its historical batch
+// metadata. Deleting the member branch is required in addition to clearing
+// exported_version because either marker makes a turn ineligible for export.
+func ResetAPIRequestLogExportBatch(db *gorm.DB, tag string) (*APIRequestLogExportBatch, error) {
+	if db == nil {
+		return nil, errors.New("request log database is not initialized")
+	}
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return nil, errors.New("export batch tag is required")
+	}
+
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		dialect := ""
+		if tx.Dialector != nil {
+			dialect = tx.Dialector.Name()
+		}
+
+		batchQuery := tx.Where("tag = ?", tag)
+		if dialect != "sqlite" {
+			batchQuery = batchQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		var batch APIRequestLogExportBatch
+		if err := batchQuery.First(&batch).Error; err != nil {
+			return err
+		}
+		if batch.Status != APIRequestLogExportBatchStatusCompleted {
+			return errors.New("only completed export batches can be reset")
+		}
+		if batch.ResetAt > 0 {
+			return ErrAPIRequestLogExportBatchAlreadyReset
+		}
+
+		var turnIds []int64
+		if err := tx.Model(&APIRequestLogExportMember{}).
+			Where("batch_id = ?", batch.Id).
+			Order("sequence ASC").
+			Pluck("turn_record_id", &turnIds).Error; err != nil {
+			return err
+		}
+		turnIds = uniquePositiveInt64s(turnIds)
+		if len(turnIds) > 0 {
+			turnQuery := tx.Model(&APIRequestLogTurn{}).Where("id IN ?", turnIds)
+			if dialect != "sqlite" {
+				turnQuery = turnQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			var lockedTurnIds []int64
+			if err := turnQuery.Pluck("id", &lockedTurnIds).Error; err != nil {
+				return err
+			}
+			if len(lockedTurnIds) != len(turnIds) {
+				return fmt.Errorf("%w: export batch contains missing turns", ErrAPIRequestLogExportDataBroken)
+			}
+			if err := tx.Model(&APIRequestLogTurn{}).
+				Where("id IN ?", turnIds).
+				Update("exported_version", 0).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("batch_id = ?", batch.Id).Delete(&APIRequestLogExportMember{}).Error; err != nil {
+			return err
+		}
+		now := time.Now().UTC().Unix()
+		result := tx.Model(&APIRequestLogExportBatch{}).
+			Where("id = ? AND reset_at = 0", batch.Id).
+			Updates(map[string]interface{}{"reset_at": now, "reset_rows": int64(len(turnIds))})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrAPIRequestLogExportBatchAlreadyReset
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return GetAPIRequestLogExportBatchByTag(db, tag)
+}
+
+// DeleteAPIRequestLogExportBatch removes a cleaned batch's metadata and member
+// branch. exported_version is deliberately retained on the original turns, so
+// deleting an artifact never causes an already-processed turn to be exported
+// again by accident.
+func DeleteAPIRequestLogExportBatch(db *gorm.DB, tag string) (*APIRequestLogExportBatch, error) {
+	if db == nil {
+		return nil, errors.New("request log database is not initialized")
+	}
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return nil, errors.New("export batch tag is required")
+	}
+	var deleted APIRequestLogExportBatch
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("tag = ?", tag).First(&deleted).Error; err != nil {
+			return err
+		}
+		if deleted.Status != APIRequestLogExportBatchStatusCompleted {
+			return errors.New("only completed export batches can be deleted")
+		}
+		if deleted.CleanedAt <= 0 {
+			return ErrAPIRequestLogExportBatchNotCleaned
+		}
+		if err := tx.Where("batch_id = ?", deleted.Id).Delete(&APIRequestLogExportMember{}).Error; err != nil {
+			return err
+		}
+		result := tx.Where("id = ?", deleted.Id).Delete(&APIRequestLogExportBatch{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := hydrateAPIRequestLogExportBatchFilter(&deleted); err != nil {
+		return nil, err
+	}
+	return &deleted, nil
+}
+
+// ValidateAPIRequestLogTurnForExport is the final integrity barrier before a
+// JSONL record is written. The SQL eligibility filter catches cheap database
+// inconsistencies; this catches source rows filtered during detail hydration.
+func ValidateAPIRequestLogTurnForExport(detail *APIRequestLogTurnDetail) error {
+	if detail == nil || detail.Id <= 0 {
+		return fmt.Errorf("%w: turn is missing", ErrAPIRequestLogExportDataBroken)
+	}
+	if detail.CompletionStatus != APIRequestLogTurnStatusCompleted || detail.StartedAt <= 0 || detail.CompletedAt < detail.StartedAt {
+		return fmt.Errorf("%w: turn %d has invalid completed timestamps or status", ErrAPIRequestLogExportDataBroken, detail.Id)
+	}
+	if detail.RequestCount <= 0 || detail.RequestCount != len(detail.Requests) {
+		return fmt.Errorf("%w: turn %d has %d stored requests but %d readable requests", ErrAPIRequestLogExportDataBroken, detail.Id, detail.RequestCount, len(detail.Requests))
+	}
+	if detail.ItemCount <= 0 || detail.ItemCount != len(detail.Items) {
+		return fmt.Errorf("%w: turn %d has %d stored items but %d readable items", ErrAPIRequestLogExportDataBroken, detail.Id, detail.ItemCount, len(detail.Items))
+	}
+	return nil
+}
+
+func truncateAPIRequestLogExportError(message string) string {
+	const maxLength = 1000
+	message = strings.TrimSpace(message)
+	if len(message) <= maxLength {
+		return message
+	}
+	return message[:maxLength]
 }
 
 func apiRequestLogExportLeaseWindow(leaseDuration time.Duration) (int64, int64, error) {
@@ -583,16 +904,39 @@ func apiRequestLogExportTransitionError(db *gorm.DB, tag string, transitionErr e
 	return transitionErr
 }
 
-func buildAPIRequestLogExportEligibleQuery(db *gorm.DB, params APIRequestLogTurnQueryParams, includeInferred bool) *gorm.DB {
+func buildAPIRequestLogExportCandidateQuery(db *gorm.DB, params APIRequestLogTurnQueryParams, includeInferred bool) *gorm.DB {
 	params.StartIdx = 0
 	params.Num = 0
 	tx := buildAPIRequestLogTurnsQuery(db, params).
-		Where("completion_status = ?", APIRequestLogTurnStatusCompleted).
-		Where("item_count > 0")
+		Where("completion_status = ?", APIRequestLogTurnStatusCompleted)
 	if includeInferred {
 		return tx.Where("attribution IN ?", []string{APIRequestLogTurnAttributionExact, APIRequestLogTurnAttributionInferred})
 	}
 	return tx.Where("attribution = ?", APIRequestLogTurnAttributionExact)
+}
+
+// buildAPIRequestLogExportEligibleQuery deliberately excludes records that are
+// marked completed but no longer have a consistent request/item graph. This
+// makes a completed export an integrity guarantee rather than just a status.
+func buildAPIRequestLogExportEligibleQuery(db *gorm.DB, params APIRequestLogTurnQueryParams, includeInferred bool) *gorm.DB {
+	return buildAPIRequestLogExportCandidateQuery(db, params, includeInferred).
+		Where("NOT " + apiRequestLogTurnBrokenSQL())
+}
+
+func apiRequestLogTurnBrokenSQL() string {
+	return "(" + apiRequestLogTurnBrokenTimeSQL() + " OR " + apiRequestLogTurnBrokenRequestSQL() + " OR " + apiRequestLogTurnBrokenItemSQL() + ")"
+}
+
+func apiRequestLogTurnBrokenTimeSQL() string {
+	return "(" + apiRequestLogTurnsTable + ".started_at <= 0 OR " + apiRequestLogTurnsTable + ".completed_at <= 0 OR " + apiRequestLogTurnsTable + ".completed_at < " + apiRequestLogTurnsTable + ".started_at)"
+}
+
+func apiRequestLogTurnBrokenRequestSQL() string {
+	return "(" + apiRequestLogTurnsTable + ".request_count <= 0 OR " + apiRequestLogTurnsTable + ".request_count <> (SELECT COUNT(*) FROM " + apiRequestLogTurnRequestsTable + " export_request WHERE export_request.turn_record_id = " + apiRequestLogTurnsTable + ".id))"
+}
+
+func apiRequestLogTurnBrokenItemSQL() string {
+	return "(" + apiRequestLogTurnsTable + ".item_count <= 0 OR " + apiRequestLogTurnsTable + ".item_count <> (SELECT COUNT(*) FROM " + apiRequestLogTurnItemsTable + " export_item_count WHERE export_item_count.turn_record_id = " + apiRequestLogTurnsTable + ".id) OR EXISTS (SELECT 1 FROM " + apiRequestLogTurnItemsTable + " export_item LEFT JOIN " + apiRequestLogItemsTable + " export_source_item ON export_source_item.id = export_item.source_item_id WHERE export_item.turn_record_id = " + apiRequestLogTurnsTable + ".id AND (export_source_item.id IS NULL OR LOWER(COALESCE(export_source_item.content_type, '')) LIKE '%encrypted%')))"
 }
 
 // lockAPIRequestLogExportTurnIds rechecks eligibility and freezes real turn
@@ -713,11 +1057,41 @@ func normalizeAPIRequestLogExportStatuses(statuses []string) []string {
 	return out
 }
 
-func newAPIRequestLogExportTag(now time.Time) (string, error) {
+func newAPIRequestLogExportTag(now time.Time, filter APIRequestLogExportFilter) (string, error) {
 	suffix := make([]byte, 3)
 	if _, err := rand.Read(suffix); err != nil {
 		return "", err
 	}
-	timestamp := now.UTC().Format("20060102T150405.000Z")
-	return "turn-export-" + timestamp + "-" + hex.EncodeToString(suffix), nil
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return "", err
+	}
+	beijingNow := now.In(location)
+	rangeTag := apiRequestLogExportBeijingRangeTag(filter, location)
+	if rangeTag == "" {
+		rangeTag = beijingNow.Format("20060102")
+	}
+	return "turn-export-" + rangeTag + "-" + beijingNow.Format("150405") + "-" + hex.EncodeToString(suffix), nil
+}
+
+func apiRequestLogExportBeijingRangeTag(filter APIRequestLogExportFilter, location *time.Location) string {
+	if location == nil {
+		return ""
+	}
+	if filter.StartTimestamp <= 0 && filter.EndTimestamp <= 0 {
+		return ""
+	}
+	if filter.StartTimestamp <= 0 {
+		return "until-" + time.Unix(filter.EndTimestamp, 0).In(location).Format("20060102")
+	}
+	start := time.Unix(filter.StartTimestamp, 0).In(location)
+	if filter.EndTimestamp <= 0 {
+		return "from-" + start.Format("20060102")
+	}
+	end := time.Unix(filter.EndTimestamp, 0).In(location)
+	endFormat := "0102"
+	if start.Year() != end.Year() {
+		endFormat = "20060102"
+	}
+	return start.Format("20060102") + "-" + end.Format(endFormat)
 }

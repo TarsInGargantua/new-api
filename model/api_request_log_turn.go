@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -58,7 +59,7 @@ type APIRequestLogTurnItemMeta struct {
 }
 
 type APIRequestLogTurn struct {
-	Id                     int64  `json:"id" gorm:"primaryKey;index:idx_api_request_log_turn_owner_session_order,priority:4"`
+	Id                     int64  `json:"id" gorm:"primaryKey;index:idx_api_request_log_turn_owner_session_order,priority:4;index:idx_api_request_log_turn_completed_order,priority:2"`
 	OwnerFingerprint       string `json:"-" gorm:"type:char(64);not null;uniqueIndex:idx_api_request_log_turn_identity,priority:1;index:idx_api_request_log_turn_owner_session,priority:1;index:idx_api_request_log_turn_owner_session_order,priority:1"`
 	SessionId              string `json:"session_id" gorm:"type:varchar(191);not null;uniqueIndex:idx_api_request_log_turn_identity,priority:2;index:idx_api_request_log_turn_session_index,priority:1;index:idx_api_request_log_turn_owner_session,priority:2;index:idx_api_request_log_turn_owner_session_order,priority:2"`
 	TurnId                 string `json:"turn_id" gorm:"type:varchar(191);not null;uniqueIndex:idx_api_request_log_turn_identity,priority:3"`
@@ -67,7 +68,7 @@ type APIRequestLogTurn struct {
 	WindowId               string `json:"window_id,omitempty" gorm:"type:varchar(191);index;default:''"`
 	RequestKind            string `json:"request_kind,omitempty" gorm:"type:varchar(64);index;default:''"`
 	StartedAt              int64  `json:"started_at" gorm:"bigint;index"`
-	CompletedAt            int64  `json:"completed_at" gorm:"bigint;index"`
+	CompletedAt            int64  `json:"completed_at" gorm:"bigint;index;index:idx_api_request_log_turn_completed_order,priority:1"`
 	CompletionStatus       string `json:"completion_status" gorm:"type:varchar(16);index;default:'unknown'"`
 	CompletionSignal       string `json:"completion_signal,omitempty" gorm:"type:varchar(128);index;default:''"`
 	Attribution            string `json:"attribution" gorm:"type:varchar(16);index;default:'unknown'"`
@@ -503,7 +504,11 @@ func GetAPIRequestLogTurns(db *gorm.DB, params APIRequestLogTurnQueryParams) (it
 		offset = 0
 	}
 	var turns []APIRequestLogTurn
-	if err = tx.Order("CASE WHEN completed_at > 0 THEN completed_at ELSE started_at END DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&turns).Error; err != nil {
+	// Keep the listing order index-backed. The previous CASE expression forced a
+	// filesort on every page, which made direct page jumps increasingly slow on
+	// a large remote log database. Open turns (completed_at = 0) naturally sort
+	// after completed turns and remain visible through the status filter.
+	if err = tx.Order("completed_at DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&turns).Error; err != nil {
 		return nil, 0, err
 	}
 	exported, err := apiRequestLogExportedTurnIds(db, apiRequestLogTurnIds(turns))
@@ -1461,17 +1466,19 @@ func getAPIRequestLogTurnDetailsByIds(db *gorm.DB, ids []int64) ([]*APIRequestLo
 		return nil, err
 	}
 	sourceIds := make([]int, 0, len(mappings))
+	seenSourceIds := make(map[int]bool, len(mappings))
 	for _, mapping := range mappings {
-		sourceIds = append(sourceIds, mapping.SourceItemId)
+		if mapping.SourceItemId > 0 && !seenSourceIds[mapping.SourceItemId] {
+			seenSourceIds[mapping.SourceItemId] = true
+			sourceIds = append(sourceIds, mapping.SourceItemId)
+		}
 	}
 	sourceById := map[int]APIRequestLogItem{}
 	if len(sourceIds) > 0 {
-		var sourceItems []APIRequestLogItem
-		if err := db.Where("id IN ?", sourceIds).Find(&sourceItems).Error; err != nil {
+		var err error
+		sourceById, err = loadAPIRequestLogTurnSourceItems(db, sourceIds)
+		if err != nil {
 			return nil, err
-		}
-		for _, sourceItem := range sourceItems {
-			sourceById[sourceItem.Id] = sourceItem
 		}
 	}
 	for _, mapping := range mappings {
@@ -1537,6 +1544,70 @@ func getAPIRequestLogTurnDetailsByIds(db *gorm.DB, ids []int64) ([]*APIRequestLo
 		}
 	}
 	return ordered, nil
+}
+
+// loadAPIRequestLogTurnSourceItems keeps IN lists small while reading a few
+// batches concurrently. High-density turns otherwise spend most export time
+// waiting on dozens of independent round trips. Concurrency is deliberately
+// capped at four and SQLite remains serial for compatibility with its single
+// writer/connection test and deployment modes.
+func loadAPIRequestLogTurnSourceItems(db *gorm.DB, sourceIds []int) (map[int]APIRequestLogItem, error) {
+	const sourceItemBatchSize = 500
+	const maxWorkers = 4
+	result := make(map[int]APIRequestLogItem, len(sourceIds))
+	if len(sourceIds) == 0 {
+		return result, nil
+	}
+	workerCount := (len(sourceIds) + sourceItemBatchSize - 1) / sourceItemBatchSize
+	if workerCount > maxWorkers {
+		workerCount = maxWorkers
+	}
+	if db != nil && db.Dialector != nil && db.Dialector.Name() == "sqlite" {
+		workerCount = 1
+	}
+	type sourceItemLoadResult struct {
+		items []APIRequestLogItem
+		err   error
+	}
+	jobs := make(chan []int)
+	results := make(chan sourceItemLoadResult, workerCount)
+	var workers sync.WaitGroup
+	for index := 0; index < workerCount; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for ids := range jobs {
+				var items []APIRequestLogItem
+				err := db.Session(&gorm.Session{NewDB: true}).Where("id IN ?", ids).Find(&items).Error
+				results <- sourceItemLoadResult{items: items, err: err}
+			}
+		}()
+	}
+	go func() {
+		for start := 0; start < len(sourceIds); start += sourceItemBatchSize {
+			end := start + sourceItemBatchSize
+			if end > len(sourceIds) {
+				end = len(sourceIds)
+			}
+			jobs <- sourceIds[start:end]
+		}
+		close(jobs)
+		workers.Wait()
+		close(results)
+	}()
+	var firstErr error
+	for loaded := range results {
+		if loaded.err != nil && firstErr == nil {
+			firstErr = loaded.err
+		}
+		for _, item := range loaded.items {
+			result[item.Id] = item
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return result, nil
 }
 
 func apiRequestLogTurnItemAllowed(item APIRequestLogItem) bool {
@@ -1780,7 +1851,17 @@ func apiRequestLogTurnIds(turns []APIRequestLogTurn) []int64 {
 
 func apiRequestLogExportedTurnIds(db *gorm.DB, ids []int64) (map[int64]bool, error) {
 	exported := make(map[int64]bool, len(ids))
-	if len(ids) == 0 || !db.Migrator().HasTable(&APIRequestLogExportMember{}) {
+	if len(ids) == 0 {
+		return exported, nil
+	}
+	var frozenIds []int64
+	if err := db.Model(&APIRequestLogTurn{}).Where("id IN ? AND exported_version > 0", ids).Pluck("id", &frozenIds).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range frozenIds {
+		exported[id] = true
+	}
+	if !db.Migrator().HasTable(&APIRequestLogExportMember{}) {
 		return exported, nil
 	}
 	var memberIds []int64

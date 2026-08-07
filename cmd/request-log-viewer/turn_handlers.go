@@ -125,9 +125,99 @@ func (s *requestLogViewerServer) serveExportBatchAction(w http.ResponseWriter, r
 		}
 		s.exports.Enqueue(batch.Tag)
 		writeJSON(w, http.StatusAccepted, apiResponse{Success: true, Data: batch})
+	case "audit":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		batch, err := model.AuditAPIRequestLogExportBatch(s.db, tag)
+		if err != nil {
+			writeExportActionError(w, err)
+			return
+		}
+		writeAPI(w, batch, nil)
+	case "mark-cleaned":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		batch, err := model.MarkAPIRequestLogExportBatchCleaned(s.db, tag)
+		if err != nil {
+			writeExportActionError(w, err)
+			return
+		}
+		writeAPI(w, batch, nil)
+	case "reset":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		batch, err := model.ResetAPIRequestLogExportBatch(s.db, tag)
+		if err != nil {
+			writeExportActionError(w, err)
+			return
+		}
+		writeAPI(w, batch, nil)
+	case "delete":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.serveExportBatchDelete(w, tag)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *requestLogViewerServer) serveExportBatchDelete(w http.ResponseWriter, tag string) {
+	batch, err := model.GetAPIRequestLogExportBatchByTag(s.db, tag)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		writeAPIError(w, http.StatusNotFound, "export batch not found")
+		return
+	}
+	if err != nil {
+		writeAPI(w, nil, err)
+		return
+	}
+	if batch.Status != model.APIRequestLogExportBatchStatusCompleted {
+		writeAPIError(w, http.StatusConflict, "only completed export batches can be deleted")
+		return
+	}
+	if batch.CleanedAt <= 0 {
+		writeAPIError(w, http.StatusConflict, model.ErrAPIRequestLogExportBatchNotCleaned.Error())
+		return
+	}
+	staged, err := s.exports.StageArtifactDeletion(batch)
+	if err != nil {
+		writeAPI(w, nil, err)
+		return
+	}
+	deleted, err := model.DeleteAPIRequestLogExportBatch(s.db, tag)
+	if err != nil {
+		_ = staged.Restore()
+		writeExportActionError(w, err)
+		return
+	}
+	if err := staged.Finalize(); err != nil {
+		// The database branch is already gone and the artifact is no longer
+		// reachable from the viewer. Keep this as a successful delete while
+		// surfacing the cleanup problem for an operator to remove the staged file.
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Message: "batch deleted; staged artifact cleanup failed: " + err.Error(), Data: deleted})
+		return
+	}
+	writeAPI(w, deleted, nil)
+}
+
+func writeExportActionError(w http.ResponseWriter, err error) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		writeAPIError(w, http.StatusNotFound, "export batch not found")
+		return
+	}
+	if errors.Is(err, model.ErrAPIRequestLogExportBatchNotCleaned) || errors.Is(err, model.ErrAPIRequestLogExportBatchNotClaimable) || errors.Is(err, model.ErrAPIRequestLogExportBatchAlreadyReset) {
+		writeAPIError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeAPI(w, nil, err)
 }
 
 func (s *requestLogViewerServer) serveExportDownload(w http.ResponseWriter, r *http.Request, tag string) {

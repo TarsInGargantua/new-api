@@ -423,6 +423,7 @@ const indexHTML = `<!doctype html>
     .pager-info { color:var(--muted); font-size:12px; white-space:nowrap; }
     .pager-controls { display:flex; align-items:center; gap:8px; }
     .pager button { padding:6px 9px; }
+    .page-jump { width:76px; padding:6px 8px; }
     .pager button:disabled {
       cursor:not-allowed;
       color:var(--faint);
@@ -661,6 +662,20 @@ const indexHTML = `<!doctype html>
     .toggle input { width:auto; accent-color:var(--accent); }
     .export-preview { color:var(--muted); font-size:13px; }
     .batch-list { display:grid; gap:8px; }
+    .history-exports {
+      border-top:1px solid var(--line);
+      margin-top:4px;
+      padding-top:8px;
+    }
+    .history-exports summary {
+      cursor:pointer;
+      color:var(--muted);
+      font-size:12px;
+      font-weight:700;
+      user-select:none;
+    }
+    .history-exports summary:hover { color:var(--accent); }
+    .history-export-list { display:grid; gap:8px; margin-top:8px; }
     .batch-row {
       display:grid;
       grid-template-columns:minmax(0,1fr) auto auto;
@@ -671,6 +686,9 @@ const indexHTML = `<!doctype html>
     }
     .batch-tag { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:12px/1.4 "IBM Plex Mono", monospace; }
     .batch-meta { color:var(--faint); font-size:11px; }
+    .batch-progress { display:grid; grid-template-columns:auto minmax(90px, 1fr); align-items:center; gap:8px; margin-top:7px; color:var(--muted); font-size:11px; }
+    .batch-progress-track { height:6px; overflow:hidden; border:1px solid var(--line-soft); border-radius:999px; background:var(--code); }
+    .batch-progress-fill { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg, var(--accent-dim), var(--accent)); transition:width .25s ease; }
     pre {
       margin:0;
       padding:12px;
@@ -816,6 +834,8 @@ const indexHTML = `<!doctype html>
         <div id="pageInfo" class="pager-info">Page 1</div>
         <div class="pager-controls">
           <button id="prevPage" type="button">Prev</button>
+          <input id="pageJump" class="page-jump" type="number" min="1" inputmode="numeric" aria-label="Jump to page" placeholder="Page">
+          <button id="jumpPage" type="button">Go</button>
           <button id="nextPage" type="button">Next</button>
         </div>
       </div>
@@ -840,6 +860,8 @@ const indexHTML = `<!doctype html>
     const pageInfoEl = document.getElementById('pageInfo')
     const prevPageEl = document.getElementById('prevPage')
     const nextPageEl = document.getElementById('nextPage')
+    const pageJumpEl = document.getElementById('pageJump')
+    const jumpPageEl = document.getElementById('jumpPage')
     const startTimeEl = document.getElementById('startTime')
     const endTimeEl = document.getElementById('endTime')
     const clearTimeEl = document.getElementById('clearTime')
@@ -1045,6 +1067,8 @@ const indexHTML = `<!doctype html>
       const start = state.total === 0 ? 0 : (state.page - 1) * state.pageSize + 1
       const end = Math.min(state.total, state.page * state.pageSize)
       pageInfoEl.textContent = 'Page ' + state.page + ' / ' + totalPages + ' · ' + start + '-' + end + ' of ' + state.total
+      pageJumpEl.max = String(totalPages)
+      if (document.activeElement !== pageJumpEl) pageJumpEl.value = String(state.page)
       prevPageEl.disabled = state.page <= 1
       nextPageEl.disabled = state.page >= totalPages
     }
@@ -1122,32 +1146,131 @@ const indexHTML = `<!doctype html>
       const p = qs(false)
       p.set('include_inferred', String(includeInferredEl.checked))
       const data = await api('/api/export-preview?' + p)
-      exportPreviewEl.textContent = String(data.available_count || 0) + ' unexported turns match the current filters.'
+      const fragments = [String(data.available_count || 0) + ' verified, unexported turns match the current filters.']
+      if (data.broken_count) {
+        const reasons = []
+        if (data.broken_time_count) reasons.push(String(data.broken_time_count) + ' invalid time/status')
+        if (data.broken_request_count) reasons.push(String(data.broken_request_count) + ' request mismatch')
+        if (data.broken_item_count) reasons.push(String(data.broken_item_count) + ' item mismatch')
+        fragments.push(String(data.broken_count) + ' potentially broken completed turns are excluded' + (reasons.length ? ' (' + reasons.join(', ') + ')' : '') + '.')
+      }
+      exportPreviewEl.textContent = fragments.join(' ')
+    }
+    const beijingTime = value => value ? new Date(value * 1000).toLocaleString('zh-CN', { timeZone:'Asia/Shanghai', hour12:false }) + ' 北京时间' : ''
+    function batchIntegrityLabel(batch) {
+      if (batch.integrity_status === 'verified') return 'verified'
+      if (batch.integrity_status === 'broken') return 'broken'
+      return 'unverified'
+    }
+    function batchProgress(batch) {
+      if (!['pending', 'building'].includes(batch.status)) return ''
+      const total = Math.max(0, Number(batch.row_count || 0))
+      const processed = Math.max(0, Math.min(total || Number.MAX_SAFE_INTEGER, Number(batch.processed_rows || 0)))
+      const percent = total > 0 ? Math.min(100, Math.round(processed * 100 / total)) : 0
+      const label = batch.status === 'pending'
+        ? 'Queued · ' + String(total) + ' turns'
+        : 'Exporting ' + String(processed) + ' / ' + String(total) + ' turns · ' + String(percent) + '%'
+      return '<div class="batch-progress"><span>' + esc(label) + '</span><div class="batch-progress-track" aria-label="' + esc(label) + '"><i class="batch-progress-fill" style="width:' + String(percent) + '%"></i></div></div>'
     }
     function batchActions(batch) {
+      const actions = []
       if (batch.status === 'completed') {
-        return '<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>'
+        actions.push('<a href="/api/export-batches/' + encodeURIComponent(batch.tag) + '/download"><button type="button">Download</button></a>')
+        if (!batch.reset_at) actions.push('<button type="button" data-reset="' + esc(batch.tag) + '">Reset export state</button>')
+        if (batch.integrity_status === 'verified') {
+          if (batch.cleaned_at) actions.push('<button type="button" data-delete="' + esc(batch.tag) + '">Delete</button>')
+          else actions.push('<button type="button" data-clean="' + esc(batch.tag) + '">Mark cleaned</button>')
+        } else if (!batch.reset_at) {
+          actions.push('<button type="button" data-audit="' + esc(batch.tag) + '">Audit</button>')
+        }
       }
       if (batch.status === 'failed') {
-        return '<button type="button" data-retry="' + esc(batch.tag) + '">Retry</button>'
+        actions.push('<button type="button" data-retry="' + esc(batch.tag) + '">Retry</button>')
       }
-      return ''
+      return actions.join('')
     }
-    async function loadBatches() {
-      const data = await api('/api/export-batches?p=1&page_size=50')
-      const batches = data.items || []
-      batchListEl.innerHTML = batches.map(batch => [
+    function renderBatchRow(batch) {
+      return [
         '<div class="batch-row">',
-        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns' + (batch.error ? ' · ' + esc(batch.error) : '') + '</div></div>',
+        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · reset ' + esc(beijingTime(batch.reset_at)) + ' (' + esc(batch.reset_rows || 0) + ' released)' : '') + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(batch.integrity_error) : '') + (batch.error ? ' · ' + esc(batch.error) : '') + '</div>' + batchProgress(batch) + '</div>',
         '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batch.status || 'pending') + '</span>',
         '<div>' + batchActions(batch) + '</div>',
         '</div>'
-      ].join('')).join('') || '<div class="empty">No export batches.</div>'
+      ].join('')
+    }
+    async function loadBatches() {
+      const data = await api('/api/export-batches?p=1&page_size=1000')
+      const batches = data.items || []
+      const activeBatches = batches.filter(batch => batch.status !== 'completed')
+      const historicalBatches = batches.filter(batch => batch.status === 'completed')
+      const activeHTML = activeBatches.length
+        ? activeBatches.map(renderBatchRow).join('')
+        : '<div class="batch-meta">No active or failed export batches.</div>'
+      const historyHTML = historicalBatches.length
+        ? '<details class="history-exports"><summary>Historical exports (' + esc(historicalBatches.length) + ')</summary><div class="history-export-list">' + historicalBatches.map(renderBatchRow).join('') + '</div></details>'
+        : ''
+      batchListEl.innerHTML = activeHTML + historyHTML
       batchListEl.querySelectorAll('[data-retry]').forEach(button => {
         button.onclick = async () => {
           button.disabled = true
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.retry) + '/retry', { method:'POST' })
+            await loadBatches()
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-audit]').forEach(button => {
+        button.onclick = async () => {
+          button.disabled = true
+          try {
+            const batch = await api('/api/export-batches/' + encodeURIComponent(button.dataset.audit) + '/audit', { method:'POST' })
+            exportPreviewEl.textContent = batch.integrity_status === 'verified' ? 'Audit passed.' : 'Audit found broken data: ' + (batch.integrity_error || 'see batch details')
+            await loadBatches()
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-clean]').forEach(button => {
+        button.onclick = async () => {
+          if (!window.confirm('Confirm that downstream processing or cold backup is complete. This enables deletion of this export batch.')) return
+          button.disabled = true
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.clean) + '/mark-cleaned', { method:'POST' })
+            await loadBatches()
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-reset]').forEach(button => {
+        button.onclick = async () => {
+          if (!window.confirm('Reset this historical batch to not exported? The JSONL and history entry stay, but its source turns become eligible for a future export.')) return
+          button.disabled = true
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.reset) + '/reset', { method:'POST' })
+            await Promise.all([loadBatches(), loadRows(), loadExportPreview()])
+          } catch (err) {
+            exportPreviewEl.textContent = err.message
+          } finally {
+            button.disabled = false
+          }
+        }
+      })
+      batchListEl.querySelectorAll('[data-delete]').forEach(button => {
+        button.onclick = async () => {
+          if (!window.confirm('Delete this cleaned export JSONL and its batch branch? Original turns remain marked exported and will not be exported again.')) return
+          button.disabled = true
+          try {
+            await api('/api/export-batches/' + encodeURIComponent(button.dataset.delete) + '/delete', { method:'POST' })
             await loadBatches()
           } catch (err) {
             exportPreviewEl.textContent = err.message
@@ -1195,6 +1318,20 @@ const indexHTML = `<!doctype html>
       if (state.page >= totalPages) return
       state.page++
       loadRows()
+    }
+    function jumpToPage() {
+      const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize))
+      const requested = Number.parseInt(pageJumpEl.value, 10)
+      if (!Number.isInteger(requested) || requested < 1) {
+        pageJumpEl.value = String(state.page)
+        return
+      }
+      state.page = Math.min(requested, totalPages)
+      loadRows()
+    }
+    jumpPageEl.onclick = jumpToPage
+    pageJumpEl.onkeydown = event => {
+      if (event.key === 'Enter') jumpToPage()
     }
     function applyTimeFilter() {
       state.time.start = startTimeEl.value
