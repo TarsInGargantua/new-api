@@ -23,6 +23,7 @@ import (
 func setupAPIRequestLogTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	resetAPIRequestLogItemQueueForTest()
+	resetAPIRequestLogOutboxWorkersForTest()
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "test.db")), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&APIRequestLog{}, &APIRequestLogItem{}, &Log{}, &Ability{}, &Channel{}, &Model{}, &User{}, &QuotaData{}))
@@ -39,6 +40,7 @@ func setupAPIRequestLogTestDB(t *testing.T) *gorm.DB {
 	commonGroupCol = "`group`"
 	t.Cleanup(func() {
 		resetAPIRequestLogItemQueueForTest()
+		resetAPIRequestLogOutboxWorkersForTest()
 		DB = oldDB
 		LOG_DB = oldLogDB
 		REQUEST_LOG_DB = oldRequestLogDB
@@ -70,6 +72,108 @@ func TestRequestLogConnectionPoolConfigUsesDedicatedSafeDefaults(t *testing.T) {
 	require.Equal(t, requestLogDefaultMaxIdle, config.MaxIdleConns)
 	require.Equal(t, requestLogDefaultMaxOpen, config.MaxOpenConns)
 	require.Equal(t, time.Duration(requestLogDefaultLifetime)*time.Second, config.MaxLifetime)
+}
+
+func TestRequestLogOutboxPersistsLocallyThenSynchronizesToDedicatedDatabase(t *testing.T) {
+	localDB := setupAPIRequestLogTestDB(t)
+	remoteDB, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "request-log-remote.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, remoteDB.AutoMigrate(&APIRequestLog{}, &APIRequestLogItem{}))
+	require.NoError(t, EnsureAPIRequestLogMaterializedTables(remoteDB))
+
+	oldEnabled := common.APIRequestLogEnabled
+	oldOutboxEnabled := common.APIRequestLogOutboxEnabled
+	oldDeferred := common.APIRequestLogDeferredMaterialization
+	oldRequestLogDB := REQUEST_LOG_DB
+	common.APIRequestLogEnabled = true
+	common.APIRequestLogOutboxEnabled = true
+	common.APIRequestLogDeferredMaterialization = false
+	REQUEST_LOG_DB = remoteDB
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.APIRequestLogOutboxEnabled = oldOutboxEnabled
+		common.APIRequestLogDeferredMaterialization = oldDeferred
+		REQUEST_LOG_DB = oldRequestLogDB
+	})
+
+	log := &APIRequestLog{
+		Source:     APIRequestLogSourceLive,
+		UsageLogId: 931,
+		RequestId:  "request-outbox-931",
+		CreatedAt:  1780000000,
+		ModelName:  "gpt-outbox",
+		Items: []APIRequestLogItem{{
+			Seq:      1,
+			Phase:    APIRequestLogPhaseInput,
+			ItemType: APIRequestLogItemMessage,
+			Content:  "hello from durable outbox",
+		}},
+	}
+	require.NoError(t, CreateAPIRequestLog(log))
+
+	var queued int64
+	require.NoError(t, localDB.Model(&APIRequestLogOutbox{}).Count(&queued).Error)
+	require.EqualValues(t, 1, queued)
+	var remoteCount int64
+	require.NoError(t, remoteDB.Model(&APIRequestLog{}).Count(&remoteCount).Error)
+	require.Zero(t, remoteCount, "HTTP path must not write the remote request-log database")
+
+	require.NoError(t, syncAPIRequestLogOutboxBatch())
+	require.NoError(t, localDB.Model(&APIRequestLogOutbox{}).Count(&queued).Error)
+	require.Zero(t, queued)
+
+	var persisted APIRequestLog
+	require.NoError(t, remoteDB.Preload("Items").Where("usage_log_id = ?", 931).First(&persisted).Error)
+	require.Equal(t, "request-outbox-931", persisted.RequestId)
+	require.Len(t, persisted.Items, 1)
+	require.Equal(t, "hello from durable outbox", string(persisted.Items[0].Content))
+}
+
+func TestRequestLogOutboxKeepsFailedRemoteWriteForRetry(t *testing.T) {
+	localDB := setupAPIRequestLogTestDB(t)
+	remoteDB, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "request-log-remote-retry.db")), &gorm.Config{})
+	require.NoError(t, err)
+	// Deliberately omit the materialized tables. A log with items will fail
+	// after the parent/items are written, which exercises the retry path.
+	require.NoError(t, remoteDB.AutoMigrate(&APIRequestLog{}, &APIRequestLogItem{}))
+
+	oldEnabled := common.APIRequestLogEnabled
+	oldOutboxEnabled := common.APIRequestLogOutboxEnabled
+	oldDeferred := common.APIRequestLogDeferredMaterialization
+	oldRequestLogDB := REQUEST_LOG_DB
+	common.APIRequestLogEnabled = true
+	common.APIRequestLogOutboxEnabled = true
+	common.APIRequestLogDeferredMaterialization = false
+	REQUEST_LOG_DB = remoteDB
+	t.Cleanup(func() {
+		common.APIRequestLogEnabled = oldEnabled
+		common.APIRequestLogOutboxEnabled = oldOutboxEnabled
+		common.APIRequestLogDeferredMaterialization = oldDeferred
+		REQUEST_LOG_DB = oldRequestLogDB
+	})
+
+	require.NoError(t, CreateAPIRequestLog(&APIRequestLog{
+		Source:     APIRequestLogSourceLive,
+		UsageLogId: 932,
+		RequestId:  "request-outbox-retry-932",
+		CreatedAt:  1780000001,
+		Items:      []APIRequestLogItem{{Seq: 1, ItemType: APIRequestLogItemMessage, Content: "retry me"}},
+	}))
+	err = syncAPIRequestLogOutboxBatch()
+	require.Error(t, err)
+
+	var failed APIRequestLogOutbox
+	require.NoError(t, localDB.First(&failed).Error)
+	require.NotEmpty(t, failed.LastError)
+	require.GreaterOrEqual(t, failed.Attempts, 1)
+
+	require.NoError(t, EnsureAPIRequestLogMaterializedTables(remoteDB))
+	require.NoError(t, localDB.Model(&APIRequestLogOutbox{}).Where("id = ?", failed.Id).Update("available_at", common.GetTimestamp()).Error)
+	require.NoError(t, syncAPIRequestLogOutboxBatch())
+
+	var remaining int64
+	require.NoError(t, localDB.Model(&APIRequestLogOutbox{}).Count(&remaining).Error)
+	require.Zero(t, remaining)
 }
 
 func TestRequestLogConnectionPoolConfigClampsInvalidValues(t *testing.T) {

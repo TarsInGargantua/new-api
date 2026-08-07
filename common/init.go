@@ -93,6 +93,23 @@ func InitEnv() {
 	APIRequestLogCaptureResponse = GetEnvOrDefaultBool("API_REQUEST_LOG_CAPTURE_RESPONSE", true)
 	APIRequestLogAsyncWrite = APIRequestLogAsyncWriteEnabledFromEnv()
 	APIRequestLogDeferredMaterialization = GetEnvOrDefaultBool("API_REQUEST_LOG_DEFERRED_MATERIALIZATION", false)
+	APIRequestLogOutboxEnabled = GetEnvOrDefaultBool("API_REQUEST_LOG_OUTBOX_ENABLED", false)
+	APIRequestLogOutboxWorkers = GetEnvOrDefault("API_REQUEST_LOG_OUTBOX_WORKERS", 1)
+	if APIRequestLogOutboxWorkers < 1 {
+		APIRequestLogOutboxWorkers = 1
+	}
+	APIRequestLogOutboxBatchSize = GetEnvOrDefault("API_REQUEST_LOG_OUTBOX_BATCH_SIZE", 8)
+	if APIRequestLogOutboxBatchSize < 1 {
+		APIRequestLogOutboxBatchSize = 1
+	}
+	APIRequestLogOutboxPollIntervalMS = GetEnvOrDefault("API_REQUEST_LOG_OUTBOX_POLL_INTERVAL_MS", 200)
+	if APIRequestLogOutboxPollIntervalMS < 10 {
+		APIRequestLogOutboxPollIntervalMS = 10
+	}
+	APIRequestLogOutboxLeaseSeconds = GetEnvOrDefault("API_REQUEST_LOG_OUTBOX_LEASE_SECONDS", 900)
+	if APIRequestLogOutboxLeaseSeconds < 30 {
+		APIRequestLogOutboxLeaseSeconds = 30
+	}
 	APIRequestLogQueueSize = GetEnvOrDefault("API_REQUEST_LOG_QUEUE_SIZE", 128)
 	if APIRequestLogQueueSize < 1 {
 		APIRequestLogQueueSize = 1
@@ -135,6 +152,10 @@ func InitEnv() {
 	SyncFrequency = GetEnvOrDefault("SYNC_FREQUENCY", 60)
 	BatchUpdateInterval = GetEnvOrDefault("BATCH_UPDATE_INTERVAL", 5)
 	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0)
+	RelayResponseHeaderTimeout = GetEnvOrDefault("RELAY_RESPONSE_HEADER_TIMEOUT", 0)
+	if RelayResponseHeaderTimeout < 0 {
+		RelayResponseHeaderTimeout = 0
+	}
 	RelayMaxIdleConns = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS", 500)
 	RelayMaxIdleConnsPerHost = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS_PER_HOST", 100)
 
