@@ -231,6 +231,35 @@ func TestMaterializeAPIRequestLogTurnReordersOutOfOrderRequestsAndStableIdConfli
 	require.Equal(t, []string{"early regular", "early provider", "early call", "late regular"}, contents)
 }
 
+func TestMaterializeAPIRequestLogTurnIndexesFollowChronologicalOrder(t *testing.T) {
+	db := setupAPIRequestLogTurnTestDB(t)
+	makeTurn := func(createdAt int64, turnID string) (*APIRequestLog, []APIRequestLogItem) {
+		return createAPIRequestLogTurnTestRequest(t, db, APIRequestLog{
+			UserId: 1, TokenId: 2, ModelName: "gpt-turn", CreatedAt: createdAt,
+		}, []APIRequestLogItem{{Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: APIRequestLogBody(turnID)}})
+	}
+	laterLog, laterItems := makeTurn(200, "later")
+	later, err := MaterializeAPIRequestLogTurn(db, laterLog, APIRequestLogTurnMeta{
+		SessionId: "session-index", TurnId: "turn-later", Protocol: "codex", StartedAt: 200,
+		CompletionStatus: APIRequestLogTurnStatusCompleted, Attribution: APIRequestLogTurnAttributionExact,
+	}, laterItems)
+	require.NoError(t, err)
+	require.Equal(t, 1, later.TurnIndex)
+	earlierLog, earlierItems := makeTurn(100, "earlier")
+	earlier, err := MaterializeAPIRequestLogTurn(db, earlierLog, APIRequestLogTurnMeta{
+		SessionId: "session-index", TurnId: "turn-earlier", Protocol: "codex", StartedAt: 100,
+		CompletionStatus: APIRequestLogTurnStatusCompleted, Attribution: APIRequestLogTurnAttributionExact,
+	}, earlierItems)
+	require.NoError(t, err)
+	require.Equal(t, 1, earlier.TurnIndex)
+	var persistedLater APIRequestLogTurn
+	require.NoError(t, db.First(&persistedLater, later.Id).Error)
+	require.Equal(t, 2, persistedLater.TurnIndex)
+	var state APIRequestLogTurnSessionState
+	require.NoError(t, db.Where("owner_fingerprint = ? AND session_id = ?", earlier.OwnerFingerprint, "session-index").First(&state).Error)
+	require.Equal(t, 3, state.NextTurnIndex)
+}
+
 func TestMaterializeAPIRequestLogTurnPreservesOrdinaryOccurrencesAndDeduplicatesTurnContext(t *testing.T) {
 	db := setupAPIRequestLogTurnTestDB(t)
 	log, items := createAPIRequestLogTurnTestRequest(t, db, APIRequestLog{
@@ -352,10 +381,10 @@ func TestMaterializeAPIRequestLogTurnFreezesClaimedTurnsAndSessionIndexes(t *tes
 		CompletionStatus: APIRequestLogTurnStatusCompleted, Attribution: APIRequestLogTurnAttributionExact,
 	}, earlierItems)
 	require.NoError(t, err)
-	require.Equal(t, 2, earlierTurn.TurnIndex, "an exported session must retain its existing turn indexes")
+	require.Equal(t, 1, earlierTurn.TurnIndex, "turn indexes must follow chronological order")
 	var persistedFrozen APIRequestLogTurn
 	require.NoError(t, db.First(&persistedFrozen, turn.Id).Error)
-	require.Equal(t, 1, persistedFrozen.TurnIndex)
+	require.Equal(t, 2, persistedFrozen.TurnIndex)
 	var sessionState APIRequestLogTurnSessionState
 	require.NoError(t, db.Where("owner_fingerprint = ? AND session_id = ?", persistedFrozen.OwnerFingerprint, persistedFrozen.SessionId).First(&sessionState).Error)
 	require.Equal(t, 3, sessionState.NextTurnIndex)

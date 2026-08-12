@@ -137,6 +137,8 @@ var APIRequestLogWorkers = 2
 var APIRequestLogMaxBodyBytes = 4 * 1024 * 1024
 var APIRequestLogMaxItemBytes = 1024 * 1024
 var APIRequestLogMaxQueueBytes = 64 * 1024 * 1024
+var APIRequestLogItemBatchSize = 200
+var APIRequestLogItemBatchBytes = 8 * 1024 * 1024
 
 var TLSInsecureSkipVerify bool
 var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,12 +18,12 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 )
 
 const (
 	APIRequestLogSchemaVersion = 1
-	apiRequestLogItemBatchSize = 20
 	apiRequestLogItemMaxRetry  = 3
 	requestLogDefaultMaxIdle   = 8
 	requestLogDefaultMaxOpen   = 32
@@ -211,6 +212,8 @@ type APIRequestLogStorageStatus struct {
 	QueueDroppedItems       int64                                   `json:"queue_dropped_items"`
 	QueueDroppedItemBytes   int64                                   `json:"queue_dropped_item_bytes"`
 	DeferredMaterialization bool                                    `json:"deferred_materialization"`
+	ItemBatchSize           int                                     `json:"item_batch_size"`
+	ItemBatchBytes          int                                     `json:"item_batch_bytes"`
 	MaterializationQueue    APIRequestLogMaterializationQueueStatus `json:"materialization_queue"`
 	Outbox                  APIRequestLogOutboxStatus               `json:"outbox"`
 }
@@ -544,10 +547,24 @@ func missingAPIRequestLogItems(db *gorm.DB, logId int, expected []APIRequestLogI
 		expectedCounts[item.Seq]++
 	}
 	storedCounts := make(map[int]int, len(storedSeqs))
+	hasSurplus := false
 	for _, seq := range storedSeqs {
 		storedCounts[seq]++
 		if storedCounts[seq] > expectedCounts[seq] {
-			return nil, false, fmt.Errorf("request log items for log %d contain unexpected seq %d", logId, seq)
+			hasSurplus = true
+		}
+	}
+	if hasSurplus {
+		if err := removeSurplusAPIRequestLogItems(db, logId, expected); err != nil {
+			return nil, false, err
+		}
+		storedSeqs = nil
+		if err := db.Model(&APIRequestLogItem{}).Where("log_id = ?", logId).Pluck("seq", &storedSeqs).Error; err != nil {
+			return nil, false, err
+		}
+		storedCounts = make(map[int]int, len(storedSeqs))
+		for _, seq := range storedSeqs {
+			storedCounts[seq]++
 		}
 	}
 	complete := len(storedSeqs) == len(expected)
@@ -569,11 +586,143 @@ func missingAPIRequestLogItems(db *gorm.DB, logId int, expected []APIRequestLogI
 	return missing, complete, nil
 }
 
+type apiRequestLogItemIdentity struct {
+	Seq         int
+	Phase       string
+	ItemType    string
+	Role        string
+	ContentType string
+	Content     APIRequestLogBody
+	ToolCallId  string
+	Name        string
+	Source      string
+	Redacted    bool
+	Truncated   bool
+}
+
+func apiRequestLogItemIdentityOf(item APIRequestLogItem) apiRequestLogItemIdentity {
+	return apiRequestLogItemIdentity{
+		Seq:         item.Seq,
+		Phase:       item.Phase,
+		ItemType:    item.ItemType,
+		Role:        item.Role,
+		ContentType: item.ContentType,
+		Content:     item.Content,
+		ToolCallId:  item.ToolCallId,
+		Name:        item.Name,
+		Source:      item.Source,
+		Redacted:    item.Redacted,
+		Truncated:   item.Truncated,
+	}
+}
+
+func removeSurplusAPIRequestLogItems(db *gorm.DB, logId int, expected []APIRequestLogItem) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var stored []APIRequestLogItem
+		query := tx.Where("log_id = ?", logId).Order("id ASC")
+		if tx.Dialector != nil && tx.Dialector.Name() != "sqlite" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := query.Find(&stored).Error; err != nil {
+			return err
+		}
+		referencedIds := make(map[int]bool)
+		if tx.Migrator().HasTable(&APIRequestLogTurnItem{}) {
+			storedIds := make([]int, 0, len(stored))
+			for _, item := range stored {
+				storedIds = append(storedIds, item.Id)
+			}
+			if len(storedIds) > 0 {
+				var referenced []APIRequestLogTurnItem
+				if err := tx.Select("source_item_id").Where("source_item_id IN ?", storedIds).Find(&referenced).Error; err != nil {
+					return err
+				}
+				for _, mapping := range referenced {
+					referencedIds[mapping.SourceItemId] = true
+				}
+			}
+		}
+		required := make(map[apiRequestLogItemIdentity]int, len(expected))
+		for _, item := range expected {
+			required[apiRequestLogItemIdentityOf(item)]++
+		}
+		surplusIds := make([]int, 0)
+		// Prefer rows already referenced by a materialized turn. If a partial
+		// retry created identical duplicates, this keeps the live foreign key
+		// mapping and deletes the unreferenced copy instead of quarantining the
+		// whole outbox job.
+		ordered := append([]APIRequestLogItem(nil), stored...)
+		sort.SliceStable(ordered, func(i, j int) bool {
+			iReferenced := referencedIds[ordered[i].Id]
+			jReferenced := referencedIds[ordered[j].Id]
+			if iReferenced != jReferenced {
+				return iReferenced
+			}
+			return ordered[i].Id < ordered[j].Id
+		})
+		for _, item := range ordered {
+			identity := apiRequestLogItemIdentityOf(item)
+			if required[identity] > 0 {
+				required[identity]--
+				continue
+			}
+			surplusIds = append(surplusIds, item.Id)
+		}
+		if len(surplusIds) == 0 {
+			return fmt.Errorf("request log items for log %d do not match the queued payload", logId)
+		}
+		if len(referencedIds) > 0 {
+			for _, id := range surplusIds {
+				if referencedIds[id] {
+					return fmt.Errorf("request log items for log %d contain referenced surplus row %d", logId, id)
+				}
+			}
+		}
+		return tx.Where("id IN ?", surplusIds).Delete(&APIRequestLogItem{}).Error
+	})
+}
+
 func createAPIRequestLogItems(db *gorm.DB, items []APIRequestLogItem) error {
 	if db == nil || len(items) == 0 {
 		return nil
 	}
-	return db.Session(&gorm.Session{SkipDefaultTransaction: true}).CreateInBatches(items, apiRequestLogItemBatchSize).Error
+	for _, batch := range splitAPIRequestLogItemBatches(items, common.APIRequestLogItemBatchSize, int64(common.APIRequestLogItemBatchBytes)) {
+		if err := db.Session(&gorm.Session{SkipDefaultTransaction: true}).CreateInBatches(batch, len(batch)).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func splitAPIRequestLogItemBatches(items []APIRequestLogItem, maxItems int, maxBytes int64) [][]APIRequestLogItem {
+	if len(items) == 0 {
+		return nil
+	}
+	if maxItems < 1 {
+		maxItems = 1
+	}
+	if maxBytes < 1 {
+		maxBytes = 1
+	}
+	batches := make([][]APIRequestLogItem, 0, (len(items)+maxItems-1)/maxItems)
+	batchStart := 0
+	var batchBytes int64
+	for itemIndex := range items {
+		itemBytes := apiRequestLogItemByteSize(items[itemIndex])
+		if itemIndex > batchStart && (itemIndex-batchStart >= maxItems || batchBytes+itemBytes > maxBytes) {
+			batches = append(batches, items[batchStart:itemIndex])
+			batchStart = itemIndex
+			batchBytes = 0
+		}
+		batchBytes += itemBytes
+	}
+	batches = append(batches, items[batchStart:])
+	return batches
+}
+
+func apiRequestLogItemByteSize(item APIRequestLogItem) int64 {
+	return int64(len(item.Content)) + int64(len(item.Phase)+len(item.ItemType)+len(item.Role)+len(item.ContentType)) +
+		int64(len(item.ToolCallId)+len(item.Name)+len(item.Source))
 }
 
 func enqueueAPIRequestLogItems(db *gorm.DB, log *APIRequestLog, items []APIRequestLogItem) error {
@@ -755,9 +904,7 @@ func materializeAPIRequestLogTurnWriteFailure(db *gorm.DB, log *APIRequestLog) e
 func apiRequestLogItemsByteSize(items []APIRequestLogItem) int64 {
 	var size int64
 	for _, item := range items {
-		size += int64(len(item.Content))
-		size += int64(len(item.Phase) + len(item.ItemType) + len(item.Role) + len(item.ContentType))
-		size += int64(len(item.ToolCallId) + len(item.Name) + len(item.Source))
+		size += apiRequestLogItemByteSize(item)
 	}
 	return size
 }
@@ -1162,6 +1309,8 @@ func GetAPIRequestLogStorageStatus() (*APIRequestLogStorageStatus, error) {
 	status := &APIRequestLogStorageStatus{
 		AsyncWrite:              common.APIRequestLogAsyncWrite,
 		DeferredMaterialization: common.APIRequestLogDeferredMaterialization,
+		ItemBatchSize:           common.APIRequestLogItemBatchSize,
+		ItemBatchBytes:          common.APIRequestLogItemBatchBytes,
 		QueuedItemBytes:         atomic.LoadInt64(&apiRequestLogQueuedItemBytes),
 		MaxQueueBytes:           int64(common.APIRequestLogMaxQueueBytes),
 		QueueDroppedJobs:        atomic.LoadInt64(&apiRequestLogQueueDroppedJobs),

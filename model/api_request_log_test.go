@@ -637,11 +637,81 @@ func TestCreateAPIRequestLogItemsIfMissingRecomputesAfterPartialBatchFailure(t *
 			require.NoError(t, db.Create(&items[0]).Error)
 			return errors.New("simulated deadlock after partial batch")
 		}
-		return db.CreateInBatches(items, apiRequestLogItemBatchSize).Error
+		return db.CreateInBatches(items, len(items)).Error
 	}
 
 	require.NoError(t, createAPIRequestLogItemsIfMissingWithWriter(REQUEST_LOG_DB, parent.Id, expected, writer))
 	require.Equal(t, [][]int{{1, 2}, {2}}, calls)
+}
+
+func TestSplitAPIRequestLogItemBatchesHonorsItemAndByteLimits(t *testing.T) {
+	items := []APIRequestLogItem{
+		{Seq: 1, Content: APIRequestLogBody("12345")},
+		{Seq: 2, Content: APIRequestLogBody("12345")},
+		{Seq: 3, Content: APIRequestLogBody("12345")},
+		{Seq: 4, Content: APIRequestLogBody("12345")},
+		{Seq: 5, Content: APIRequestLogBody("12345")},
+	}
+
+	byCount := splitAPIRequestLogItemBatches(items, 2, 1024)
+	require.Len(t, byCount, 3)
+	require.Len(t, byCount[0], 2)
+	require.Len(t, byCount[1], 2)
+	require.Len(t, byCount[2], 1)
+
+	byBytes := splitAPIRequestLogItemBatches(items, 100, 9)
+	require.Len(t, byBytes, 5)
+	for _, batch := range byBytes {
+		require.Len(t, batch, 1)
+	}
+}
+
+func TestCreateAPIRequestLogItemsIfMissingRemovesUnreferencedDuplicates(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+	require.NoError(t, EnsureAPIRequestLogMaterializedTables(REQUEST_LOG_DB))
+
+	parent := &APIRequestLog{Source: APIRequestLogSourceLive, UsageLogId: 19, CreatedAt: 109, ItemsStatus: APIRequestLogItemsFailed}
+	require.NoError(t, REQUEST_LOG_DB.Create(parent).Error)
+	expected := []APIRequestLogItem{
+		{LogId: parent.Id, Seq: 1, ItemType: APIRequestLogItemMessage, Content: APIRequestLogBody("first")},
+		{LogId: parent.Id, Seq: 2, ItemType: APIRequestLogItemMessage, Content: APIRequestLogBody("second")},
+	}
+	duplicated := []APIRequestLogItem{expected[0], expected[1], expected[0], expected[1]}
+	require.NoError(t, REQUEST_LOG_DB.Create(&duplicated).Error)
+
+	require.NoError(t, createAPIRequestLogItemsIfMissing(REQUEST_LOG_DB, parent.Id, expected))
+
+	var stored []APIRequestLogItem
+	require.NoError(t, REQUEST_LOG_DB.Where("log_id = ?", parent.Id).Order("seq ASC").Find(&stored).Error)
+	require.Len(t, stored, 2)
+	require.Equal(t, []int{1, 2}, []int{stored[0].Seq, stored[1].Seq})
+}
+
+func TestCreateAPIRequestLogItemsIfMissingPreservesReferencedDuplicate(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+	require.NoError(t, EnsureAPIRequestLogMaterializedTables(REQUEST_LOG_DB))
+
+	parent := &APIRequestLog{Source: APIRequestLogSourceLive, UsageLogId: 20, CreatedAt: 110, ItemsStatus: APIRequestLogItemsFailed}
+	require.NoError(t, REQUEST_LOG_DB.Create(parent).Error)
+	expected := []APIRequestLogItem{{LogId: parent.Id, Seq: 1, ItemType: APIRequestLogItemMessage, Content: APIRequestLogBody("first")}}
+	duplicated := []APIRequestLogItem{expected[0], expected[0]}
+	require.NoError(t, REQUEST_LOG_DB.Create(&duplicated).Error)
+	turn := APIRequestLogTurn{OwnerFingerprint: "owner", SessionId: "session", TurnId: "turn", TurnIndex: 1}
+	require.NoError(t, REQUEST_LOG_DB.Create(&turn).Error)
+	request := APIRequestLogTurnRequest{TurnRecordId: turn.Id, LogId: parent.Id, Sequence: 1}
+	require.NoError(t, REQUEST_LOG_DB.Create(&request).Error)
+	require.NoError(t, REQUEST_LOG_DB.Create(&APIRequestLogTurnItem{
+		TurnRecordId: turn.Id, RequestRecordId: request.Id, SourceItemId: duplicated[1].Id, Ordinal: 1, CanonicalKey: "referenced-surplus",
+	}).Error)
+
+	require.NoError(t, createAPIRequestLogItemsIfMissing(REQUEST_LOG_DB, parent.Id, expected))
+
+	var count int64
+	require.NoError(t, REQUEST_LOG_DB.Model(&APIRequestLogItem{}).Where("log_id = ?", parent.Id).Count(&count).Error)
+	require.Equal(t, int64(1), count)
+	var mapping APIRequestLogTurnItem
+	require.NoError(t, REQUEST_LOG_DB.First(&mapping).Error)
+	require.Equal(t, duplicated[1].Id, mapping.SourceItemId)
 }
 
 func TestCreateAPIRequestLogTruncatesLargeItems(t *testing.T) {

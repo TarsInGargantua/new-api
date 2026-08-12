@@ -280,6 +280,12 @@ func MaterializeAPIRequestLogTurn(db *gorm.DB, log *APIRequestLog, meta APIReque
 			if err := refreshAPIRequestLogTurn(tx, turn, log, meta); err != nil {
 				return err
 			}
+			if err := rebalanceAPIRequestLogTurnIndexes(tx, turn.OwnerFingerprint, turn.SessionId); err != nil {
+				return err
+			}
+			if err := tx.First(turn, turn.Id).Error; err != nil {
+				return err
+			}
 			result = *turn
 			return nil
 		})
@@ -406,6 +412,93 @@ func allocateAPIRequestLogTurnIndex(tx *gorm.DB, ownerFingerprint, sessionId str
 		return 0, err
 	}
 	return allocated, nil
+}
+
+// rebalanceAPIRequestLogTurnIndexes keeps every turn in a session in
+// chronological order even when asynchronous writers materialize them out of
+// order. The export member sequence is independent from turn_index, so the
+// database index can be corrected without changing batch membership.
+func rebalanceAPIRequestLogTurnIndexes(tx *gorm.DB, ownerFingerprint, sessionId string) error {
+	var turns []APIRequestLogTurn
+	query := tx.Where("owner_fingerprint = ? AND session_id = ?", ownerFingerprint, sessionId)
+	if tx.Dialector != nil && tx.Dialector.Name() != "sqlite" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	if err := query.Find(&turns).Error; err != nil {
+		return err
+	}
+	if len(turns) == 0 {
+		return nil
+	}
+	type turnOrder struct {
+		turn      APIRequestLogTurn
+		startedAt int64
+		createdAt int64
+	}
+	ordered := make([]turnOrder, 0, len(turns))
+	turnIDs := make([]int64, 0, len(turns))
+	for _, turn := range turns {
+		turnIDs = append(turnIDs, turn.Id)
+	}
+	var requests []APIRequestLogTurnRequest
+	if err := tx.Where("turn_record_id IN ?", turnIDs).
+		Order("created_at ASC").Order("log_id ASC").Order("id ASC").Find(&requests).Error; err != nil {
+		return err
+	}
+	firstRequestByTurn := make(map[int64]APIRequestLogTurnRequest, len(turns))
+	for _, request := range requests {
+		if _, exists := firstRequestByTurn[request.TurnRecordId]; !exists {
+			firstRequestByTurn[request.TurnRecordId] = request
+		}
+	}
+	for _, turn := range turns {
+		first := firstRequestByTurn[turn.Id]
+		createdAt := first.CreatedAt
+		if createdAt <= 0 {
+			createdAt = turn.StartedAt
+		}
+		startedAt := turn.StartedAt
+		if startedAt <= 0 {
+			startedAt = createdAt
+		}
+		ordered = append(ordered, turnOrder{turn: turn, startedAt: startedAt, createdAt: createdAt})
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].startedAt != ordered[j].startedAt {
+			return ordered[i].startedAt < ordered[j].startedAt
+		}
+		if ordered[i].createdAt != ordered[j].createdAt {
+			return ordered[i].createdAt < ordered[j].createdAt
+		}
+		return ordered[i].turn.Id < ordered[j].turn.Id
+	})
+	nextIndex := 1
+	for index := range ordered {
+		entry := &ordered[index]
+		if entry.turn.TurnIndex != nextIndex {
+			if err := tx.Model(&APIRequestLogTurn{}).Where("id = ?", entry.turn.Id).Update("turn_index", nextIndex).Error; err != nil {
+				return err
+			}
+			entry.turn.TurnIndex = nextIndex
+		}
+		nextIndex++
+	}
+	maxIndex := 0
+	for index := range ordered {
+		if ordered[index].turn.TurnIndex > maxIndex {
+			maxIndex = ordered[index].turn.TurnIndex
+		}
+	}
+	var state APIRequestLogTurnSessionState
+	stateQuery := tx.Where("owner_fingerprint = ? AND session_id = ?", ownerFingerprint, sessionId)
+	if err := stateQuery.First(&state).Error; err == nil {
+		if state.NextTurnIndex != maxIndex+1 {
+			return tx.Model(&APIRequestLogTurnSessionState{}).Where("id = ?", state.Id).Update("next_turn_index", maxIndex+1).Error
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return nil
 }
 
 func newAPIRequestLogTurn(log *APIRequestLog, meta APIRequestLogTurnMeta, ownerFingerprint string, turnIndex int) APIRequestLogTurn {
