@@ -73,21 +73,21 @@ func seedRequestLogViewerTurn(t *testing.T, db *gorm.DB) *model.APIRequestLogTur
 	return turn
 }
 
-func TestRequestLogViewerIndexUsesChineseExportLabels(t *testing.T) {
+func TestRequestLogViewerIndexUsesEnglishExportLabels(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	serveIndex(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected index status: %d", recorder.Code)
 	}
 	body := recorder.Body.String()
-	for _, expected := range []string{"轮次日志查看器", "导出批次", "历史导出", "完整性复核", "标记已清洗", "重置为未导出", "删除历史记录", "确认重置这条历史导出吗"} {
+	for _, expected := range []string{"Turn Log Viewer", "Export batches", "Export history", "Audit", "Mark cleaned", "Reset export state", "Delete history", "Reset this export?", "Collapsed · click to expand"} {
 		if !strings.Contains(body, expected) {
-			t.Fatalf("missing Chinese viewer label %q", expected)
+			t.Fatalf("missing English viewer label %q", expected)
 		}
 	}
-	for _, unexpected := range []string{">Export batches<", ">Audit<", ">Mark cleaned<", ">Download<"} {
+	for _, unexpected := range []string{"轮次日志查看器", "导出批次", "历史导出", "完整性复核", "标记已清洗", "重置为未导出", "删除历史记录"} {
 		if strings.Contains(body, unexpected) {
-			t.Fatalf("found untranslated viewer label %q", unexpected)
+			t.Fatalf("found legacy Chinese viewer label %q", unexpected)
 		}
 	}
 }
