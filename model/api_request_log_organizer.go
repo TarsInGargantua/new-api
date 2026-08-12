@@ -1030,6 +1030,12 @@ func materializeAPIRequestLogOrganizerTurn(tx *gorm.DB, log *APIRequestLog, meta
 	if err := refreshAPIRequestLogTurn(tx, turn, log, meta); err != nil {
 		return nil, err
 	}
+	if err := rebalanceAPIRequestLogTurnIndexes(tx, turn.OwnerFingerprint, turn.SessionId); err != nil {
+		return nil, err
+	}
+	if err := tx.First(turn, turn.Id).Error; err != nil {
+		return nil, err
+	}
 	return turn, nil
 }
 

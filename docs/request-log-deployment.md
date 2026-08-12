@@ -18,6 +18,13 @@ API_REQUEST_LOG_REDACT_SECRETS=true
 API_REQUEST_LOG_ASYNC_WRITE=false
 API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE=false
 API_REQUEST_LOG_DEFERRED_MATERIALIZATION=true
+API_REQUEST_LOG_OUTBOX_ENABLED=true
+API_REQUEST_LOG_OUTBOX_WORKERS=8
+API_REQUEST_LOG_OUTBOX_BATCH_SIZE=8
+API_REQUEST_LOG_OUTBOX_POLL_INTERVAL_MS=200
+API_REQUEST_LOG_OUTBOX_LEASE_SECONDS=900
+API_REQUEST_LOG_ITEM_BATCH_SIZE=200
+API_REQUEST_LOG_ITEM_BATCH_BYTES=8388608
 API_REQUEST_LOG_QUEUE_SIZE=128
 API_REQUEST_LOG_WORKERS=2
 API_REQUEST_LOG_MAX_BODY_BYTES=4194304
@@ -38,6 +45,8 @@ For high-concurrency or very large requests:
 
 - Keep `API_REQUEST_LOG_ASYNC_WRITE=false` for durable raw capture. `CreateAPIRequestLog` returns only after the parent, parsed items, and durable materialization job are persisted.
 - Keep `API_REQUEST_LOG_DEFERRED_MATERIALIZATION=true` so request goroutines never wait on session/turn aggregation locks. In this mode, `items_status=ok` means raw items are durable; use the materialization queue status to verify turn completion.
+- `API_REQUEST_LOG_OUTBOX_ENABLED=true` writes the complete request-log payload to the primary database before returning to the caller. The outbox workers replay it to the dedicated request-log database. Keep the worker count aligned with the remote database connection budget; increasing it does not help a stalled or overloaded remote database.
+- `API_REQUEST_LOG_OUTBOX_BATCH_SIZE` controls how many durable jobs each worker claims per poll. `API_REQUEST_LOG_ITEM_BATCH_SIZE` and `API_REQUEST_LOG_ITEM_BATCH_BYTES` control the remote item INSERT batches; the byte limit prevents a single large request from exceeding MySQL packet limits.
 - Read-only model discovery requests (`GET /v1/models`, `GET /v1/models/:model`, `GET /v1beta/models`, and `GET /v1beta/openai/models`) bypass request-log capture so a remote log-database slowdown cannot block client startup. Inference requests continue to be captured.
 - The in-process item queue is volatile and can lose pending items on a crash or restart. It is enabled only when both `API_REQUEST_LOG_ASYNC_WRITE=true` and `API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE=true` explicitly accept that risk. Do not enable it for the current production deployment.
 - Queue size, worker count, and queue byte limits apply only to volatile in-process item writes, not to the durable materialization queue.

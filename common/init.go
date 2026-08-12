@@ -130,6 +130,14 @@ func InitEnv() {
 	if APIRequestLogMaxQueueBytes < 0 {
 		APIRequestLogMaxQueueBytes = 0
 	}
+	APIRequestLogItemBatchSize = GetEnvOrDefault("API_REQUEST_LOG_ITEM_BATCH_SIZE", 200)
+	if APIRequestLogItemBatchSize < 1 {
+		APIRequestLogItemBatchSize = 1
+	}
+	APIRequestLogItemBatchBytes = GetEnvOrDefault("API_REQUEST_LOG_ITEM_BATCH_BYTES", 8*1024*1024)
+	if APIRequestLogItemBatchBytes < 1 {
+		APIRequestLogItemBatchBytes = 1
+	}
 	SetCallLogExcludedUsernames(GetEnvOrDefaultString("CALL_LOG_EXCLUDED_USERNAMES", "ryan"))
 	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
 	NodeName = os.Getenv("NODE_NAME")
