@@ -415,7 +415,7 @@ func GetAPIRequestLogExportBatchTurnPage(db *gorm.DB, batchId int64, afterSequen
 	for _, member := range members {
 		turnIds = append(turnIds, member.TurnRecordId)
 	}
-	details, err := getAPIRequestLogTurnDetailsByIds(db, turnIds)
+	details, err := getAPIRequestLogTurnDetailsForExport(db, turnIds)
 	if err != nil {
 		return nil, err
 	}

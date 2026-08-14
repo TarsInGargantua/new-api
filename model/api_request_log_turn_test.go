@@ -35,6 +35,36 @@ func createAPIRequestLogTurnTestRequest(t *testing.T, db *gorm.DB, log APIReques
 	return &log, items
 }
 
+func TestLoadAPIRequestLogTurnContextItemsTreatsRedactionAsComplete(t *testing.T) {
+	db := setupAPIRequestLogTurnTestDB(t)
+
+	redactedLog, redactedItems := createAPIRequestLogTurnTestRequest(t, db, APIRequestLog{
+		Redacted: true, ParseStatus: APIRequestLogParseOK, ItemsStatus: APIRequestLogItemsOK,
+	}, []APIRequestLogItem{{
+		Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage,
+		Role: "user", ContentType: "text", Content: "sanitized context", Redacted: true,
+	}})
+	redactedDetail := &APIRequestLogTurnDetail{Requests: []APIRequestLogTurnRequest{{LogId: redactedLog.Id}}}
+	require.NoError(t, loadAPIRequestLogTurnContextItems(db, map[int64]*APIRequestLogTurnDetail{1: redactedDetail}))
+	require.True(t, redactedDetail.ContextLoaded)
+	require.True(t, redactedDetail.ContextComplete)
+	require.Zero(t, redactedDetail.ContextOmittedItemCount)
+	require.Len(t, redactedDetail.ContextItems, 1)
+	require.Equal(t, redactedItems[0].Id, redactedDetail.ContextItems[0].SourceItemId)
+	require.True(t, redactedDetail.ContextItems[0].Redacted)
+
+	truncatedLog, _ := createAPIRequestLogTurnTestRequest(t, db, APIRequestLog{
+		Redacted: true, ParseStatus: APIRequestLogParseOK, ItemsStatus: APIRequestLogItemsOK,
+	}, []APIRequestLogItem{{
+		Seq: 1, Phase: APIRequestLogPhaseInput, ItemType: APIRequestLogItemMessage,
+		Role: "user", ContentType: "text", Content: "truncated context", Redacted: true, Truncated: true,
+	}})
+	truncatedDetail := &APIRequestLogTurnDetail{Requests: []APIRequestLogTurnRequest{{LogId: truncatedLog.Id}}}
+	require.NoError(t, loadAPIRequestLogTurnContextItems(db, map[int64]*APIRequestLogTurnDetail{2: truncatedDetail}))
+	require.True(t, truncatedDetail.ContextLoaded)
+	require.False(t, truncatedDetail.ContextComplete)
+}
+
 func TestMaterializeAPIRequestLogTurnsMergesRequestsAndKeepsCurrentTurnOnly(t *testing.T) {
 	db := setupAPIRequestLogTurnTestDB(t)
 

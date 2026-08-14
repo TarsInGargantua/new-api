@@ -165,10 +165,14 @@ type APIRequestLogTurnItemDetail struct {
 
 type APIRequestLogTurnDetail struct {
 	APIRequestLogTurn
-	Requests  []APIRequestLogTurnRequest    `json:"requests"`
-	Items     []APIRequestLogTurnItemDetail `json:"items"`
-	Exported  bool                          `json:"exported"`
-	ExportTag string                        `json:"export_tag,omitempty"`
+	Requests                []APIRequestLogTurnRequest    `json:"requests"`
+	Items                   []APIRequestLogTurnItemDetail `json:"items"`
+	ContextItems            []APIRequestLogTurnItemDetail `json:"-"`
+	ContextLoaded           bool                          `json:"-"`
+	ContextComplete         bool                          `json:"-"`
+	ContextOmittedItemCount int                           `json:"-"`
+	Exported                bool                          `json:"exported"`
+	ExportTag               string                        `json:"export_tag,omitempty"`
 }
 
 type APIRequestLogTurnListItem struct {
@@ -1532,6 +1536,14 @@ func refreshAPIRequestLogTurn(tx *gorm.DB, turn *APIRequestLogTurn, log *APIRequ
 }
 
 func getAPIRequestLogTurnDetailsByIds(db *gorm.DB, ids []int64) ([]*APIRequestLogTurnDetail, error) {
+	return getAPIRequestLogTurnDetails(db, ids, false)
+}
+
+func getAPIRequestLogTurnDetailsForExport(db *gorm.DB, ids []int64) ([]*APIRequestLogTurnDetail, error) {
+	return getAPIRequestLogTurnDetails(db, ids, true)
+}
+
+func getAPIRequestLogTurnDetails(db *gorm.DB, ids []int64, includeContext bool) ([]*APIRequestLogTurnDetail, error) {
 	ids = uniquePositiveInt64s(ids)
 	if len(ids) == 0 {
 		return []*APIRequestLogTurnDetail{}, nil
@@ -1552,6 +1564,11 @@ func getAPIRequestLogTurnDetailsByIds(db *gorm.DB, ids []int64) ([]*APIRequestLo
 	for _, request := range requests {
 		if detail := turnById[request.TurnRecordId]; detail != nil {
 			detail.Requests = append(detail.Requests, request)
+		}
+	}
+	if includeContext {
+		if err := loadAPIRequestLogTurnContextItems(db, turnById); err != nil {
+			return nil, err
 		}
 	}
 	var mappings []APIRequestLogTurnItem
@@ -1580,29 +1597,16 @@ func getAPIRequestLogTurnDetailsByIds(db *gorm.DB, ids []int64) ([]*APIRequestLo
 		if detail == nil || !ok || !apiRequestLogTurnItemAllowed(sourceItem) {
 			continue
 		}
-		detail.Items = append(detail.Items, APIRequestLogTurnItemDetail{
-			Id:              mapping.Id,
-			TurnRecordId:    mapping.TurnRecordId,
-			RequestRecordId: mapping.RequestRecordId,
-			SourceItemId:    mapping.SourceItemId,
-			Ordinal:         mapping.Ordinal,
-			CanonicalKey:    mapping.CanonicalKey,
-			ProviderItemId:  mapping.ProviderItemId,
-			MessagePhase:    mapping.MessagePhase,
-			ItemStatus:      mapping.ItemStatus,
-			LogId:           sourceItem.LogId,
-			SourceSeq:       sourceItem.Seq,
-			Phase:           sourceItem.Phase,
-			ItemType:        sourceItem.ItemType,
-			Role:            sourceItem.Role,
-			ContentType:     sourceItem.ContentType,
-			Content:         sourceItem.Content,
-			ToolCallId:      sourceItem.ToolCallId,
-			Name:            sourceItem.Name,
-			Source:          sourceItem.Source,
-			Redacted:        sourceItem.Redacted,
-			Truncated:       sourceItem.Truncated,
-		})
+		item := apiRequestLogTurnItemDetailFromSource(sourceItem)
+		item.Id = mapping.Id
+		item.TurnRecordId = mapping.TurnRecordId
+		item.RequestRecordId = mapping.RequestRecordId
+		item.Ordinal = mapping.Ordinal
+		item.CanonicalKey = mapping.CanonicalKey
+		item.ProviderItemId = mapping.ProviderItemId
+		item.MessagePhase = mapping.MessagePhase
+		item.ItemStatus = mapping.ItemStatus
+		detail.Items = append(detail.Items, item)
 	}
 	if db.Migrator().HasTable(&APIRequestLogExportMember{}) {
 		var members []APIRequestLogExportMember
@@ -1637,6 +1641,76 @@ func getAPIRequestLogTurnDetailsByIds(db *gorm.DB, ids []int64) ([]*APIRequestLo
 		}
 	}
 	return ordered, nil
+}
+
+func loadAPIRequestLogTurnContextItems(db *gorm.DB, turnById map[int64]*APIRequestLogTurnDetail) error {
+	firstRequestByLogId := make(map[int]*APIRequestLogTurnDetail, len(turnById))
+	logIds := make([]int, 0, len(turnById))
+	for _, detail := range turnById {
+		if detail == nil || len(detail.Requests) == 0 || detail.Requests[0].LogId <= 0 {
+			continue
+		}
+		logId := detail.Requests[0].LogId
+		firstRequestByLogId[logId] = detail
+		logIds = append(logIds, logId)
+	}
+	if len(logIds) == 0 {
+		return nil
+	}
+
+	var logs []APIRequestLog
+	if err := db.Select("id", "request_omitted_reason", "redacted", "parse_status", "items_status").Where("id IN ?", logIds).Find(&logs).Error; err != nil {
+		return err
+	}
+	for _, log := range logs {
+		detail := firstRequestByLogId[log.Id]
+		if detail == nil {
+			continue
+		}
+		detail.ContextLoaded = true
+		detail.ContextComplete = strings.TrimSpace(log.RequestOmittedReason) == "" &&
+			log.ParseStatus != APIRequestLogParseFailed && log.ItemsStatus != APIRequestLogItemsFailed
+	}
+
+	var sourceItems []APIRequestLogItem
+	if err := db.Where("log_id IN ? AND phase = ?", logIds, APIRequestLogPhaseInput).
+		Order("log_id ASC").Order("seq ASC").Order("id ASC").Find(&sourceItems).Error; err != nil {
+		return err
+	}
+	for _, sourceItem := range sourceItems {
+		detail := firstRequestByLogId[sourceItem.LogId]
+		if detail == nil {
+			continue
+		}
+		if !apiRequestLogTurnItemAllowed(sourceItem) {
+			detail.ContextOmittedItemCount++
+			detail.ContextComplete = false
+			continue
+		}
+		if sourceItem.Truncated {
+			detail.ContextComplete = false
+		}
+		detail.ContextItems = append(detail.ContextItems, apiRequestLogTurnItemDetailFromSource(sourceItem))
+	}
+	return nil
+}
+
+func apiRequestLogTurnItemDetailFromSource(sourceItem APIRequestLogItem) APIRequestLogTurnItemDetail {
+	return APIRequestLogTurnItemDetail{
+		SourceItemId: sourceItem.Id,
+		LogId:        sourceItem.LogId,
+		SourceSeq:    sourceItem.Seq,
+		Phase:        sourceItem.Phase,
+		ItemType:     sourceItem.ItemType,
+		Role:         sourceItem.Role,
+		ContentType:  sourceItem.ContentType,
+		Content:      sourceItem.Content,
+		ToolCallId:   sourceItem.ToolCallId,
+		Name:         sourceItem.Name,
+		Source:       sourceItem.Source,
+		Redacted:     sourceItem.Redacted,
+		Truncated:    sourceItem.Truncated,
+	}
 }
 
 // loadAPIRequestLogTurnSourceItems keeps IN lists small while reading a few

@@ -65,6 +65,10 @@ func (s *requestLogViewerServer) serveExportPreview(w http.ResponseWriter, r *ht
 		return
 	}
 	params, _, _ := turnQuery(r, 50)
+	if !hasExplicitTurnSelection(params) {
+		writeAPI(w, &model.APIRequestLogExportPreview{}, nil)
+		return
+	}
 	preview, err := model.PreviewAPIRequestLogExport(s.db, params, queryBool(r.URL.Query().Get("include_inferred")))
 	writeAPI(w, preview, err)
 }
@@ -89,6 +93,10 @@ func (s *requestLogViewerServer) serveExportBatches(w http.ResponseWriter, r *ht
 		writeAPI(w, pageData{Items: items, Total: total, Page: page, PageSize: pageSize}, err)
 	case http.MethodPost:
 		params, _, _ := turnQuery(r, 50)
+		if !hasExplicitTurnSelection(params) {
+			writeAPIError(w, http.StatusBadRequest, "select at least one turn filter before creating an export batch")
+			return
+		}
 		batch, err := model.CreateAPIRequestLogExportBatch(s.db, params, queryBool(r.URL.Query().Get("include_inferred")))
 		if err != nil {
 			writeAPI(w, nil, err)
@@ -423,6 +431,25 @@ func turnQuery(r *http.Request, defaultPageSize int) (model.APIRequestLogTurnQue
 		}
 	}
 	return params, page, pageSize
+}
+
+func hasExplicitTurnSelection(params model.APIRequestLogTurnQueryParams) bool {
+	return params.StartTimestamp > 0 ||
+		params.EndTimestamp > 0 ||
+		strings.TrimSpace(params.SessionId) != "" ||
+		strings.TrimSpace(params.TurnId) != "" ||
+		strings.TrimSpace(params.Protocol) != "" ||
+		len(params.Protocols) > 0 ||
+		strings.TrimSpace(params.ModelName) != "" ||
+		len(params.ModelNames) > 0 ||
+		strings.TrimSpace(params.Username) != "" ||
+		len(params.Usernames) > 0 ||
+		strings.TrimSpace(params.TokenName) != "" ||
+		strings.TrimSpace(params.CompletionStatus) != "" ||
+		len(params.CompletionStatuses) > 0 ||
+		strings.TrimSpace(params.Attribution) != "" ||
+		len(params.Attributions) > 0 ||
+		params.Exported != nil
 }
 
 func queryBool(value string) bool {
