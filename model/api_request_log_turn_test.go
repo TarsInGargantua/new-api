@@ -329,6 +329,10 @@ func TestMaterializeAPIRequestLogTurnOwnerFingerprintIsolation(t *testing.T) {
 	renamedAlice.Username = "alice-renamed"
 	renamedAlice.TokenName = "renamed-token"
 	require.Equal(t, apiRequestLogOwnerFingerprint(aliceLog), apiRequestLogOwnerFingerprint(&renamedAlice), "stable numeric identities must not depend on display names")
+	differentAliceToken := *aliceLog
+	differentAliceToken.TokenId++
+	differentAliceToken.TokenName = "other-token"
+	require.Equal(t, apiRequestLogOwnerFingerprint(aliceLog), apiRequestLogOwnerFingerprint(&differentAliceToken), "stable user identities must not depend on the active token")
 
 	anonymousOne, anonymousOneItems := createAPIRequestLogTurnTestRequest(t, db, APIRequestLog{
 		ModelName: "gpt-turn", CreatedAt: 402,

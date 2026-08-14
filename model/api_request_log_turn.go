@@ -1821,13 +1821,16 @@ func apiRequestLogOwnerFingerprint(log *APIRequestLog) string {
 	} else if username := strings.TrimSpace(log.Username); username != "" {
 		userKey = "name:" + username
 	}
+	if userKey != "" {
+		return apiRequestLogSHA256("stable-owner\x00" + userKey)
+	}
 	tokenKey := ""
 	if log.TokenId > 0 {
 		tokenKey = "id:" + strconv.Itoa(log.TokenId)
 	} else if tokenName := strings.TrimSpace(log.TokenName); tokenName != "" {
 		tokenKey = "name:" + tokenName
 	}
-	return apiRequestLogSHA256("stable-owner\x00" + userKey + "\x00" + tokenKey)
+	return apiRequestLogSHA256("stable-owner\x00" + tokenKey)
 }
 
 func apiRequestLogSHA256(value string) string {

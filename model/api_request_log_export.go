@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +32,16 @@ const (
 	apiRequestLogExportMembersTable = "api_request_log_export_members"
 	apiRequestLogExportClaimSize    = 100
 )
+
+const apiRequestLogExportTurnOrder = apiRequestLogTurnsTable + ".owner_fingerprint ASC, " + apiRequestLogTurnsTable + ".session_id ASC, " + apiRequestLogTurnsTable + ".turn_index ASC, " + apiRequestLogTurnsTable + ".started_at ASC, " + apiRequestLogTurnsTable + ".id ASC"
+
+type apiRequestLogExportTurnCursor struct {
+	OwnerFingerprint string
+	SessionId        string
+	TurnIndex        int
+	StartedAt        int64
+	Id               int64
+}
 
 var (
 	ErrAPIRequestLogExportBatchNotClaimable = errors.New("export batch is not claimable")
@@ -234,23 +243,39 @@ func CreateAPIRequestLogExportBatch(db *gorm.DB, params APIRequestLogTurnQueryPa
 			Update("cutoff_turn_id", batch.CutoffTurnId).Error; err != nil {
 			return err
 		}
-		var lastId int64
+		var cursor apiRequestLogExportTurnCursor
 		var sequence int64
 		for batch.CutoffTurnId > 0 {
 			var turnIds []int64
 			query := buildAPIRequestLogExportEligibleQuery(tx, params, includeInferred).
 				Where(apiRequestLogTurnAvailableForExportSQL()).
-				Where(apiRequestLogTurnsTable+".id > ?", lastId).
 				Where(apiRequestLogTurnsTable+".id <= ?", batch.CutoffTurnId).
-				Order(apiRequestLogTurnsTable + ".id ASC").
+				Order(apiRequestLogExportTurnOrder).
 				Limit(apiRequestLogExportClaimSize)
+			if cursor.Id > 0 {
+				query = query.Where("("+
+					apiRequestLogTurnsTable+".owner_fingerprint > ? OR "+
+					"("+apiRequestLogTurnsTable+".owner_fingerprint = ? AND ("+
+					apiRequestLogTurnsTable+".session_id > ? OR "+
+					"("+apiRequestLogTurnsTable+".session_id = ? AND ("+
+					apiRequestLogTurnsTable+".turn_index > ? OR ("+
+					apiRequestLogTurnsTable+".turn_index = ? AND ("+
+					apiRequestLogTurnsTable+".started_at > ? OR ("+
+					apiRequestLogTurnsTable+".started_at = ? AND "+apiRequestLogTurnsTable+".id > ?))))))))",
+					cursor.OwnerFingerprint, cursor.OwnerFingerprint, cursor.SessionId, cursor.SessionId, cursor.TurnIndex, cursor.TurnIndex,
+					cursor.StartedAt, cursor.StartedAt, cursor.Id)
+			}
 			if err := query.Pluck(apiRequestLogTurnsTable+".id", &turnIds).Error; err != nil {
 				return err
 			}
 			if len(turnIds) == 0 {
 				break
 			}
-			lastId = turnIds[len(turnIds)-1]
+			var lastTurn APIRequestLogTurn
+			if err := tx.Where("id = ?", turnIds[len(turnIds)-1]).First(&lastTurn).Error; err != nil {
+				return err
+			}
+			cursor = apiRequestLogExportTurnCursor{OwnerFingerprint: lastTurn.OwnerFingerprint, SessionId: lastTurn.SessionId, TurnIndex: lastTurn.TurnIndex, StartedAt: lastTurn.StartedAt, Id: lastTurn.Id}
 			lockedTurnIds, err := lockAPIRequestLogExportTurnIds(tx, params, includeInferred, batch.CutoffTurnId, turnIds)
 			if err != nil {
 				return err
@@ -968,7 +993,6 @@ func lockAPIRequestLogExportTurnIds(db *gorm.DB, params APIRequestLogTurnQueryPa
 	if len(candidateIds) == 0 {
 		return []int64{}, nil
 	}
-	sort.Slice(candidateIds, func(i, j int) bool { return candidateIds[i] < candidateIds[j] })
 	dialect := ""
 	if db.Dialector != nil {
 		dialect = db.Dialector.Name()
@@ -977,7 +1001,7 @@ func lockAPIRequestLogExportTurnIds(db *gorm.DB, params APIRequestLogTurnQueryPa
 		Where(apiRequestLogTurnsTable+".id IN ?", candidateIds).
 		Where(apiRequestLogTurnsTable+".id <= ?", cutoffTurnId).
 		Where(apiRequestLogTurnAvailableForExportSQL()).
-		Order(apiRequestLogTurnsTable + ".id ASC")
+		Order(apiRequestLogExportTurnOrder)
 	if dialect != "sqlite" {
 		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
 	}

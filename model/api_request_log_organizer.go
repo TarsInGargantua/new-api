@@ -179,13 +179,14 @@ func organizerIdentityForLog(log APIRequestLog) (apiRequestLogOrganizerIdentity,
 		identity.UserKey = "id:" + strconv.Itoa(log.UserId)
 	} else if username := strings.TrimSpace(log.Username); username != "" {
 		identity.UserKey = "name:" + username
+	} else {
+		if log.TokenId > 0 {
+			identity.TokenKey = "id:" + strconv.Itoa(log.TokenId)
+		} else if tokenName := strings.TrimSpace(log.TokenName); tokenName != "" {
+			identity.TokenKey = "name:" + tokenName
+		}
 	}
-	if log.TokenId > 0 {
-		identity.TokenKey = "id:" + strconv.Itoa(log.TokenId)
-	} else if tokenName := strings.TrimSpace(log.TokenName); tokenName != "" {
-		identity.TokenKey = "name:" + tokenName
-	}
-	return identity, identity.UserKey != "" && identity.TokenKey != "" && identity.Model != ""
+	return identity, (identity.UserKey != "" || identity.TokenKey != "") && identity.Model != ""
 }
 
 func (i apiRequestLogOrganizerIdentity) key() string {
@@ -831,12 +832,11 @@ func restoreAPIRequestLogOrganizerSession(ctx context.Context, db *gorm.DB, iden
 		Where("turn_request.log_id < ?", log.Id)
 	if log.UserId > 0 {
 		query = query.Where("turn_row.user_id = ?", log.UserId)
-	} else {
+	} else if strings.TrimSpace(log.Username) != "" {
 		query = query.Where("turn_row.user_id = 0 AND turn_row.username = ?", log.Username)
-	}
-	if log.TokenId > 0 {
+	} else if log.TokenId > 0 {
 		query = query.Where("turn_row.token_id = ?", log.TokenId)
-	} else {
+	} else if strings.TrimSpace(log.TokenName) != "" {
 		query = query.Where("turn_row.token_id = 0 AND turn_row.token_name = ?", log.TokenName)
 	}
 	var row struct {

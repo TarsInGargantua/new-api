@@ -510,6 +510,20 @@ func TestRestoreAPIRequestLogOrganizerSessionScopesKnownTurnsToOwner(t *testing.
 	require.Equal(t, map[string]string{"first-turn": APIRequestLogTurnStatusOpen}, state.KnownTurns)
 }
 
+func TestOrganizerIdentityKeepsUserAcrossTokenChanges(t *testing.T) {
+	first := APIRequestLog{UserId: 7, Username: "alice", TokenId: 11, TokenName: "first", ModelName: "gpt-test"}
+	second := first
+	second.TokenId = 22
+	second.TokenName = "second"
+	firstIdentity, firstOK := organizerIdentityForLog(first)
+	secondIdentity, secondOK := organizerIdentityForLog(second)
+	require.True(t, firstOK)
+	require.True(t, secondOK)
+	require.Equal(t, firstIdentity.UserKey, secondIdentity.UserKey)
+	require.Equal(t, firstIdentity.Model, secondIdentity.Model)
+	require.Equal(t, firstIdentity.key(), secondIdentity.key())
+}
+
 func setupAPIRequestLogOrganizerTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "organizer.db")), &gorm.Config{})
