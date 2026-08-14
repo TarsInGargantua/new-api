@@ -29,6 +29,7 @@ func main() {
 	addr := flag.String("addr", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_ADDR"), ":3001"), "listen address")
 	dsn := flag.String("dsn", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_SQL_DSN"), os.Getenv("REQUEST_LOG_SQL_DSN")), "request log database DSN")
 	exportDir := flag.String("export-dir", firstNonEmpty(os.Getenv("REQUEST_LOG_VIEWER_EXPORT_DIR"), "exports"), "persistent JSONL export directory")
+	exportWorkerEnabled := flag.Bool("export-worker-enabled", !strings.EqualFold(strings.TrimSpace(os.Getenv("REQUEST_LOG_VIEWER_EXPORT_WORKER_ENABLED")), "false"), "process queued export batches")
 	flag.Parse()
 
 	if strings.TrimSpace(*dsn) == "" {
@@ -43,14 +44,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "init request log db: %v\n", err)
 		os.Exit(1)
 	}
-	exportWorker, err := newRequestLogExportWorker(model.REQUEST_LOG_DB, *exportDir)
+	exportWorker, err := newRequestLogExportWorkerWithAutoRun(model.REQUEST_LOG_DB, *exportDir, *exportWorkerEnabled)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init export worker: %v\n", err)
 		os.Exit(1)
 	}
-	if err := exportWorker.Recover(); err != nil {
-		fmt.Fprintf(os.Stderr, "recover export batches: %v\n", err)
-		os.Exit(1)
+	if *exportWorkerEnabled {
+		if err := exportWorker.Recover(); err != nil {
+			fmt.Fprintf(os.Stderr, "recover export batches: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	server := &requestLogViewerServer{db: model.REQUEST_LOG_DB, exports: exportWorker}
 
@@ -199,31 +202,31 @@ const indexHTML = `<!doctype html>
   <style>
     :root {
       color-scheme: dark;
-      --bg:#10110f;
-      --panel:#171913;
-      --panel-2:#1d1f18;
-      --panel-3:#23251c;
-      --line:#34362b;
-      --line-soft:#27291f;
-      --text:#ece7d9;
-      --muted:#9c988b;
-      --faint:#706d63;
-      --accent:#c3a35b;
-      --accent-dim:#806b3f;
+      --bg:#0f1115;
+      --panel:#161a20;
+      --panel-2:#1b2028;
+      --panel-3:#222833;
+      --line:#343c4a;
+      --line-soft:#272e38;
+      --text:#e8edf5;
+      --muted:#98a2b2;
+      --faint:#697586;
+      --accent:#4f8cff;
+      --accent-dim:#316ac7;
       --good:#8ea36f;
-      --warn:#c88945;
+      --warn:#b08cff;
       --bad:#c46a5a;
       --role-user:#7fc8f1;
       --role-user-bg:rgba(77,157,203,.12);
       --role-system:#c8a7e8;
       --role-system-bg:rgba(161,111,204,.13);
-      --role-assistant:#e8bd68;
-      --role-assistant-bg:rgba(195,163,91,.13);
+      --role-assistant:#86a8ff;
+      --role-assistant-bg:rgba(79,140,255,.13);
       --role-developer:#e69a9a;
       --role-developer-bg:rgba(196,106,90,.13);
       --role-tool:#7fc6a4;
       --role-tool-bg:rgba(92,164,126,.13);
-      --code:#0c0d0b;
+      --code:#0b0e13;
       --shadow:0 18px 45px rgba(0,0,0,.28);
     }
     * { box-sizing:border-box; }
@@ -250,7 +253,7 @@ const indexHTML = `<!doctype html>
       position:relative;
       z-index:10;
       display:grid;
-      grid-template-columns:1fr auto auto;
+      grid-template-columns:auto minmax(260px, 1fr) auto auto;
       align-items:center;
       gap:14px;
       padding:14px 18px;
@@ -263,6 +266,7 @@ const indexHTML = `<!doctype html>
     .mark { width:10px; height:22px; border-left:2px solid var(--accent); border-right:1px solid var(--line); }
     .status { color:var(--muted); font-size:12px; white-space:nowrap; }
     .actions { display:flex; gap:8px; }
+    [hidden] { display:none !important; }
     main {
       position:relative;
       display:grid;
@@ -270,8 +274,8 @@ const indexHTML = `<!doctype html>
       min-height:0;
       overflow:hidden;
     }
-    aside, section { min-height:0; overflow:hidden; }
-    aside {
+    .turn-list, section { min-height:0; overflow:hidden; }
+    .turn-list {
       display:grid;
       grid-template-rows:auto minmax(0, 1fr) auto;
       border-right:1px solid var(--line);
@@ -348,7 +352,7 @@ const indexHTML = `<!doctype html>
       overflow:auto;
       border:1px solid var(--line);
       border-radius:8px;
-      background:#13140f;
+      background:#12161c;
       box-shadow:var(--shadow);
       padding:6px;
     }
@@ -406,7 +410,7 @@ const indexHTML = `<!doctype html>
       cursor:not-allowed;
       color:var(--faint);
       border-color:var(--line-soft);
-      background:#141510;
+      background:#13171d;
     }
     input, button, select {
       min-width:0;
@@ -436,12 +440,12 @@ const indexHTML = `<!doctype html>
       font-weight:700;
       text-transform:uppercase;
       letter-spacing:.08em;
-      background:#12130f;
+      background:#11151b;
     }
     tr { cursor:pointer; }
     tbody tr { transition:background .12s ease; }
-    tbody tr:hover { background:#1b1d17; }
-    tbody tr.selected { background:#24261d; box-shadow:inset 3px 0 0 var(--accent); }
+    tbody tr:hover { background:#1a2028; }
+    tbody tr.selected { background:#202b3d; box-shadow:inset 3px 0 0 var(--accent); }
     .time { color:var(--muted); white-space:nowrap; font-size:12px; }
     .model { font-weight:700; color:var(--text); }
     .subline { margin-top:3px; color:var(--faint); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:240px; }
@@ -455,14 +459,14 @@ const indexHTML = `<!doctype html>
       padding:2px 8px;
       font-size:12px;
       color:var(--muted);
-      background:#141510;
+      background:#13171d;
       white-space:nowrap;
     }
     .pill.ok { color:var(--good); border-color:rgba(142,163,111,.42); }
-    .pill.partial { color:var(--warn); border-color:rgba(200,137,69,.5); }
+    .pill.partial { color:var(--warn); border-color:rgba(176,140,255,.5); }
     .pill.failed { color:var(--bad); border-color:rgba(196,106,90,.5); }
     .pill.completed, .pill.exact { color:var(--good); border-color:rgba(142,163,111,.42); }
-    .pill.open, .pill.inferred, .pill.building, .pill.pending { color:var(--warn); border-color:rgba(200,137,69,.5); }
+    .pill.open, .pill.inferred, .pill.building, .pill.pending { color:var(--warn); border-color:rgba(176,140,255,.5); }
     .pill.unknown { color:var(--faint); }
     .detail {
       min-height:0;
@@ -533,8 +537,27 @@ const indexHTML = `<!doctype html>
       list-style:none;
     }
     details.item > summary::-webkit-details-marker { display:none; }
-    .collapse-state { color:var(--faint); font-size:10px; }
-    details.item[open] .collapse-state { display:none; }
+    details.item > summary:focus-visible { outline:none; box-shadow:inset 0 0 0 2px oklch(70% .16 245 / .42); }
+    .collapse-state {
+      display:inline-flex;
+      align-items:center;
+      gap:7px;
+      margin-left:auto;
+      color:var(--faint);
+      font-size:10px;
+      white-space:nowrap;
+    }
+    .item-chevron {
+      width:7px;
+      height:7px;
+      border-right:1.5px solid currentColor;
+      border-bottom:1.5px solid currentColor;
+      transform:rotate(45deg) translateY(-1px);
+      transition:transform .18s cubic-bezier(.22,1,.36,1);
+    }
+    details.item[open] .state-collapsed { display:none; }
+    details.item:not([open]) .state-expanded { display:none; }
+    details.item[open] .item-chevron { transform:rotate(225deg) translate(-1px, -1px); }
     .item-head {
       display:flex;
       flex-wrap:wrap;
@@ -542,7 +565,7 @@ const indexHTML = `<!doctype html>
       align-items:center;
       padding:10px 12px;
       border-bottom:1px solid var(--line-soft);
-      background:#141610;
+      background:#151a21;
     }
     .item-primary,
     .item-meta {
@@ -586,7 +609,7 @@ const indexHTML = `<!doctype html>
     }
     .role-user { color:var(--role-user); border-color:rgba(127,200,241,.38); background:var(--role-user-bg); }
     .role-system { color:var(--role-system); border-color:rgba(200,167,232,.38); background:var(--role-system-bg); }
-    .role-assistant { color:var(--role-assistant); border-color:rgba(232,189,104,.4); background:var(--role-assistant-bg); }
+    .role-assistant { color:var(--role-assistant); border-color:rgba(134,168,255,.4); background:var(--role-assistant-bg); }
     .role-developer { color:var(--role-developer); border-color:rgba(230,154,154,.4); background:var(--role-developer-bg); }
     .role-tool { color:var(--role-tool); border-color:rgba(127,198,164,.38); background:var(--role-tool-bg); }
     .call-id {
@@ -595,10 +618,10 @@ const indexHTML = `<!doctype html>
       gap:7px;
       min-width:0;
       max-width:100%;
-      border:1px solid rgba(195,163,91,.35);
+      border:1px solid rgba(79,140,255,.35);
       border-radius:5px;
       padding:3px 7px;
-      background:rgba(195,163,91,.075);
+      background:rgba(79,140,255,.075);
     }
     .call-id-label {
       flex:0 0 auto;
@@ -611,7 +634,7 @@ const indexHTML = `<!doctype html>
     }
     .call-id code {
       min-width:0;
-      color:#dcc784;
+      color:#9bb9ff;
       font:11px/1.35 "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
       overflow-wrap:anywhere;
     }
@@ -682,7 +705,7 @@ const indexHTML = `<!doctype html>
       white-space:pre-wrap;
       word-break:break-word;
       background:var(--code);
-      color:#d8d1bf;
+      color:#d9e1ed;
       font:12px/1.55 "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
     }
     .empty {
@@ -747,7 +770,7 @@ const indexHTML = `<!doctype html>
       header { grid-template-columns:1fr; align-items:start; }
       body { overflow:auto; }
       main { grid-template-columns:1fr; overflow:visible; }
-      aside { border-right:0; border-bottom:1px solid var(--line); max-height:46vh; }
+      .turn-list { border-right:0; border-bottom:1px solid var(--line); max-height:46vh; }
       .filters { grid-template-columns:1fr; }
       .time-range { grid-template-columns:1fr 1fr; }
       .clear-time { grid-column:1 / -1; }
@@ -759,59 +782,726 @@ const indexHTML = `<!doctype html>
       .batch-row { grid-template-columns:1fr auto; }
       .batch-tag { grid-column:1 / -1; }
     }
+
+    /* 2026 workspace refresh: a quieter, denser operator surface. */
+    :root {
+      --bg:oklch(14.5% .009 255);
+      --panel:oklch(18% .01 255);
+      --panel-2:oklch(21% .012 255);
+      --panel-3:oklch(24% .014 255);
+      --line:oklch(34% .018 255);
+      --line-soft:oklch(27% .014 255);
+      --text:oklch(93% .012 255);
+      --muted:oklch(70% .015 255);
+      --faint:oklch(55% .014 255);
+      --accent:oklch(70% .16 245);
+      --accent-dim:oklch(58% .14 245);
+      --accent-surface:oklch(23% .045 245);
+      --good:oklch(75% .11 142);
+      --warn:oklch(72% .14 300);
+      --bad:oklch(70% .15 28);
+      --code:oklch(12.5% .009 255);
+      --shadow:0 18px 42px oklch(7% .01 255 / .34);
+      --focus:0 0 0 3px oklch(70% .16 245 / .22);
+    }
+    body {
+      background:var(--bg);
+      grid-template-columns:minmax(0, 1fr);
+      grid-template-rows:64px minmax(0, 1fr);
+      font-family:"Avenir Next", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    body:before {
+      opacity:.17;
+      background-image:
+        linear-gradient(oklch(44% .025 245 / .06) 1px, transparent 1px),
+        linear-gradient(90deg, oklch(44% .025 245 / .06) 1px, transparent 1px);
+      background-size:32px 32px;
+      mask-image:linear-gradient(to bottom, black, transparent 72%);
+    }
+    header {
+      grid-column:1;
+      grid-row:1;
+      grid-template-columns:auto minmax(0, 1fr) auto;
+      gap:18px;
+      min-height:64px;
+      padding:10px 18px;
+      border-color:var(--line-soft);
+      background:oklch(14.5% .009 255 / .98);
+      backdrop-filter:none;
+    }
+    .topbar-brand {
+      display:flex;
+      align-items:center;
+      gap:10px;
+      min-width:0;
+    }
+    .brand-copy {
+      min-width:0;
+      white-space:nowrap;
+    }
+    .brand-copy strong { display:block; margin-top:2px; font-size:13px; line-height:1.2; }
+    .eyebrow,
+    .dialog-eyebrow {
+      color:var(--accent);
+      font-size:10px;
+      font-weight:800;
+      line-height:1.2;
+      letter-spacing:.14em;
+      text-transform:uppercase;
+    }
+    .mark {
+      position:relative;
+      width:36px;
+      height:36px;
+      flex:0 0 36px;
+      border:1px solid oklch(70% .16 245 / .5);
+      border-radius:10px;
+      background:var(--accent-surface);
+      box-shadow:0 8px 22px oklch(8% .01 255 / .28), inset 0 1px 0 oklch(90% .04 245 / .09);
+    }
+    .mark:before,
+    .mark:after {
+      content:"";
+      position:absolute;
+    }
+    .mark:before {
+      inset:9px;
+      border:1px solid var(--accent);
+      border-radius:3px;
+      transform:rotate(45deg);
+    }
+    .mark:after {
+      top:50%;
+      left:50%;
+      width:4px;
+      height:4px;
+      border-radius:50%;
+      background:var(--accent);
+      box-shadow:0 0 12px oklch(70% .16 245 / .72);
+      transform:translate(-50%, -50%);
+    }
+    .status {
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      min-height:32px;
+      padding:5px 11px;
+      border:1px solid var(--line-soft);
+      border-radius:999px;
+      background:var(--panel);
+      color:var(--muted);
+      font-variant-numeric:tabular-nums;
+    }
+    .status:before {
+      content:"";
+      width:7px;
+      height:7px;
+      flex:0 0 7px;
+      border-radius:50%;
+      background:var(--good);
+      box-shadow:0 0 0 4px oklch(75% .11 142 / .09);
+    }
+    .actions { gap:9px; }
+    .actions button { min-height:38px; padding:8px 13px; font-weight:700; }
+    .topbar-meta {
+      display:flex;
+      align-items:center;
+      gap:10px;
+    }
+    .refresh-action svg,
+    .nav-icon svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+    .workspace-nav {
+      display:flex;
+      align-items:center;
+      justify-self:start;
+      gap:4px;
+      min-width:0;
+      padding:4px;
+      border:1px solid var(--line-soft);
+      border-radius:10px;
+      background:oklch(17% .01 255);
+    }
+    .nav-link {
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap:8px;
+      min-height:34px;
+      padding:0 13px;
+      border:1px solid transparent;
+      border-radius:7px;
+      color:var(--muted);
+      font-size:12px;
+      font-weight:700;
+      text-decoration:none;
+      transition:color .18s cubic-bezier(.22,1,.36,1), background .18s cubic-bezier(.22,1,.36,1);
+    }
+    .nav-link:hover { color:var(--text); background:var(--panel); }
+    .nav-link.active { border-color:oklch(70% .16 245 / .25); color:var(--accent); background:var(--accent-surface); }
+    .nav-link:focus-visible { outline:none; box-shadow:var(--focus); }
+    .nav-icon {
+      display:grid;
+      place-items:center;
+      width:18px;
+      min-width:18px;
+      color:currentColor;
+      font-size:17px;
+      line-height:1;
+    }
+    .nav-label { white-space:nowrap; }
+    .actions .refresh-action {
+      display:grid;
+      place-items:center;
+      width:40px;
+      min-width:40px;
+      height:40px;
+      min-height:40px;
+      padding:0;
+      color:var(--muted);
+    }
+    main {
+      grid-column:1;
+      grid-row:2;
+      grid-template-columns:minmax(600px, 49%) minmax(0, 1fr);
+    }
+    .turn-list {
+      border-color:var(--line-soft);
+      background:oklch(16.5% .01 255 / .78);
+    }
+    .filters {
+      position:relative;
+      z-index:30;
+      grid-template-columns:1fr;
+      gap:9px;
+      padding:10px 14px 12px;
+      overflow:visible;
+      border-color:var(--line-soft);
+      background:oklch(16.5% .01 255 / .98);
+      backdrop-filter:none;
+    }
+    .filter-heading {
+      grid-column:1 / -1;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      padding-bottom:0;
+    }
+    .filter-heading strong { display:block; font-size:12px; }
+    .filter-heading-tools { display:flex; align-items:center; gap:9px; }
+    .clear-filters,
+    .advanced-toggle {
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:7px;
+      min-height:30px;
+      padding:4px 9px;
+      color:var(--muted);
+      font-size:11px;
+      line-height:1;
+    }
+    .advanced-toggle[aria-expanded="true"] { border-color:var(--accent-dim); color:var(--accent); background:var(--accent-surface); }
+    .toggle-caret,
+    .select-caret {
+      display:inline-block;
+      width:7px;
+      height:7px;
+      flex:0 0 7px;
+      border-right:1.5px solid currentColor;
+      border-bottom:1.5px solid currentColor;
+      transform:rotate(45deg) translateY(-1px);
+      transition:transform .18s cubic-bezier(.22,1,.36,1);
+    }
+    .advanced-toggle[aria-expanded="true"] .toggle-caret { transform:rotate(225deg) translate(-1px, -1px); }
+    .filter-count {
+      display:inline-grid;
+      place-items:center;
+      min-width:17px;
+      height:17px;
+      margin-left:4px;
+      border-radius:999px;
+      background:var(--accent);
+      color:oklch(16% .02 245);
+      font-size:10px;
+      font-weight:800;
+    }
+    .quick-filters {
+      display:grid;
+      grid-template-columns:repeat(4, minmax(0, 1fr));
+      gap:7px;
+    }
+    .advanced-filters {
+      display:grid;
+      grid-template-columns:repeat(3, minmax(0, 1fr));
+      gap:8px;
+      padding-top:9px;
+      border-top:1px solid var(--line-soft);
+    }
+    .advanced-filters[hidden] { display:none; }
+    .sr-only {
+      position:absolute !important;
+      width:1px !important;
+      height:1px !important;
+      padding:0 !important;
+      margin:-1px !important;
+      overflow:hidden !important;
+      clip:rect(0, 0, 0, 0) !important;
+      white-space:nowrap !important;
+      border:0 !important;
+    }
+    .filter-field,
+    .filter-control {
+      display:flex;
+      flex-direction:column;
+      gap:5px;
+      min-width:0;
+    }
+    .field-kicker,
+    .filter-control > span {
+      color:var(--faint);
+      font-size:10px;
+      font-weight:800;
+      line-height:1;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .select-button,
+    .filter-control input,
+    .filter-control select,
+    .time-field input { min-height:36px; padding-top:7px; padding-bottom:7px; }
+    .select-button span.select-caret { color:var(--accent); }
+    .select-menu {
+      right:auto;
+      top:calc(100% + 7px);
+      z-index:60;
+      width:max(100%, 220px);
+      max-height:min(360px, calc(100vh - 220px));
+      overflow-y:auto;
+      overscroll-behavior:contain;
+      scrollbar-gutter:stable;
+      border-color:var(--line);
+      border-radius:10px;
+      background:oklch(17% .01 255);
+      box-shadow:0 22px 60px oklch(5% .01 255 / .55);
+    }
+    .quick-filters .filter-field:nth-child(2) .select-menu { right:0; left:auto; }
+    .select-actions {
+      position:sticky;
+      top:-6px;
+      z-index:2;
+      background:oklch(17% .01 255);
+    }
+    input, button, select {
+      border-color:var(--line);
+      border-radius:8px;
+      background:var(--panel);
+    }
+    input:hover, select:hover { border-color:oklch(44% .025 255); }
+    input:focus, select:focus {
+      border-color:var(--accent-dim);
+      background:var(--panel-2);
+      box-shadow:var(--focus);
+    }
+    button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+      outline:none;
+      box-shadow:var(--focus);
+    }
+    button { transition:border-color .18s cubic-bezier(.22,1,.36,1), background .18s cubic-bezier(.22,1,.36,1), color .18s cubic-bezier(.22,1,.36,1), transform .18s cubic-bezier(.22,1,.36,1); }
+    button:active { transform:translateY(1px); }
+    .list-scroll { background:oklch(16% .01 255 / .52); }
+    table { table-layout:fixed; }
+    th:nth-child(1) { width:21%; }
+    th:nth-child(2) { width:35%; }
+    th:nth-child(3) { width:16%; }
+    th:nth-child(4) { width:13%; }
+    th:nth-child(5) { width:15%; }
+    th {
+      position:sticky;
+      top:0;
+      z-index:3;
+      padding-top:11px;
+      padding-bottom:11px;
+      border-color:var(--line-soft);
+      background:oklch(17.5% .01 255 / .98);
+      backdrop-filter:blur(10px);
+    }
+    td { padding-top:12px; padding-bottom:12px; }
+    td { overflow:hidden; }
+    td .model,
+    td .pill {
+      max-width:100%;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+    tbody tr { position:relative; }
+    tbody tr:hover { background:oklch(22% .017 255 / .72); }
+    tbody tr.selected {
+      background:var(--accent-surface);
+      box-shadow:inset 0 0 0 1px oklch(70% .16 245 / .28);
+    }
+    tbody tr.selected .model { color:oklch(88% .07 245); }
+    .pager {
+      min-height:58px;
+      padding:10px 16px;
+      border-color:var(--line-soft);
+      background:oklch(16.5% .01 255 / .98);
+    }
+    .pager-info { font-variant-numeric:tabular-nums; }
+    .detail {
+      padding:22px 24px 32px;
+      background:oklch(15.5% .01 255 / .7);
+    }
+    .detail-head {
+      margin-bottom:18px;
+      padding:16px;
+      border:1px solid var(--line);
+      border-radius:12px;
+      background:var(--panel);
+      box-shadow:0 14px 36px oklch(8% .01 255 / .2);
+    }
+    .detail-title h2 { font-size:20px; letter-spacing:-.02em; }
+    .request-id { margin-top:8px; color:var(--faint); }
+    .summary {
+      display:grid;
+      gap:0;
+      overflow:hidden;
+      border:1px solid var(--line);
+      border-radius:11px;
+      background:var(--panel);
+    }
+    .metric {
+      min-width:0;
+      border:0;
+      border-right:1px solid var(--line-soft);
+      border-radius:0;
+      padding:12px 14px;
+      background:transparent;
+      box-shadow:none;
+    }
+    .metric:last-child { border-right:0; }
+    .metric strong { margin-top:4px; font-size:15px; font-variant-numeric:tabular-nums; }
+    .items { gap:12px; }
+    .item {
+      border-color:var(--line);
+      border-radius:11px;
+      background:oklch(18.5% .01 255);
+      box-shadow:0 12px 30px oklch(7% .01 255 / .2);
+      transition:border-color .18s cubic-bezier(.22,1,.36,1), transform .18s cubic-bezier(.22,1,.36,1);
+    }
+    .item:hover { border-color:oklch(41% .025 255); transform:translateY(-1px); }
+    .item-head { padding:11px 13px; background:oklch(20% .012 255); }
+    details.item > summary:hover { background:oklch(22% .017 255); }
+    .call-id { border-radius:7px; }
+    pre { padding:15px; max-height:520px; line-height:1.65; }
+    .empty-detail {
+      min-height:calc(100vh - 160px);
+      flex-direction:column;
+      gap:8px;
+      border:0;
+      background:transparent;
+      text-align:center;
+    }
+    .empty-detail strong { color:var(--text); font-size:15px; }
+    .empty-detail > span { max-width:34ch; color:var(--faint); font-size:12px; }
+    .empty-orbit {
+      position:relative;
+      width:62px;
+      height:62px;
+      margin-bottom:8px;
+      border:1px solid var(--line);
+      border-radius:50%;
+    }
+    .empty-orbit:before,
+    .empty-orbit:after {
+      content:"";
+      position:absolute;
+      border-radius:50%;
+    }
+    .empty-orbit:before { inset:12px; border:1px solid oklch(70% .16 245 / .45); }
+    .empty-orbit:after { width:8px; height:8px; top:7px; right:8px; background:var(--accent); box-shadow:0 0 18px oklch(70% .16 245 / .45); }
+    .exports-view {
+      grid-column:1;
+      grid-row:2;
+      min-height:0;
+      overflow:auto;
+      background:oklch(15.5% .01 255 / .86);
+    }
+    .export-body {
+      display:grid;
+      gap:24px;
+      width:min(1120px, 100%);
+      margin:0 auto;
+      padding:24px;
+    }
+    .export-overview {
+      display:grid;
+      grid-template-columns:minmax(0, 1fr) auto;
+      align-items:center;
+      gap:24px;
+      padding:18px 0 22px;
+      border-bottom:1px solid var(--line-soft);
+    }
+    .section-kicker {
+      color:var(--faint);
+      font-size:10px;
+      font-weight:800;
+      letter-spacing:.1em;
+      text-transform:uppercase;
+    }
+    .export-preview { margin-top:8px; color:var(--muted); }
+    .preview-count {
+      display:flex;
+      flex-wrap:wrap;
+      align-items:baseline;
+      gap:8px;
+      color:var(--text);
+    }
+    .preview-count strong { color:var(--accent); font-size:24px; font-variant-numeric:tabular-nums; }
+    .preview-detail { margin-top:5px; color:var(--faint); font-size:12px; }
+    .preview-empty { display:grid; gap:5px; max-width:54ch; }
+    .preview-empty strong { color:var(--text); font-size:14px; }
+    .preview-empty span { color:var(--faint); font-size:12px; }
+    .export-controls {
+      display:flex;
+      flex-direction:column;
+      align-items:flex-end;
+      gap:12px;
+    }
+    .toggle { cursor:pointer; }
+    .create-export {
+      border-color:oklch(70% .16 245 / .65);
+      background:var(--accent);
+      color:oklch(16% .02 245);
+      font-weight:800;
+    }
+    .create-export:hover { border-color:oklch(78% .14 240); background:oklch(76% .15 242); color:oklch(14% .02 245); }
+    .create-export:disabled,
+    .create-export:disabled:hover {
+      border-color:var(--line-soft);
+      background:var(--panel-2);
+      color:var(--faint);
+      cursor:not-allowed;
+      opacity:.72;
+      transform:none;
+    }
+    .batch-list { display:grid; gap:24px; }
+    .export-section { overflow:visible; }
+    .export-section-head,
+    .history-exports > summary {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      margin-bottom:10px;
+    }
+    .export-section-head h3,
+    .history-exports > summary strong { margin:2px 0 0; color:var(--text); font-size:14px; }
+    .section-count {
+      display:inline-grid;
+      place-items:center;
+      min-width:24px;
+      height:24px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      color:var(--muted);
+      background:var(--panel);
+      font-size:11px;
+      font-variant-numeric:tabular-nums;
+    }
+    .active-export-list,
+    .history-export-list { display:grid; gap:9px; }
+    .batch-row {
+      grid-template-columns:minmax(0, 1fr) auto minmax(170px, auto);
+      gap:14px;
+      padding:14px;
+      border:1px solid var(--line-soft);
+      border-radius:9px;
+      background:var(--panel);
+    }
+    .batch-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }
+    .batch-actions button { min-height:30px; padding:5px 8px; font-size:11px; }
+    .history-exports {
+      margin-top:0;
+      padding-top:20px;
+      border-top:1px solid var(--line-soft);
+    }
+    .history-exports > summary { margin-bottom:0; padding:0; list-style:none; }
+    .history-exports > summary > span:first-child { display:grid; gap:2px; }
+    .history-exports > summary::-webkit-details-marker { display:none; }
+    .history-exports[open] > summary { margin-bottom:10px; }
+    .export-empty {
+      display:flex;
+      align-items:center;
+      min-height:70px;
+      padding:14px;
+      border:1px dashed var(--line);
+      border-radius:8px;
+      color:var(--faint);
+      background:oklch(17% .01 255 / .55);
+      font-size:12px;
+    }
+    .batch-progress-fill { background:var(--accent); }
+    @media (max-width: 1180px) {
+      main { grid-template-columns:minmax(560px, 54%) minmax(0, 1fr); }
+      .detail { padding:18px; }
+      .export-body { padding:20px; }
+    }
+    @media (max-width: 980px) {
+      html, body { height:100%; min-height:100%; overflow:hidden; }
+      body {
+        display:grid;
+        grid-template-columns:minmax(0, 1fr);
+        grid-template-rows:58px minmax(0, 1fr);
+      }
+      header {
+        grid-column:1;
+        grid-row:1;
+        grid-template-columns:auto minmax(0, 1fr) auto;
+        gap:10px;
+        min-height:58px;
+        padding:8px 12px;
+      }
+      .status { white-space:normal; }
+      main {
+        grid-column:1;
+        grid-row:2;
+        display:block;
+        grid-template-columns:1fr;
+        overflow:auto;
+      }
+      .turn-list {
+        display:grid;
+        grid-template-rows:auto minmax(320px, 54vh) auto;
+        max-height:none;
+        overflow:visible;
+      }
+      .filters { grid-template-columns:1fr; }
+      .list-scroll { max-height:54vh; }
+      .filter-heading { align-items:start; }
+      .detail { padding:16px; }
+      .empty-detail { min-height:320px; }
+      .metric { border-right:0; border-bottom:1px solid var(--line-soft); }
+      .metric:nth-child(odd) { border-right:1px solid var(--line-soft); }
+      .metric:nth-last-child(-n+2) { border-bottom:0; }
+      .exports-view { grid-column:1; grid-row:2; }
+      .export-overview { grid-template-columns:1fr; align-items:start; }
+      .export-controls { align-items:flex-start; }
+    }
+    @media (max-width: 760px) {
+      .status { display:none; }
+      .brand-copy .eyebrow { display:none; }
+    }
+    @media (max-width: 620px) {
+      header { gap:8px; padding-right:9px; padding-left:9px; }
+      .brand-copy { display:none; }
+      .mark { width:32px; height:32px; flex-basis:32px; }
+      .workspace-nav { padding:3px; }
+      .nav-link { min-height:32px; padding-right:10px; padding-left:10px; }
+      .actions { width:auto; }
+      .actions button { flex:0 0 36px; }
+      .quick-filters { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+      .advanced-filters { grid-template-columns:1fr; }
+      .advanced-filters .time-range { grid-column:auto; }
+      .filters { padding:12px; }
+      th:nth-child(3),
+      td:nth-child(3),
+      th:nth-child(4),
+      td:nth-child(4) { display:none; }
+      th:nth-child(1) { width:23%; }
+      th:nth-child(2) { width:52%; }
+      th:nth-child(5) { width:25%; }
+      th, td { padding-right:9px; padding-left:9px; }
+      .time-range { grid-template-columns:1fr 1fr; }
+      .clear-time { grid-column:1 / -1; }
+      .pager { align-items:flex-start; flex-direction:column; }
+      .pager-controls { width:100%; }
+      .pager-controls button { flex:1; }
+      .page-jump { width:68px; }
+      .summary { grid-template-columns:1fr 1fr; }
+      .export-body { gap:20px; padding:16px; }
+      .export-overview { gap:18px; padding-top:8px; }
+      .export-controls { align-items:stretch; }
+      .create-export { width:100%; }
+      .batch-row { grid-template-columns:1fr auto; }
+      .batch-actions { grid-column:1 / -1; justify-content:flex-start; }
+    }
+    @media (max-width: 440px) {
+      .nav-icon { display:none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *:before, *:after { scroll-behavior:auto !important; animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
+    }
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">
-      <div class="mark"></div>
-      <h1>Turn Log Viewer</h1>
+    <div class="topbar-brand">
+      <div class="mark" aria-hidden="true"></div>
+      <div class="brand-copy">
+        <div class="eyebrow">Request intelligence</div>
+        <strong>Turn Log Viewer</strong>
+      </div>
     </div>
-    <div id="status" class="status">Loading...</div>
-    <div class="actions">
-      <button id="refresh">Refresh</button>
-      <button id="export">Exports</button>
+    <nav class="workspace-nav" aria-label="Workspace">
+      <a id="turnNav" class="nav-link active" href="#turns" aria-current="page" title="Turn data"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18M3 9h18M3 15h18"/></svg></span><span class="nav-label">Turn data</span></a>
+      <a id="exportNav" class="nav-link" href="#exports" title="Exports"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></span><span class="nav-label">Exports</span></a>
+    </nav>
+    <div class="topbar-meta">
+      <div id="status" class="status">Loading...</div>
+      <div class="actions">
+        <button id="refresh" class="refresh-action" type="button" title="Refresh data" aria-label="Refresh data"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.219 6.219L3 15M3 21v-6h6M3 12A9 9 0 0 1 18.219 5.781L21 9M21 3v6h-6"/></svg></button>
+      </div>
     </div>
   </header>
-  <main>
-    <aside>
+  <main id="turnView" class="workspace-view">
+    <aside class="turn-list">
       <div class="filters">
-        <div class="filter-field" data-filter="model_name">
-          <button class="select-button" id="modelFilter" type="button"><strong>All models</strong><span>Model</span></button>
-          <div class="select-menu" id="modelMenu"></div>
+        <div class="filter-heading">
+          <strong>Explore turns</strong>
+          <div class="filter-heading-tools"><button id="advancedToggle" class="advanced-toggle" type="button" aria-expanded="false" aria-controls="advancedFilters">More filters <span id="advancedCount" class="filter-count" hidden></span><span class="toggle-caret" aria-hidden="true"></span></button><button id="clearFilters" class="clear-filters" type="button">Reset</button></div>
         </div>
-        <div class="filter-field" data-filter="username">
-          <button class="select-button" id="userFilter" type="button"><strong>All users</strong><span>User</span></button>
-          <div class="select-menu" id="userMenu"></div>
+        <div class="quick-filters">
+          <div class="filter-field" data-filter="model_name">
+            <button class="select-button" id="modelFilter" type="button" aria-label="Filter by model" aria-haspopup="true" aria-controls="modelMenu" aria-expanded="false"><strong>All models</strong><span class="select-caret" aria-hidden="true"></span></button>
+            <div class="select-menu" id="modelMenu" role="group" aria-label="Model options"></div>
+          </div>
+          <div class="filter-field" data-filter="username">
+            <button class="select-button" id="userFilter" type="button" aria-label="Filter by user" aria-haspopup="true" aria-controls="userMenu" aria-expanded="false"><strong>All users</strong><span class="select-caret" aria-hidden="true"></span></button>
+            <div class="select-menu" id="userMenu" role="group" aria-label="User options"></div>
+          </div>
+          <label class="filter-control"><span class="sr-only">Session ID</span><input id="sessionFilter" type="search" placeholder="Session ID"></label>
+          <label class="filter-control"><span class="sr-only">Turn ID</span><input id="turnFilter" type="search" placeholder="Turn ID"></label>
         </div>
-        <input id="sessionFilter" type="search" placeholder="Session ID">
-        <input id="turnFilter" type="search" placeholder="Turn ID">
-        <select id="attributionFilter" aria-label="Attribution">
-          <option value="">All confidence</option>
-          <option value="exact">Exact</option>
-          <option value="inferred">Inferred</option>
-          <option value="unknown">Unknown</option>
-        </select>
-        <select id="turnStatusFilter" aria-label="Turn status">
-          <option value="">All states</option>
-          <option value="completed">Completed</option>
-          <option value="open">Open</option>
-          <option value="unknown">Unknown</option>
-        </select>
-        <select id="exportedFilter" aria-label="Export status">
-          <option value="">All export states</option>
-          <option value="false">Not exported</option>
-          <option value="true">Exported</option>
-        </select>
-        <div class="time-range">
-          <label class="time-field" for="startTime"><span>Start</span><input id="startTime" type="datetime-local"></label>
-          <label class="time-field" for="endTime"><span>End</span><input id="endTime" type="datetime-local"></label>
-          <button id="clearTime" class="clear-time" type="button">Clear time</button>
+        <div id="advancedFilters" class="advanced-filters" hidden>
+          <label class="filter-control"><span>Confidence</span><select id="attributionFilter" aria-label="Attribution">
+            <option value="">All confidence</option>
+            <option value="exact">Exact</option>
+            <option value="inferred">Inferred</option>
+            <option value="unknown">Unknown</option>
+          </select></label>
+          <label class="filter-control"><span>Turn state</span><select id="turnStatusFilter" aria-label="Turn status">
+            <option value="">All states</option>
+            <option value="completed">Completed</option>
+            <option value="open">Open</option>
+            <option value="unknown">Unknown</option>
+          </select></label>
+          <label class="filter-control"><span>Export state</span><select id="exportedFilter" aria-label="Export status">
+            <option value="">All export states</option>
+            <option value="false">Not exported</option>
+            <option value="true">Exported</option>
+          </select></label>
+          <div class="time-range">
+            <label class="time-field" for="startTime"><span>Start</span><input id="startTime" type="datetime-local"></label>
+            <label class="time-field" for="endTime"><span>End</span><input id="endTime" type="datetime-local"></label>
+            <button id="clearTime" class="clear-time" type="button">Clear time</button>
+          </div>
         </div>
       </div>
       <div class="list-scroll">
         <table>
-          <thead><tr><th>Ended</th><th>Session / turn</th><th>Model</th><th>User</th><th>State</th></tr></thead>
+          <thead><tr><th scope="col">Ended</th><th scope="col">Session / turn</th><th scope="col">Model</th><th scope="col">User</th><th scope="col">State</th></tr></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>
@@ -825,19 +1515,23 @@ const indexHTML = `<!doctype html>
         </div>
       </div>
     </aside>
-    <section id="detail" class="detail"><div class="empty">Select a turn.</div></section>
+    <section id="detail" class="detail"><div class="empty empty-detail"><div class="empty-orbit" aria-hidden="true"></div><strong>No turn selected</strong></div></section>
   </main>
-  <dialog id="exportDialog">
-    <div class="export-head"><h2>Export batches</h2><button id="closeExport" class="icon-button" type="button" title="Close" aria-label="Close">&times;</button></div>
+  <section id="exportsView" class="workspace-view exports-view" hidden>
     <div class="export-body">
-      <div class="export-controls">
-        <label class="toggle"><input id="includeInferred" type="checkbox">Include inferred completed turns</label>
-        <button id="createExport" type="button">Create batch</button>
-      </div>
-      <div id="exportPreview" class="export-preview">Loading preview...</div>
-      <div id="batchList" class="batch-list"></div>
+      <section class="export-overview">
+        <div class="export-readiness">
+          <div class="section-kicker">Current selection</div>
+          <div id="exportPreview" class="export-preview">Analyzing eligible turns...</div>
+        </div>
+        <div class="export-controls">
+          <label class="toggle"><input id="includeInferred" type="checkbox"><span>Include inferred completed turns</span></label>
+          <button id="createExport" class="create-export" type="button">Create export batch</button>
+        </div>
+      </section>
+      <div id="batchList" class="batch-list"><div class="export-empty">Loading export batches...</div></div>
     </div>
-  </dialog>
+  </section>
   <script>
     const rowsEl = document.getElementById('rows')
     const detailEl = document.getElementById('detail')
@@ -850,14 +1544,22 @@ const indexHTML = `<!doctype html>
     const startTimeEl = document.getElementById('startTime')
     const endTimeEl = document.getElementById('endTime')
     const clearTimeEl = document.getElementById('clearTime')
+    const clearFiltersEl = document.getElementById('clearFilters')
     const sessionFilterEl = document.getElementById('sessionFilter')
     const turnFilterEl = document.getElementById('turnFilter')
     const attributionFilterEl = document.getElementById('attributionFilter')
     const turnStatusFilterEl = document.getElementById('turnStatusFilter')
     const exportedFilterEl = document.getElementById('exportedFilter')
-    const exportDialogEl = document.getElementById('exportDialog')
+    const turnViewEl = document.getElementById('turnView')
+    const exportsViewEl = document.getElementById('exportsView')
+    const turnNavEl = document.getElementById('turnNav')
+    const exportNavEl = document.getElementById('exportNav')
+    const advancedFiltersEl = document.getElementById('advancedFilters')
+    const advancedToggleEl = document.getElementById('advancedToggle')
+    const advancedCountEl = document.getElementById('advancedCount')
     const includeInferredEl = document.getElementById('includeInferred')
     const exportPreviewEl = document.getElementById('exportPreview')
+    const createExportEl = document.getElementById('createExport')
     const batchListEl = document.getElementById('batchList')
     const selectFields = Array.from(document.querySelectorAll('.filter-field'))
     const state = {
@@ -956,7 +1658,10 @@ const indexHTML = `<!doctype html>
     }
     function closeMenus(except) {
       selectFields.forEach(field => {
-        if (field !== except) field.classList.remove('open')
+        if (field !== except) {
+          field.classList.remove('open')
+          field.querySelector('.select-button').setAttribute('aria-expanded', 'false')
+        }
       })
     }
     function labelFor(key) {
@@ -973,6 +1678,7 @@ const indexHTML = `<!doctype html>
       } else {
         strong.textContent = String(selected.length) + ' ' + labelFor(key)
       }
+      strong.title = strong.textContent
     }
     function renderSelect(key, values) {
       const field = document.querySelector('.filter-field[data-filter="' + key + '"]')
@@ -1007,6 +1713,7 @@ const indexHTML = `<!doctype html>
         input.value = value
         const text = document.createElement('span')
         text.textContent = value
+        text.title = value
         label.appendChild(input)
         label.appendChild(text)
         menu.appendChild(label)
@@ -1024,6 +1731,7 @@ const indexHTML = `<!doctype html>
         const open = field.classList.contains('open')
         closeMenus(field)
         field.classList.toggle('open', !open)
+        button.setAttribute('aria-expanded', String(!open))
       }
       menu.onclick = event => event.stopPropagation()
       all.onclick = () => {
@@ -1051,7 +1759,7 @@ const indexHTML = `<!doctype html>
       const data = await api('/api/status')
       const count = data.turn_count ?? data.count ?? 0
       const dropped = data.queue_dropped_jobs ? ' · ' + String(data.queue_dropped_jobs) + ' queue drops' : ''
-      statusEl.textContent = data.has_turn_table === false ? 'turn table missing' : String(count) + ' turns - ' + (data.request_log_db_dialect || 'db') + dropped
+      statusEl.textContent = data.has_turn_table === false ? 'Turn table missing' : String(count) + ' turns · ' + (data.request_log_db_dialect || 'db') + dropped
     }
     function updatePager() {
       const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize))
@@ -1098,24 +1806,24 @@ const indexHTML = `<!doctype html>
           const callId = callIdFor(item)
           const collapseDeveloper = String(item.role || '').toLowerCase() === 'developer' && String(item.item_type || '').toLowerCase() === 'message' && collapsedDeveloperCount++ < 2
           return [
-            collapseDeveloper ? '<details class="item" data-phase="' + esc(item.phase || '') + '"><summary class="item-head">' : '<article class="item" data-phase="' + esc(item.phase || '') + '"><div class="item-head">',
+            '<details class="item" data-phase="' + esc(item.phase || '') + '"' + (collapseDeveloper ? '' : ' open') + '><summary class="item-head">',
             '<div class="item-primary">',
             item.role ? '<span class="role-badge ' + roleClass(item.role) + '">' + esc(roleLabel(item.role)) + '</span>' : '',
             '<div class="item-title">' + esc(itemTypeLabel(item.item_type)) + '</div>',
             callId ? '<span class="call-id" title="' + esc(callId) + '"><span class="call-id-label">Call ID</span><code>' + esc(callId) + '</code></span>' : '',
-            collapseDeveloper ? '<span class="collapse-state">Collapsed · click to expand</span>' : '',
             '</div>',
             '<div class="item-meta">',
-            '<span class="pill">' + esc(item.seq) + '</span>',
-            '<span class="pill">' + esc(phaseLabel(item.phase)) + '</span>',
+            item.seq !== undefined && item.seq !== null && String(item.seq).trim() !== '' ? '<span class="pill">Seq ' + esc(item.seq) + '</span>' : '',
+            item.phase ? '<span class="pill">' + esc(phaseLabel(item.phase)) + '</span>' : '',
             item.message_phase ? '<span class="pill ' + esc(item.message_phase) + '">' + esc(completionStatusLabel(item.message_phase)) + '</span>' : '',
             item.item_status ? '<span class="pill ' + esc(item.item_status) + '">' + esc(completionStatusLabel(item.item_status)) + '</span>' : '',
             item.name ? '<span class="item-context">' + esc(item.name) + '</span>' : '',
             item.source ? '<span class="item-context">' + esc(item.source) + '</span>' : '',
             '</div>',
-            collapseDeveloper ? '</summary>' : '</div>',
+            '<span class="collapse-state"><span class="state-expanded">Collapse</span><span class="state-collapsed">' + (collapseDeveloper ? 'Collapsed · click to expand' : 'Expand') + '</span><i class="item-chevron" aria-hidden="true"></i></span>',
+            '</summary>',
             '<pre>' + esc(displayContentFor(item)) + '</pre>',
-            collapseDeveloper ? '</details>' : '</article>'
+            '</details>'
           ].join('')
         }).join('') || emptyItemsHTML()
         detailEl.innerHTML = [
@@ -1138,17 +1846,25 @@ const indexHTML = `<!doctype html>
     }
     async function loadExportPreview() {
       const p = qs(false)
+      if (Array.from(p.keys()).length === 0) {
+        createExportEl.disabled = true
+        exportPreviewEl.innerHTML = '<div class="preview-empty"><strong>No export selection</strong><span>Choose at least one filter in Turn data before creating an export.</span></div>'
+        return
+      }
+      createExportEl.disabled = true
       p.set('include_inferred', String(includeInferredEl.checked))
       const data = await api('/api/export-preview?' + p)
-      const fragments = [String(data.available_count || 0) + ' verified, unexported turns match the current filters.']
+      const available = Number(data.available_count || 0)
+      let detail = 'Only verified, unexported turns in the current selection will be included.'
       if (data.broken_count) {
         const reasons = []
         if (data.broken_time_count) reasons.push(String(data.broken_time_count) + ' invalid time or status')
         if (data.broken_request_count) reasons.push(String(data.broken_request_count) + ' request count mismatches')
         if (data.broken_item_count) reasons.push(String(data.broken_item_count) + ' item count mismatches')
-        fragments.push(String(data.broken_count) + ' potentially broken completed turns were excluded' + (reasons.length ? ' (' + reasons.join(', ') + ')' : '') + '.')
+        detail = String(data.broken_count) + ' potentially broken completed turns were excluded' + (reasons.length ? ': ' + reasons.join(', ') : '') + '.'
       }
-      exportPreviewEl.textContent = fragments.join(' ')
+      exportPreviewEl.innerHTML = '<div class="preview-count"><strong>' + esc(available.toLocaleString()) + '</strong><span>turns ready to export</span></div><div class="preview-detail">' + esc(detail) + '</div>'
+      createExportEl.disabled = available === 0
     }
     const beijingTime = value => value ? new Date(value * 1000).toLocaleString('en-CA', { timeZone:'Asia/Shanghai', hour12:false }) + ' Beijing time' : ''
     function batchIntegrityLabel(batch) {
@@ -1189,7 +1905,7 @@ const indexHTML = `<!doctype html>
         '<div class="batch-row">',
         '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · reset ' + esc(beijingTime(batch.reset_at)) + ' (' + esc(batch.reset_rows || 0) + ' released)' : '') + (batch.artifact_deleted_at ? ' · export file deleted' : '') + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(localizedError(batch.integrity_error)) : '') + (batch.error ? ' · ' + esc(localizedError(batch.error)) : '') + '</div>' + batchProgress(batch) + '</div>',
         '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batchStatusLabel(batch.status)) + '</span>',
-        '<div>' + batchActions(batch) + '</div>',
+        '<div class="batch-actions">' + batchActions(batch) + '</div>',
         '</div>'
       ].join('')
     }
@@ -1198,12 +1914,14 @@ const indexHTML = `<!doctype html>
       const batches = data.items || []
       const activeBatches = batches.filter(batch => batch.status !== 'completed')
       const historicalBatches = batches.filter(batch => batch.status === 'completed')
-      const activeHTML = activeBatches.length
+      const activeRowsHTML = activeBatches.length
         ? activeBatches.map(renderBatchRow).join('')
-        : '<div class="batch-meta">No active or failed export batches.</div>'
-      const historyHTML = historicalBatches.length
-        ? '<details class="history-exports"><summary>Export history (' + esc(historicalBatches.length) + ')</summary><div class="history-export-list">' + historicalBatches.map(renderBatchRow).join('') + '</div></details>'
-        : ''
+        : '<div class="export-empty">No active or failed export batches.</div>'
+      const historyRowsHTML = historicalBatches.length
+        ? historicalBatches.map(renderBatchRow).join('')
+        : '<div class="export-empty">No export history yet.</div>'
+      const activeHTML = '<section class="export-section"><div class="export-section-head"><div><div class="section-kicker">Activity</div><h3>Active exports</h3></div><span class="section-count">' + esc(activeBatches.length) + '</span></div><div class="active-export-list">' + activeRowsHTML + '</div></section>'
+      const historyHTML = '<details class="history-exports"><summary><span><span class="section-kicker">Archive</span><strong>Export history</strong></span><span class="section-count">' + esc(historicalBatches.length) + '</span></summary><div class="history-export-list">' + historyRowsHTML + '</div></details>'
       batchListEl.innerHTML = activeHTML + historyHTML
       batchListEl.querySelectorAll('[data-retry]').forEach(button => {
         button.onclick = async () => {
@@ -1310,31 +2028,61 @@ const indexHTML = `<!doctype html>
         }
       })
       if (batches.some(batch => ['pending', 'building'].includes(batch.status))) {
-        setTimeout(() => { if (exportDialogEl.open) loadBatches().catch(() => {}) }, 1500)
+        setTimeout(() => { if (!exportsViewEl.hidden) loadBatches().catch(() => {}) }, 1500)
       }
     }
+    function setWorkspace(name) {
+      const showingExports = name === 'exports'
+      closeMenus()
+      turnViewEl.hidden = showingExports
+      exportsViewEl.hidden = !showingExports
+      turnNavEl.classList.toggle('active', !showingExports)
+      exportNavEl.classList.toggle('active', showingExports)
+      turnNavEl.toggleAttribute('aria-current', !showingExports)
+      exportNavEl.toggleAttribute('aria-current', showingExports)
+      document.title = showingExports ? 'Exports · Turn Log Viewer' : 'Turn Log Viewer'
+    }
     async function openExports() {
-      exportDialogEl.showModal()
+      setWorkspace('exports')
       exportPreviewEl.textContent = 'Loading preview...'
       await Promise.all([loadExportPreview(), loadBatches()])
     }
     document.addEventListener('click', () => closeMenus())
-    document.getElementById('refresh').onclick = () => { loadStatus(); loadFilterOptions(); loadRows() }
-    document.getElementById('export').onclick = () => openExports().catch(err => exportPreviewEl.textContent = err.message)
-    document.getElementById('closeExport').onclick = () => exportDialogEl.close()
+    document.getElementById('refresh').onclick = () => {
+      loadStatus()
+      if (exportsViewEl.hidden) {
+        loadFilterOptions()
+        loadRows()
+      } else {
+        loadExportPreview().catch(err => { exportPreviewEl.textContent = err.message })
+        loadBatches().catch(err => { exportPreviewEl.textContent = err.message })
+      }
+    }
+    turnNavEl.onclick = event => {
+      event.preventDefault()
+      setWorkspace('turns')
+    }
+    exportNavEl.onclick = event => {
+      event.preventDefault()
+      openExports().catch(err => exportPreviewEl.textContent = err.message)
+    }
     includeInferredEl.onchange = () => loadExportPreview().catch(err => exportPreviewEl.textContent = err.message)
-    document.getElementById('createExport').onclick = async event => {
+    createExportEl.onclick = async event => {
       const button = event.currentTarget
-      button.disabled = true
       const p = qs(false)
+      if (Array.from(p.keys()).length === 0) {
+        button.disabled = true
+        exportPreviewEl.innerHTML = '<div class="preview-empty"><strong>No export selection</strong><span>Choose at least one filter in Turn data before creating an export.</span></div>'
+        return
+      }
+      button.disabled = true
       p.set('include_inferred', String(includeInferredEl.checked))
       try {
         const batch = await api('/api/export-batches?' + p, { method:'POST' })
         exportPreviewEl.textContent = 'Created export batch ' + batch.tag + ' with ' + String(batch.row_count || 0) + ' turns.'
-        await Promise.all([loadBatches(), loadRows()])
+        await Promise.all([loadBatches(), loadRows(), loadExportPreview()])
       } catch (err) {
         exportPreviewEl.textContent = err.message
-      } finally {
         button.disabled = false
       }
     }
@@ -1367,6 +2115,7 @@ const indexHTML = `<!doctype html>
       state.time.start = startTimeEl.value
       state.time.end = endTimeEl.value
       state.page = 1
+      updateAdvancedFilterCount()
       loadRows()
     }
     startTimeEl.onchange = applyTimeFilter
@@ -1375,6 +2124,36 @@ const indexHTML = `<!doctype html>
       startTimeEl.value = ''
       endTimeEl.value = ''
       applyTimeFilter()
+      updateAdvancedFilterCount()
+    }
+    function updateAdvancedFilterCount() {
+      const count = [attributionFilterEl.value, turnStatusFilterEl.value, exportedFilterEl.value, startTimeEl.value, endTimeEl.value].filter(Boolean).length
+      advancedCountEl.textContent = String(count)
+      advancedCountEl.hidden = count === 0
+    }
+    advancedToggleEl.onclick = () => {
+      const expanded = advancedToggleEl.getAttribute('aria-expanded') === 'true'
+      advancedToggleEl.setAttribute('aria-expanded', String(!expanded))
+      advancedFiltersEl.hidden = expanded
+    }
+    clearFiltersEl.onclick = () => {
+      state.selected.model_name.clear()
+      state.selected.username.clear()
+      state.time.start = ''
+      state.time.end = ''
+      state.page = 1
+      startTimeEl.value = ''
+      endTimeEl.value = ''
+      sessionFilterEl.value = ''
+      turnFilterEl.value = ''
+      attributionFilterEl.value = ''
+      turnStatusFilterEl.value = ''
+      exportedFilterEl.value = ''
+      selectFields.forEach(field => field.querySelectorAll('input[type="checkbox"]').forEach(input => { input.checked = false }))
+      updateSelectButton('model_name')
+      updateSelectButton('username')
+      updateAdvancedFilterCount()
+      loadRows()
     }
     let textFilterTimer = 0
     function applyTextFilters() {
@@ -1388,18 +2167,38 @@ const indexHTML = `<!doctype html>
     turnFilterEl.oninput = applyTextFilters
     attributionFilterEl.onchange = () => {
       state.page = 1
+      updateAdvancedFilterCount()
       loadRows()
     }
     turnStatusFilterEl.onchange = () => {
       state.page = 1
+      updateAdvancedFilterCount()
       loadRows()
     }
     exportedFilterEl.onchange = () => {
       state.page = 1
+      updateAdvancedFilterCount()
       loadRows()
     }
+    document.addEventListener('keydown', event => {
+      const target = event.target
+      const isTyping = target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName)
+      const openField = selectFields.find(field => field.classList.contains('open'))
+      if (event.key === 'Escape' && openField) {
+        event.preventDefault()
+        const button = openField.querySelector('.select-button')
+        closeMenus()
+        button.focus()
+        return
+      }
+      if (event.key === '/' && !isTyping && !turnViewEl.hidden) {
+        event.preventDefault()
+        sessionFilterEl.focus()
+      }
+    })
     loadStatus().catch(err => statusEl.textContent = err.message)
     loadFilterOptions().catch(err => statusEl.textContent = err.message)
+    updateAdvancedFilterCount()
     loadRows().catch(err => rowsEl.innerHTML = '<tr><td colspan="5">' + esc(err.message) + '</td></tr>')
   </script>
 </body>

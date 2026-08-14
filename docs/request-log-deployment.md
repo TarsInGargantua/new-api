@@ -97,6 +97,7 @@ GRANT SELECT ON newapi_request_logs.api_request_log_turns TO 'request_log_viewer
 GRANT UPDATE (exported_version) ON newapi_request_logs.api_request_log_turns TO 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_turn_requests TO 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_turn_items TO 'request_log_viewer'@'localhost';
+GRANT SELECT ON newapi_request_logs.api_request_logs TO 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_items TO 'request_log_viewer'@'localhost';
 GRANT SELECT, INSERT, UPDATE ON newapi_request_logs.api_request_log_export_batches TO 'request_log_viewer'@'localhost';
 GRANT SELECT, INSERT, UPDATE ON newapi_request_logs.api_request_log_export_members TO 'request_log_viewer'@'localhost';

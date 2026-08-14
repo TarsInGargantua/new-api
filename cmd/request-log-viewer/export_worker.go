@@ -42,6 +42,10 @@ type stagedExportArtifactDeletion struct {
 }
 
 func newRequestLogExportWorker(db *gorm.DB, dir string) (*requestLogExportWorker, error) {
+	return newRequestLogExportWorkerWithAutoRun(db, dir, true)
+}
+
+func newRequestLogExportWorkerWithAutoRun(db *gorm.DB, dir string, autoRun bool) (*requestLogExportWorker, error) {
 	if db == nil {
 		return nil, errors.New("request log database is not initialized")
 	}
@@ -62,7 +66,9 @@ func newRequestLogExportWorker(db *gorm.DB, dir string) (*requestLogExportWorker
 		owner: owner,
 		wake:  make(chan struct{}, 1),
 	}
-	go worker.run()
+	if autoRun {
+		go worker.run()
+	}
 	return worker, nil
 }
 
@@ -342,49 +348,114 @@ func trainingTurnJSONLRecord(detail *model.APIRequestLogTurnDetail) map[string]i
 			"is_stream":           request.IsStream,
 		})
 	}
-	items := make([]map[string]interface{}, 0, len(detail.Items))
-	for _, item := range detail.Items {
-		if strings.EqualFold(item.ContentType, "encrypted") {
+	items, contextItemCount, turnItemCount, deduplicatedItemCount := trainingTurnJSONLItems(detail)
+	return map[string]interface{}{
+		"schema_version":             model.APIRequestLogExportSchemaVersion,
+		"session_id":                 detail.SessionId,
+		"turn_id":                    detail.TurnId,
+		"turn_index":                 detail.TurnIndex,
+		"protocol":                   detail.Protocol,
+		"status":                     detail.CompletionStatus,
+		"completion_signal":          detail.CompletionSignal,
+		"attribution":                detail.Attribution,
+		"started_at":                 detail.StartedAt,
+		"ended_at":                   detail.CompletedAt,
+		"user_id":                    detail.UserId,
+		"username":                   detail.Username,
+		"token_id":                   detail.TokenId,
+		"token_name":                 detail.TokenName,
+		"model":                      detail.ModelName,
+		"prompt_tokens":              detail.PromptTokens,
+		"completion_tokens":          detail.CompletionTokens,
+		"token_used":                 detail.TokenUsed,
+		"quota":                      detail.Quota,
+		"requests":                   requests,
+		"context_loaded":             detail.ContextLoaded,
+		"context_complete":           detail.ContextLoaded && detail.ContextComplete,
+		"context_item_count":         contextItemCount,
+		"context_omitted_item_count": detail.ContextOmittedItemCount,
+		"turn_item_count":            turnItemCount,
+		"deduplicated_item_count":    deduplicatedItemCount,
+		"training_item_count":        len(items),
+		"training_items":             items,
+	}
+}
+
+type trainingTurnItem struct {
+	detail          model.APIRequestLogTurnItemDetail
+	contextSnapshot bool
+}
+
+func trainingTurnJSONLItems(detail *model.APIRequestLogTurnDetail) ([]map[string]interface{}, int, int, int) {
+	merged := make([]trainingTurnItem, 0, len(detail.ContextItems)+len(detail.Items))
+	seenSourceItemIds := make(map[int]int, len(detail.ContextItems))
+	contextItemCount := 0
+	for _, item := range detail.ContextItems {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(item.ContentType)), "encrypted") {
 			continue
 		}
-		items = append(items, map[string]interface{}{
-			"seq":              item.Ordinal,
-			"phase":            item.Phase,
-			"type":             item.ItemType,
-			"role":             item.Role,
-			"content_type":     item.ContentType,
-			"content":          string(item.Content),
-			"tool_call_id":     item.ToolCallId,
-			"name":             item.Name,
-			"source":           item.Source,
-			"provider_item_id": item.ProviderItemId,
-			"message_phase":    item.MessagePhase,
-			"status":           item.ItemStatus,
-		})
+		contextItemCount++
+		if item.SourceItemId > 0 {
+			seenSourceItemIds[item.SourceItemId] = len(merged)
+		}
+		merged = append(merged, trainingTurnItem{detail: item, contextSnapshot: true})
 	}
-	return map[string]interface{}{
-		"schema_version":    model.APIRequestLogExportSchemaVersion,
-		"session_id":        detail.SessionId,
-		"turn_id":           detail.TurnId,
-		"turn_index":        detail.TurnIndex,
-		"protocol":          detail.Protocol,
-		"status":            detail.CompletionStatus,
-		"completion_signal": detail.CompletionSignal,
-		"attribution":       detail.Attribution,
-		"started_at":        detail.StartedAt,
-		"ended_at":          detail.CompletedAt,
-		"user_id":           detail.UserId,
-		"username":          detail.Username,
-		"token_id":          detail.TokenId,
-		"token_name":        detail.TokenName,
-		"model":             detail.ModelName,
-		"prompt_tokens":     detail.PromptTokens,
-		"completion_tokens": detail.CompletionTokens,
-		"token_used":        detail.TokenUsed,
-		"quota":             detail.Quota,
-		"requests":          requests,
-		"training_items":    items,
+
+	turnItemCount := 0
+	deduplicatedItemCount := 0
+	for _, item := range detail.Items {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(item.ContentType)), "encrypted") {
+			continue
+		}
+		turnItemCount++
+		if index, exists := seenSourceItemIds[item.SourceItemId]; item.SourceItemId > 0 && exists {
+			merged[index].detail = mergeTrainingTurnItemMapping(merged[index].detail, item)
+			deduplicatedItemCount++
+			continue
+		}
+		if item.SourceItemId > 0 {
+			seenSourceItemIds[item.SourceItemId] = len(merged)
+		}
+		merged = append(merged, trainingTurnItem{detail: item})
 	}
+
+	items := make([]map[string]interface{}, 0, len(merged))
+	for index, item := range merged {
+		record := map[string]interface{}{
+			"seq":              index + 1,
+			"phase":            item.detail.Phase,
+			"type":             item.detail.ItemType,
+			"role":             item.detail.Role,
+			"content_type":     item.detail.ContentType,
+			"content":          string(item.detail.Content),
+			"tool_call_id":     item.detail.ToolCallId,
+			"name":             item.detail.Name,
+			"source":           item.detail.Source,
+			"source_item_id":   item.detail.SourceItemId,
+			"source_seq":       item.detail.SourceSeq,
+			"context_snapshot": item.contextSnapshot,
+			"provider_item_id": item.detail.ProviderItemId,
+			"message_phase":    item.detail.MessagePhase,
+			"status":           item.detail.ItemStatus,
+		}
+		if item.detail.Ordinal > 0 {
+			record["turn_ordinal"] = item.detail.Ordinal
+		}
+		items = append(items, record)
+	}
+	return items, contextItemCount, turnItemCount, deduplicatedItemCount
+}
+
+func mergeTrainingTurnItemMapping(contextItem, turnItem model.APIRequestLogTurnItemDetail) model.APIRequestLogTurnItemDetail {
+	contextItem.Id = turnItem.Id
+	contextItem.TurnRecordId = turnItem.TurnRecordId
+	contextItem.RequestRecordId = turnItem.RequestRecordId
+	contextItem.Ordinal = turnItem.Ordinal
+	contextItem.CanonicalKey = turnItem.CanonicalKey
+	contextItem.ProviderItemId = turnItem.ProviderItemId
+	contextItem.MessagePhase = turnItem.MessagePhase
+	contextItem.ItemStatus = turnItem.ItemStatus
+	return contextItem
 }
 
 func verifyFileSHA256(path, expected string) error {
