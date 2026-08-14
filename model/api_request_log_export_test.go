@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -127,6 +128,32 @@ func TestAPIRequestLogExportBatchClaimsFullFilterWithoutDuplicates(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, int64(3), total)
 	require.Len(t, allBatches, 3)
+}
+
+func TestAPIRequestLogExportBatchOrdersSessionTurnsAcrossClaimPages(t *testing.T) {
+	db := setupAPIRequestLogTurnTestDB(t)
+	const turnCount = apiRequestLogExportClaimSize + 5
+	for turnIndex := turnCount; turnIndex >= 1; turnIndex-- {
+		turn := createAPIRequestLogExportTestTurn(t, db, "session-ordered", fmt.Sprintf("turn-%03d", turnIndex), APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, int64(1000+turnIndex))
+		require.NoError(t, db.Model(&APIRequestLogTurn{}).Where("id = ?", turn.Id).Updates(map[string]interface{}{
+			"turn_index": turnIndex,
+			"started_at": int64(1000 + turnIndex),
+		}).Error)
+	}
+
+	batch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{SessionId: "session-ordered"}, false)
+	require.NoError(t, err)
+	require.Equal(t, int64(turnCount), batch.RowCount)
+
+	var members []APIRequestLogExportMember
+	require.NoError(t, db.Where("batch_id = ?", batch.Id).Order("sequence ASC").Find(&members).Error)
+	require.Len(t, members, turnCount)
+	for index, member := range members {
+		var turn APIRequestLogTurn
+		require.NoError(t, db.First(&turn, member.TurnRecordId).Error)
+		require.Equal(t, index+1, turn.TurnIndex)
+		require.Equal(t, int64(index+1), member.Sequence)
+	}
 }
 
 func TestAPIRequestLogExportConcurrentBatchesGloballyClaimTurnOnce(t *testing.T) {
