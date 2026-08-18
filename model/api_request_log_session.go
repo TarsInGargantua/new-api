@@ -2,8 +2,12 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -95,14 +99,44 @@ type apiRequestLogSessionAggregateRow struct {
 	InferredAttribution int64
 }
 
-const apiRequestLogSessionTurnsAlias = "request_log_session_turns"
+type apiRequestLogSessionKey struct {
+	OwnerFingerprint string
+	SessionId        string
+	ExportBatchId    int64
+}
+
+type apiRequestLogSessionKeyRow struct {
+	OwnerFingerprint string
+	SessionId        string
+	ExportBatchId    int64
+	Id               int64
+	CompletedAt      int64
+}
+
+func (row apiRequestLogSessionKeyRow) key() apiRequestLogSessionKey {
+	return apiRequestLogSessionKey{
+		OwnerFingerprint: row.OwnerFingerprint,
+		SessionId:        row.SessionId,
+		ExportBatchId:    row.ExportBatchId,
+	}
+}
+
+type apiRequestLogSessionCountCacheEntry struct {
+	Total     int64
+	ExpiresAt time.Time
+}
+
+var apiRequestLogSessionCountCache = struct {
+	sync.Mutex
+	entries map[string]apiRequestLogSessionCountCacheEntry
+}{entries: make(map[string]apiRequestLogSessionCountCacheEntry)}
 
 func GetAPIRequestLogSessions(db *gorm.DB, params APIRequestLogTurnQueryParams) (items []*APIRequestLogSessionListItem, total int64, err error) {
 	if db == nil {
 		return nil, 0, errors.New("request log database is not initialized")
 	}
-	grouped := buildAPIRequestLogSessionGroupQuery(db, params)
-	if err = db.Table("(?) AS request_log_sessions", grouped).Count(&total).Error; err != nil {
+	total, err = countAPIRequestLogSessions(db, params)
+	if err != nil {
 		return nil, 0, err
 	}
 	limit := params.Num
@@ -116,18 +150,197 @@ func GetAPIRequestLogSessions(db *gorm.DB, params APIRequestLogTurnQueryParams) 
 	if offset < 0 {
 		offset = 0
 	}
-	var rows []apiRequestLogSessionAggregateRow
-	if err = grouped.
-		Order("completed_at DESC").
-		Order("id DESC").
-		Limit(limit).Offset(offset).Scan(&rows).Error; err != nil {
+	keys, err := listAPIRequestLogSessionKeys(db, params, offset, limit)
+	if err != nil {
 		return nil, 0, err
 	}
-	items = make([]*APIRequestLogSessionListItem, 0, len(rows))
-	for _, row := range rows {
-		items = append(items, apiRequestLogSessionListItemFromAggregate(row))
+	if len(keys) == 0 {
+		return []*APIRequestLogSessionListItem{}, total, nil
+	}
+	rows, err := aggregateAPIRequestLogSessions(db, params, keys)
+	if err != nil {
+		return nil, 0, err
+	}
+	items = make([]*APIRequestLogSessionListItem, 0, len(keys))
+	for _, key := range keys {
+		if row, ok := rows[key]; ok {
+			items = append(items, apiRequestLogSessionListItemFromAggregate(row))
+		}
 	}
 	return items, total, nil
+}
+
+func countAPIRequestLogSessions(db *gorm.DB, params APIRequestLogTurnQueryParams) (int64, error) {
+	params.StartIdx = 0
+	params.Num = 0
+	cacheKey := fmt.Sprintf("%p|%s|%s", db, db.Dialector.Name(), apiRequestLogTurnQueryCacheKey(params))
+	now := time.Now()
+	apiRequestLogSessionCountCache.Lock()
+	defer apiRequestLogSessionCountCache.Unlock()
+	if cached, ok := apiRequestLogSessionCountCache.entries[cacheKey]; ok && now.Before(cached.ExpiresAt) {
+		return cached.Total, nil
+	}
+
+	query := buildAPIRequestLogTurnsQuery(db, params)
+	var total int64
+	var err error
+	switch db.Dialector.Name() {
+	case "mysql":
+		var result struct{ Total int64 }
+		err = query.Select("COUNT(DISTINCT " + apiRequestLogTurnsTable + ".owner_fingerprint, " + apiRequestLogTurnsTable + ".session_id, " + apiRequestLogTurnsTable + ".export_batch_id) AS total").Scan(&result).Error
+		total = result.Total
+	case "postgres":
+		var result struct{ Total int64 }
+		err = query.Select("COUNT(DISTINCT (" + apiRequestLogTurnsTable + ".owner_fingerprint, " + apiRequestLogTurnsTable + ".session_id, " + apiRequestLogTurnsTable + ".export_batch_id)) AS total").Scan(&result).Error
+		total = result.Total
+	default:
+		grouped := buildAPIRequestLogSessionGroupQuery(db, params).Select("1")
+		err = db.Table("(?) AS request_log_sessions", grouped).Count(&total).Error
+	}
+	if err != nil {
+		return 0, err
+	}
+	apiRequestLogSessionCountCache.entries[cacheKey] = apiRequestLogSessionCountCacheEntry{Total: total, ExpiresAt: now.Add(15 * time.Second)}
+	return total, nil
+}
+
+func apiRequestLogTurnQueryCacheKey(params APIRequestLogTurnQueryParams) string {
+	return strings.Join([]string{
+		params.SessionId,
+		params.Protocol,
+		strings.Join(params.Protocols, "\x1f"),
+		params.ModelName,
+		strings.Join(params.ModelNames, "\x1f"),
+		params.Username,
+		strings.Join(params.Usernames, "\x1f"),
+		params.TokenName,
+		params.CompletionStatus,
+		strings.Join(params.CompletionStatuses, "\x1f"),
+		params.Attribution,
+		strings.Join(params.Attributions, "\x1f"),
+		strconv.FormatInt(params.StartTimestamp, 10),
+		strconv.FormatInt(params.EndTimestamp, 10),
+		apiRequestLogOptionalBoolCacheKey(params.Exported),
+	}, "\x1e")
+}
+
+func apiRequestLogOptionalBoolCacheKey(value *bool) string {
+	if value == nil {
+		return ""
+	}
+	if *value {
+		return "1"
+	}
+	return "0"
+}
+
+func listAPIRequestLogSessionKeys(db *gorm.DB, params APIRequestLogTurnQueryParams, offset, limit int) ([]apiRequestLogSessionKey, error) {
+	params.StartIdx = 0
+	params.Num = 0
+	target := offset + limit
+	if target <= 0 {
+		return []apiRequestLogSessionKey{}, nil
+	}
+	seen := make(map[apiRequestLogSessionKey]struct{}, target)
+	keys := make([]apiRequestLogSessionKey, 0, target)
+	var cursorCompletedAt int64
+	var cursorId int64
+	hasCursor := false
+	for len(keys) < target {
+		query := buildAPIRequestLogTurnsQuery(db, params).
+			Select(apiRequestLogTurnsTable + ".owner_fingerprint, " + apiRequestLogTurnsTable + ".session_id, " + apiRequestLogTurnsTable + ".export_batch_id, " + apiRequestLogTurnsTable + ".id, " + apiRequestLogTurnsTable + ".completed_at")
+		if hasCursor {
+			query = query.Where("("+apiRequestLogTurnsTable+".completed_at < ? OR ("+apiRequestLogTurnsTable+".completed_at = ? AND "+apiRequestLogTurnsTable+".id < ?))", cursorCompletedAt, cursorCompletedAt, cursorId)
+		}
+		var rows []apiRequestLogSessionKeyRow
+		if err := query.Order(apiRequestLogTurnsTable + ".completed_at DESC").Order(apiRequestLogTurnsTable + ".id DESC").Limit(2000).Scan(&rows).Error; err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, row := range rows {
+			key := row.key()
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+			if len(keys) >= target {
+				break
+			}
+		}
+		last := rows[len(rows)-1]
+		cursorCompletedAt = last.CompletedAt
+		cursorId = last.Id
+		hasCursor = true
+		if len(rows) < 2000 {
+			break
+		}
+	}
+	if offset >= len(keys) {
+		return []apiRequestLogSessionKey{}, nil
+	}
+	end := offset + limit
+	if end > len(keys) {
+		end = len(keys)
+	}
+	return keys[offset:end], nil
+}
+
+func aggregateAPIRequestLogSessions(db *gorm.DB, params APIRequestLogTurnQueryParams, keys []apiRequestLogSessionKey) (map[apiRequestLogSessionKey]apiRequestLogSessionAggregateRow, error) {
+	params.StartIdx = 0
+	params.Num = 0
+	keyQuery := db.Where("1 = 0")
+	for _, key := range keys {
+		keyQuery = keyQuery.Or("("+apiRequestLogTurnsTable+".owner_fingerprint = ? AND "+apiRequestLogTurnsTable+".session_id = ? AND "+apiRequestLogTurnsTable+".export_batch_id = ?)", key.OwnerFingerprint, key.SessionId, key.ExportBatchId)
+	}
+	var turns []APIRequestLogTurn
+	if err := buildAPIRequestLogTurnsQuery(db, params).Where(keyQuery).Find(&turns).Error; err != nil {
+		return nil, err
+	}
+	rows := make(map[apiRequestLogSessionKey]apiRequestLogSessionAggregateRow, len(keys))
+	for _, turn := range turns {
+		key := apiRequestLogSessionKey{OwnerFingerprint: turn.OwnerFingerprint, SessionId: turn.SessionId, ExportBatchId: turn.ExportBatchId}
+		row, exists := rows[key]
+		if !exists {
+			row = apiRequestLogSessionAggregateRow{
+				Id: turn.Id, ExportBatchId: turn.ExportBatchId, SessionId: turn.SessionId,
+				Protocol: turn.Protocol, StartedAt: turn.StartedAt, CompletedAt: turn.CompletedAt,
+				UserId: turn.UserId, Username: turn.Username, TokenId: turn.TokenId, TokenName: turn.TokenName, ModelName: turn.ModelName,
+			}
+		} else {
+			row.Id = min(row.Id, turn.Id)
+			row.Protocol = min(row.Protocol, turn.Protocol)
+			row.StartedAt = min(row.StartedAt, turn.StartedAt)
+			row.CompletedAt = max(row.CompletedAt, turn.CompletedAt)
+			row.UserId = min(row.UserId, turn.UserId)
+			row.Username = min(row.Username, turn.Username)
+			row.TokenId = min(row.TokenId, turn.TokenId)
+			row.TokenName = min(row.TokenName, turn.TokenName)
+			row.ModelName = min(row.ModelName, turn.ModelName)
+		}
+		row.RequestCount += turn.RequestCount
+		row.ItemCount += turn.ItemCount
+		row.PromptTokens += turn.PromptTokens
+		row.CompletionTokens += turn.CompletionTokens
+		row.TokenUsed += turn.TokenUsed
+		row.Quota += turn.Quota
+		if turn.CompletionStatus != APIRequestLogTurnStatusCompleted {
+			row.IncompleteCount++
+		}
+		if turn.CompletionStatus == APIRequestLogTurnStatusOpen {
+			row.OpenCount++
+		}
+		if turn.Attribution == APIRequestLogTurnAttributionUnknown {
+			row.UnknownAttribution++
+		}
+		if turn.Attribution == APIRequestLogTurnAttributionInferred {
+			row.InferredAttribution++
+		}
+		rows[key] = row
+	}
+	return rows, nil
 }
 
 func GetAPIRequestLogSessionByAnchorId(db *gorm.DB, anchorId int64) (*APIRequestLogSessionDetail, error) {
@@ -166,35 +379,32 @@ func GetAPIRequestLogSessionByAnchorId(db *gorm.DB, anchorId int64) (*APIRequest
 func buildAPIRequestLogSessionGroupQuery(db *gorm.DB, params APIRequestLogTurnQueryParams) *gorm.DB {
 	params.StartIdx = 0
 	params.Num = 0
-	branchSQL := apiRequestLogSessionBranchSQL()
-	turns := buildAPIRequestLogTurnsQuery(db, params).
-		Select(apiRequestLogTurnsTable + ".*, " + branchSQL + " AS session_branch_id")
-	return db.Table("(?) AS "+apiRequestLogSessionTurnsAlias, turns).
+	return buildAPIRequestLogTurnsQuery(db, params).
 		Select(
-			"MIN(" + apiRequestLogSessionTurnsAlias + ".id) AS id, " +
-				apiRequestLogSessionTurnsAlias + ".session_branch_id AS export_batch_id, " +
-				apiRequestLogSessionTurnsAlias + ".session_id AS session_id, " +
-				"MIN(" + apiRequestLogSessionTurnsAlias + ".protocol) AS protocol, " +
-				"MIN(" + apiRequestLogSessionTurnsAlias + ".started_at) AS started_at, " +
-				"MAX(" + apiRequestLogSessionTurnsAlias + ".completed_at) AS completed_at, " +
-				"MIN(" + apiRequestLogSessionTurnsAlias + ".user_id) AS user_id, " +
-				"MIN(" + apiRequestLogSessionTurnsAlias + ".username) AS username, " +
-				"MIN(" + apiRequestLogSessionTurnsAlias + ".token_id) AS token_id, " +
-				"MIN(" + apiRequestLogSessionTurnsAlias + ".token_name) AS token_name, " +
-				"MIN(" + apiRequestLogSessionTurnsAlias + ".model_name) AS model_name, " +
-				"SUM(" + apiRequestLogSessionTurnsAlias + ".request_count) AS request_count, " +
-				"SUM(" + apiRequestLogSessionTurnsAlias + ".item_count) AS item_count, " +
-				"SUM(" + apiRequestLogSessionTurnsAlias + ".prompt_tokens) AS prompt_tokens, " +
-				"SUM(" + apiRequestLogSessionTurnsAlias + ".completion_tokens) AS completion_tokens, " +
-				"SUM(" + apiRequestLogSessionTurnsAlias + ".token_used) AS token_used, " +
-				"SUM(" + apiRequestLogSessionTurnsAlias + ".quota) AS quota, " +
-				"SUM(CASE WHEN " + apiRequestLogSessionTurnsAlias + ".completion_status <> '" + APIRequestLogTurnStatusCompleted + "' THEN 1 ELSE 0 END) AS incomplete_count, " +
-				"SUM(CASE WHEN " + apiRequestLogSessionTurnsAlias + ".completion_status = '" + APIRequestLogTurnStatusOpen + "' THEN 1 ELSE 0 END) AS open_count, " +
-				"SUM(CASE WHEN " + apiRequestLogSessionTurnsAlias + ".attribution = '" + APIRequestLogTurnAttributionUnknown + "' THEN 1 ELSE 0 END) AS unknown_attribution, " +
-				"SUM(CASE WHEN " + apiRequestLogSessionTurnsAlias + ".attribution = '" + APIRequestLogTurnAttributionInferred + "' THEN 1 ELSE 0 END) AS inferred_attribution").
-		Group(apiRequestLogSessionTurnsAlias + ".owner_fingerprint").
-		Group(apiRequestLogSessionTurnsAlias + ".session_id").
-		Group(apiRequestLogSessionTurnsAlias + ".session_branch_id")
+			"MIN(" + apiRequestLogTurnsTable + ".id) AS id, " +
+				apiRequestLogTurnsTable + ".export_batch_id AS export_batch_id, " +
+				apiRequestLogTurnsTable + ".session_id AS session_id, " +
+				"MIN(" + apiRequestLogTurnsTable + ".protocol) AS protocol, " +
+				"MIN(" + apiRequestLogTurnsTable + ".started_at) AS started_at, " +
+				"MAX(" + apiRequestLogTurnsTable + ".completed_at) AS completed_at, " +
+				"MIN(" + apiRequestLogTurnsTable + ".user_id) AS user_id, " +
+				"MIN(" + apiRequestLogTurnsTable + ".username) AS username, " +
+				"MIN(" + apiRequestLogTurnsTable + ".token_id) AS token_id, " +
+				"MIN(" + apiRequestLogTurnsTable + ".token_name) AS token_name, " +
+				"MIN(" + apiRequestLogTurnsTable + ".model_name) AS model_name, " +
+				"SUM(" + apiRequestLogTurnsTable + ".request_count) AS request_count, " +
+				"SUM(" + apiRequestLogTurnsTable + ".item_count) AS item_count, " +
+				"SUM(" + apiRequestLogTurnsTable + ".prompt_tokens) AS prompt_tokens, " +
+				"SUM(" + apiRequestLogTurnsTable + ".completion_tokens) AS completion_tokens, " +
+				"SUM(" + apiRequestLogTurnsTable + ".token_used) AS token_used, " +
+				"SUM(" + apiRequestLogTurnsTable + ".quota) AS quota, " +
+				"SUM(CASE WHEN " + apiRequestLogTurnsTable + ".completion_status <> '" + APIRequestLogTurnStatusCompleted + "' THEN 1 ELSE 0 END) AS incomplete_count, " +
+				"SUM(CASE WHEN " + apiRequestLogTurnsTable + ".completion_status = '" + APIRequestLogTurnStatusOpen + "' THEN 1 ELSE 0 END) AS open_count, " +
+				"SUM(CASE WHEN " + apiRequestLogTurnsTable + ".attribution = '" + APIRequestLogTurnAttributionUnknown + "' THEN 1 ELSE 0 END) AS unknown_attribution, " +
+				"SUM(CASE WHEN " + apiRequestLogTurnsTable + ".attribution = '" + APIRequestLogTurnAttributionInferred + "' THEN 1 ELSE 0 END) AS inferred_attribution").
+		Group(apiRequestLogTurnsTable + ".owner_fingerprint").
+		Group(apiRequestLogTurnsTable + ".session_id").
+		Group(apiRequestLogTurnsTable + ".export_batch_id")
 }
 
 func apiRequestLogSessionListItemFromAggregate(row apiRequestLogSessionAggregateRow) *APIRequestLogSessionListItem {
@@ -223,24 +433,22 @@ func apiRequestLogSessionListItemFromAggregate(row apiRequestLogSessionAggregate
 }
 
 func apiRequestLogSessionBranchSQL() string {
-	return "COALESCE(NULLIF(" + apiRequestLogTurnsTable + ".export_batch_id, 0), " +
-		"(SELECT MAX(session_branch_member.batch_id) FROM " + apiRequestLogExportMembersTable + " session_branch_member WHERE session_branch_member.turn_record_id = " + apiRequestLogTurnsTable + ".id), " +
-		"CASE WHEN " + apiRequestLogTurnsTable + ".exported_version > 0 THEN -1 ELSE 0 END)"
+	return apiRequestLogTurnsTable + ".export_batch_id"
 }
 
 func apiRequestLogSessionBranchForTurn(db *gorm.DB, turn *APIRequestLogTurn) (int64, error) {
 	if turn == nil || turn.Id <= 0 {
 		return 0, nil
 	}
-	if turn.ExportBatchId > 0 {
+	if turn.ExportBatchId != 0 {
 		return turn.ExportBatchId, nil
-	}
-	if turn.ExportedVersion > 0 {
-		return -1, nil
 	}
 	var member APIRequestLogExportMember
 	err := db.Select("batch_id").Where("turn_record_id = ?", turn.Id).First(&member).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
+		if turn.ExportedVersion > 0 {
+			return -1, nil
+		}
 		return 0, nil
 	}
 	if err != nil {
@@ -249,7 +457,10 @@ func apiRequestLogSessionBranchForTurn(db *gorm.DB, turn *APIRequestLogTurn) (in
 	if member.BatchId > 0 {
 		return member.BatchId, nil
 	}
-	return -1, nil
+	if turn.ExportedVersion > 0 {
+		return -1, nil
+	}
+	return 0, nil
 }
 
 func applyAPIRequestLogSessionBranch(query *gorm.DB, branchId int64) *gorm.DB {
@@ -257,7 +468,7 @@ func applyAPIRequestLogSessionBranch(query *gorm.DB, branchId int64) *gorm.DB {
 	case branchId > 0:
 		return query.Where("("+apiRequestLogTurnsTable+".export_batch_id = ? OR ("+apiRequestLogTurnsTable+".export_batch_id = 0 AND EXISTS (SELECT 1 FROM "+apiRequestLogExportMembersTable+" session_member WHERE session_member.turn_record_id = "+apiRequestLogTurnsTable+".id AND session_member.batch_id = ?)))", branchId, branchId)
 	case branchId < 0:
-		return query.Where(apiRequestLogTurnExportedSQL()).Where(apiRequestLogTurnsTable + ".export_batch_id = 0")
+		return query.Where("(" + apiRequestLogTurnsTable + ".export_batch_id < 0 OR (" + apiRequestLogTurnsTable + ".export_batch_id = 0 AND " + apiRequestLogTurnsTable + ".exported_version > 0))")
 	default:
 		return query.Where("NOT " + apiRequestLogTurnExportedSQL())
 	}

@@ -27,9 +27,26 @@ func TestAPIRequestLogSessionGroupQuerySupportsMySQLFullGroupBy(t *testing.T) {
 		return buildAPIRequestLogSessionGroupQuery(tx, APIRequestLogTurnQueryParams{}).Find(&rows)
 	})
 
-	require.Contains(t, sql, "AS session_branch_id")
-	require.Contains(t, sql, "GROUP BY `request_log_session_turns`.`owner_fingerprint`,`request_log_session_turns`.`session_id`,`request_log_session_turns`.`session_branch_id`")
-	require.NotContains(t, sql, "GROUP BY COALESCE")
+	require.Contains(t, sql, "api_request_log_turns.export_batch_id AS export_batch_id")
+	require.Contains(t, sql, "GROUP BY `api_request_log_turns`.`owner_fingerprint`,`api_request_log_turns`.`session_id`,`api_request_log_turns`.`export_batch_id`")
+	require.NotContains(t, sql, "session_branch_member")
+}
+
+func TestBackfillAPIRequestLogSessionBranches(t *testing.T) {
+	db := setupAPIRequestLogTurnTestDB(t)
+	batch := APIRequestLogExportBatch{Tag: "legacy-branch", Status: APIRequestLogExportBatchStatusCompleted}
+	require.NoError(t, db.Create(&batch).Error)
+	withMember := createAPIRequestLogExportTestTurn(t, db, "legacy-session", "member-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 100)
+	withoutMember := createAPIRequestLogExportTestTurn(t, db, "legacy-session", "orphan-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 200)
+	require.NoError(t, db.Model(&APIRequestLogTurn{}).Where("id IN ?", []int64{withMember.Id, withoutMember.Id}).Update("exported_version", 1).Error)
+	require.NoError(t, db.Create(&APIRequestLogExportMember{BatchId: batch.Id, TurnRecordId: withMember.Id, Sequence: 1}).Error)
+
+	require.NoError(t, BackfillAPIRequestLogSessionBranches(db))
+
+	require.NoError(t, db.First(&withMember, withMember.Id).Error)
+	require.Equal(t, batch.Id, withMember.ExportBatchId)
+	require.NoError(t, db.First(&withoutMember, withoutMember.Id).Error)
+	require.Equal(t, int64(-1), withoutMember.ExportBatchId)
 }
 
 func createAPIRequestLogExportTestTurn(t *testing.T, db *gorm.DB, sessionId, turnId, status, attribution string, completedAt int64) APIRequestLogTurn {

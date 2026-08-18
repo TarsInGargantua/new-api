@@ -116,6 +116,9 @@ func main() {
 		if err := model.EnsureAPIRequestLogTable(); err != nil {
 			log.Fatalf("ensure target tables: %v", err)
 		}
+		if err := model.BackfillAPIRequestLogSessionBranches(targetDB); err != nil {
+			log.Fatalf("backfill session branches: %v", err)
+		}
 	}
 	if *initOnly {
 		log.Print("target tables initialized")

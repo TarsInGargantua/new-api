@@ -111,7 +111,7 @@ REQUEST_LOG_SQL_DSN='newapi_request_log_app:<password>@tcp(127.0.0.1:3306)/newap
   ./request-log-migrate -init-only
 ```
 
-Existing deployments must rerun this initialization with the application DSN before starting the upgraded Viewer. It adds `api_request_log_turns.export_batch_id`, which freezes each exported session snapshot into its original batch branch. Then apply the updated Viewer grants above.
+Existing deployments must rerun this initialization with the application DSN before starting the upgraded Viewer. It adds `api_request_log_turns.export_batch_id`, backfills historical export memberships into persistent session branches, and marks older exported rows without membership as a legacy frozen branch. Then apply the updated Viewer grants above.
 
 Verify MySQL memory and lock health independently:
 

@@ -160,6 +160,31 @@ func EnsureAPIRequestLogExportTables(db *gorm.DB) error {
 	return db.AutoMigrate(&APIRequestLogExportBatch{}, &APIRequestLogExportMember{})
 }
 
+func BackfillAPIRequestLogSessionBranches(db *gorm.DB) error {
+	if db == nil {
+		return errors.New("request log database is not initialized")
+	}
+	var batchIds []int64
+	if err := db.Model(&APIRequestLogExportMember{}).
+		Distinct("batch_id").Where("batch_id > 0").Order("batch_id ASC").Pluck("batch_id", &batchIds).Error; err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, batchId := range batchIds {
+			memberTurnIds := tx.Model(&APIRequestLogExportMember{}).
+				Select("turn_record_id").Where("batch_id = ?", batchId)
+			if err := tx.Model(&APIRequestLogTurn{}).
+				Where("export_batch_id = 0 AND id IN (?)", memberTurnIds).
+				Update("export_batch_id", batchId).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Model(&APIRequestLogTurn{}).
+			Where("export_batch_id = 0 AND exported_version > 0").
+			Update("export_batch_id", -1).Error
+	})
+}
+
 func EnsureAPIRequestLogMaterializedTables(db *gorm.DB) error {
 	if err := EnsureAPIRequestLogTurnTables(db); err != nil {
 		return err
@@ -1192,7 +1217,7 @@ func apiRequestLogExportMemberExistsSQL() string {
 }
 
 func apiRequestLogTurnExportedSQL() string {
-	return "(" + apiRequestLogTurnsTable + ".export_batch_id > 0 OR " + apiRequestLogTurnsTable + ".exported_version > 0 OR " + apiRequestLogExportMemberExistsSQL() + ")"
+	return "(" + apiRequestLogTurnsTable + ".export_batch_id <> 0 OR " + apiRequestLogTurnsTable + ".exported_version > 0 OR " + apiRequestLogExportMemberExistsSQL() + ")"
 }
 
 func apiRequestLogTurnAvailableForExportSQL() string {
