@@ -122,8 +122,9 @@ func (row apiRequestLogSessionKeyRow) key() apiRequestLogSessionKey {
 }
 
 type apiRequestLogSessionCountCacheEntry struct {
-	Total     int64
-	ExpiresAt time.Time
+	Total      int64
+	ExpiresAt  time.Time
+	Refreshing bool
 }
 
 var apiRequestLogSessionCountCache = struct {
@@ -176,11 +177,24 @@ func countAPIRequestLogSessions(db *gorm.DB, params APIRequestLogTurnQueryParams
 	cacheKey := fmt.Sprintf("%p|%s|%s", db, db.Dialector.Name(), apiRequestLogTurnQueryCacheKey(params))
 	now := time.Now()
 	apiRequestLogSessionCountCache.Lock()
-	defer apiRequestLogSessionCountCache.Unlock()
-	if cached, ok := apiRequestLogSessionCountCache.entries[cacheKey]; ok && now.Before(cached.ExpiresAt) {
+	if cached, ok := apiRequestLogSessionCountCache.entries[cacheKey]; ok {
+		if now.After(cached.ExpiresAt) && !cached.Refreshing {
+			cached.Refreshing = true
+			apiRequestLogSessionCountCache.entries[cacheKey] = cached
+			go refreshAPIRequestLogSessionCount(db, params, cacheKey)
+		}
+		apiRequestLogSessionCountCache.Unlock()
 		return cached.Total, nil
 	}
+	total, err := queryAPIRequestLogSessionCount(db, params)
+	if err == nil {
+		storeAPIRequestLogSessionCount(cacheKey, total, now)
+	}
+	apiRequestLogSessionCountCache.Unlock()
+	return total, err
+}
 
+func queryAPIRequestLogSessionCount(db *gorm.DB, params APIRequestLogTurnQueryParams) (int64, error) {
 	query := buildAPIRequestLogTurnsQuery(db, params)
 	var total int64
 	var err error
@@ -200,13 +214,40 @@ func countAPIRequestLogSessions(db *gorm.DB, params APIRequestLogTurnQueryParams
 	if err != nil {
 		return 0, err
 	}
-	apiRequestLogSessionCountCache.entries[cacheKey] = apiRequestLogSessionCountCacheEntry{Total: total, ExpiresAt: now.Add(15 * time.Second)}
 	return total, nil
+}
+
+func refreshAPIRequestLogSessionCount(db *gorm.DB, params APIRequestLogTurnQueryParams, cacheKey string) {
+	total, err := queryAPIRequestLogSessionCount(db, params)
+	now := time.Now()
+	apiRequestLogSessionCountCache.Lock()
+	defer apiRequestLogSessionCountCache.Unlock()
+	if err != nil {
+		if cached, ok := apiRequestLogSessionCountCache.entries[cacheKey]; ok {
+			cached.Refreshing = false
+			cached.ExpiresAt = now.Add(time.Minute)
+			apiRequestLogSessionCountCache.entries[cacheKey] = cached
+		}
+		return
+	}
+	storeAPIRequestLogSessionCount(cacheKey, total, now)
+}
+
+func storeAPIRequestLogSessionCount(cacheKey string, total int64, now time.Time) {
+	if len(apiRequestLogSessionCountCache.entries) >= 256 {
+		for key, entry := range apiRequestLogSessionCountCache.entries {
+			if now.After(entry.ExpiresAt) && !entry.Refreshing {
+				delete(apiRequestLogSessionCountCache.entries, key)
+			}
+		}
+	}
+	apiRequestLogSessionCountCache.entries[cacheKey] = apiRequestLogSessionCountCacheEntry{Total: total, ExpiresAt: now.Add(5 * time.Minute)}
 }
 
 func apiRequestLogTurnQueryCacheKey(params APIRequestLogTurnQueryParams) string {
 	return strings.Join([]string{
 		params.SessionId,
+		params.TurnId,
 		params.Protocol,
 		strings.Join(params.Protocols, "\x1f"),
 		params.ModelName,
