@@ -95,6 +95,8 @@ type apiRequestLogSessionAggregateRow struct {
 	InferredAttribution int64
 }
 
+const apiRequestLogSessionTurnsAlias = "request_log_session_turns"
+
 func GetAPIRequestLogSessions(db *gorm.DB, params APIRequestLogTurnQueryParams) (items []*APIRequestLogSessionListItem, total int64, err error) {
 	if db == nil {
 		return nil, 0, errors.New("request log database is not initialized")
@@ -116,8 +118,8 @@ func GetAPIRequestLogSessions(db *gorm.DB, params APIRequestLogTurnQueryParams) 
 	}
 	var rows []apiRequestLogSessionAggregateRow
 	if err = grouped.
-		Order("MAX(" + apiRequestLogTurnsTable + ".completed_at) DESC").
-		Order("MAX(" + apiRequestLogTurnsTable + ".id) DESC").
+		Order("completed_at DESC").
+		Order("id DESC").
 		Limit(limit).Offset(offset).Scan(&rows).Error; err != nil {
 		return nil, 0, err
 	}
@@ -165,32 +167,34 @@ func buildAPIRequestLogSessionGroupQuery(db *gorm.DB, params APIRequestLogTurnQu
 	params.StartIdx = 0
 	params.Num = 0
 	branchSQL := apiRequestLogSessionBranchSQL()
-	return buildAPIRequestLogTurnsQuery(db, params).
+	turns := buildAPIRequestLogTurnsQuery(db, params).
+		Select(apiRequestLogTurnsTable + ".*, " + branchSQL + " AS session_branch_id")
+	return db.Table("(?) AS "+apiRequestLogSessionTurnsAlias, turns).
 		Select(
-			"MIN(" + apiRequestLogTurnsTable + ".id) AS id, " +
-				branchSQL + " AS export_batch_id, " +
-				apiRequestLogTurnsTable + ".session_id AS session_id, " +
-				"MIN(" + apiRequestLogTurnsTable + ".protocol) AS protocol, " +
-				"MIN(" + apiRequestLogTurnsTable + ".started_at) AS started_at, " +
-				"MAX(" + apiRequestLogTurnsTable + ".completed_at) AS completed_at, " +
-				"MIN(" + apiRequestLogTurnsTable + ".user_id) AS user_id, " +
-				"MIN(" + apiRequestLogTurnsTable + ".username) AS username, " +
-				"MIN(" + apiRequestLogTurnsTable + ".token_id) AS token_id, " +
-				"MIN(" + apiRequestLogTurnsTable + ".token_name) AS token_name, " +
-				"MIN(" + apiRequestLogTurnsTable + ".model_name) AS model_name, " +
-				"SUM(" + apiRequestLogTurnsTable + ".request_count) AS request_count, " +
-				"SUM(" + apiRequestLogTurnsTable + ".item_count) AS item_count, " +
-				"SUM(" + apiRequestLogTurnsTable + ".prompt_tokens) AS prompt_tokens, " +
-				"SUM(" + apiRequestLogTurnsTable + ".completion_tokens) AS completion_tokens, " +
-				"SUM(" + apiRequestLogTurnsTable + ".token_used) AS token_used, " +
-				"SUM(" + apiRequestLogTurnsTable + ".quota) AS quota, " +
-				"SUM(CASE WHEN " + apiRequestLogTurnsTable + ".completion_status <> '" + APIRequestLogTurnStatusCompleted + "' THEN 1 ELSE 0 END) AS incomplete_count, " +
-				"SUM(CASE WHEN " + apiRequestLogTurnsTable + ".completion_status = '" + APIRequestLogTurnStatusOpen + "' THEN 1 ELSE 0 END) AS open_count, " +
-				"SUM(CASE WHEN " + apiRequestLogTurnsTable + ".attribution = '" + APIRequestLogTurnAttributionUnknown + "' THEN 1 ELSE 0 END) AS unknown_attribution, " +
-				"SUM(CASE WHEN " + apiRequestLogTurnsTable + ".attribution = '" + APIRequestLogTurnAttributionInferred + "' THEN 1 ELSE 0 END) AS inferred_attribution").
-		Group(apiRequestLogTurnsTable + ".owner_fingerprint").
-		Group(apiRequestLogTurnsTable + ".session_id").
-		Group(branchSQL)
+			"MIN(" + apiRequestLogSessionTurnsAlias + ".id) AS id, " +
+				apiRequestLogSessionTurnsAlias + ".session_branch_id AS export_batch_id, " +
+				apiRequestLogSessionTurnsAlias + ".session_id AS session_id, " +
+				"MIN(" + apiRequestLogSessionTurnsAlias + ".protocol) AS protocol, " +
+				"MIN(" + apiRequestLogSessionTurnsAlias + ".started_at) AS started_at, " +
+				"MAX(" + apiRequestLogSessionTurnsAlias + ".completed_at) AS completed_at, " +
+				"MIN(" + apiRequestLogSessionTurnsAlias + ".user_id) AS user_id, " +
+				"MIN(" + apiRequestLogSessionTurnsAlias + ".username) AS username, " +
+				"MIN(" + apiRequestLogSessionTurnsAlias + ".token_id) AS token_id, " +
+				"MIN(" + apiRequestLogSessionTurnsAlias + ".token_name) AS token_name, " +
+				"MIN(" + apiRequestLogSessionTurnsAlias + ".model_name) AS model_name, " +
+				"SUM(" + apiRequestLogSessionTurnsAlias + ".request_count) AS request_count, " +
+				"SUM(" + apiRequestLogSessionTurnsAlias + ".item_count) AS item_count, " +
+				"SUM(" + apiRequestLogSessionTurnsAlias + ".prompt_tokens) AS prompt_tokens, " +
+				"SUM(" + apiRequestLogSessionTurnsAlias + ".completion_tokens) AS completion_tokens, " +
+				"SUM(" + apiRequestLogSessionTurnsAlias + ".token_used) AS token_used, " +
+				"SUM(" + apiRequestLogSessionTurnsAlias + ".quota) AS quota, " +
+				"SUM(CASE WHEN " + apiRequestLogSessionTurnsAlias + ".completion_status <> '" + APIRequestLogTurnStatusCompleted + "' THEN 1 ELSE 0 END) AS incomplete_count, " +
+				"SUM(CASE WHEN " + apiRequestLogSessionTurnsAlias + ".completion_status = '" + APIRequestLogTurnStatusOpen + "' THEN 1 ELSE 0 END) AS open_count, " +
+				"SUM(CASE WHEN " + apiRequestLogSessionTurnsAlias + ".attribution = '" + APIRequestLogTurnAttributionUnknown + "' THEN 1 ELSE 0 END) AS unknown_attribution, " +
+				"SUM(CASE WHEN " + apiRequestLogSessionTurnsAlias + ".attribution = '" + APIRequestLogTurnAttributionInferred + "' THEN 1 ELSE 0 END) AS inferred_attribution").
+		Group(apiRequestLogSessionTurnsAlias + ".owner_fingerprint").
+		Group(apiRequestLogSessionTurnsAlias + ".session_id").
+		Group(apiRequestLogSessionTurnsAlias + ".session_branch_id")
 }
 
 func apiRequestLogSessionListItemFromAggregate(row apiRequestLogSessionAggregateRow) *APIRequestLogSessionListItem {

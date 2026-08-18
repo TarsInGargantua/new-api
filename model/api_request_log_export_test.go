@@ -11,8 +11,26 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
+
+func TestAPIRequestLogSessionGroupQuerySupportsMySQLFullGroupBy(t *testing.T) {
+	db, err := gorm.Open(mysql.New(mysql.Config{
+		DSN:                       "gorm:gorm@tcp(127.0.0.1:3306)/gorm?charset=utf8mb4&parseTime=True&loc=Local",
+		SkipInitializeWithVersion: true,
+	}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	require.NoError(t, err)
+
+	sql := db.ToSQL(func(tx *gorm.DB) *gorm.DB {
+		var rows []apiRequestLogSessionAggregateRow
+		return buildAPIRequestLogSessionGroupQuery(tx, APIRequestLogTurnQueryParams{}).Find(&rows)
+	})
+
+	require.Contains(t, sql, "AS session_branch_id")
+	require.Contains(t, sql, "GROUP BY `request_log_session_turns`.`owner_fingerprint`,`request_log_session_turns`.`session_id`,`request_log_session_turns`.`session_branch_id`")
+	require.NotContains(t, sql, "GROUP BY COALESCE")
+}
 
 func createAPIRequestLogExportTestTurn(t *testing.T, db *gorm.DB, sessionId, turnId, status, attribution string, completedAt int64) APIRequestLogTurn {
 	t.Helper()
