@@ -22,8 +22,8 @@ type requestLogViewerServer struct {
 	exportMutationMu sync.Mutex
 }
 
-func (s *requestLogViewerServer) serveTurns(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/api/turns" {
+func (s *requestLogViewerServer) serveSessions(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/sessions" {
 		http.NotFound(w, r)
 		return
 	}
@@ -31,25 +31,25 @@ func (s *requestLogViewerServer) serveTurns(w http.ResponseWriter, r *http.Reque
 		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	params, page, pageSize := turnQuery(r, 50)
-	items, total, err := model.GetAPIRequestLogTurns(s.db, params)
+	params, page, pageSize := sessionQuery(r, 50)
+	items, total, err := model.GetAPIRequestLogSessions(s.db, params)
 	writeAPI(w, pageData{Items: items, Total: total, Page: page, PageSize: pageSize}, err)
 }
 
-func (s *requestLogViewerServer) serveTurnDetail(w http.ResponseWriter, r *http.Request) {
+func (s *requestLogViewerServer) serveSessionDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	idText := strings.TrimPrefix(r.URL.Path, "/api/turns/")
+	idText := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
 	id, err := strconv.ParseInt(idText, 10, 64)
 	if err != nil || id <= 0 {
-		writeAPIError(w, http.StatusBadRequest, "invalid turn id")
+		writeAPIError(w, http.StatusBadRequest, "invalid session id")
 		return
 	}
-	detail, err := model.GetAPIRequestLogTurnById(s.db, id)
+	detail, err := model.GetAPIRequestLogSessionByAnchorId(s.db, id)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		writeAPIError(w, http.StatusNotFound, "turn not found")
+		writeAPIError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	writeAPI(w, detail, err)
@@ -64,8 +64,8 @@ func (s *requestLogViewerServer) serveExportPreview(w http.ResponseWriter, r *ht
 		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	params, _, _ := turnQuery(r, 50)
-	if !hasExplicitTurnSelection(params) {
+	params, _, _ := sessionQuery(r, 50)
+	if !hasExplicitSessionSelection(params) {
 		writeAPI(w, &model.APIRequestLogExportPreview{}, nil)
 		return
 	}
@@ -92,9 +92,9 @@ func (s *requestLogViewerServer) serveExportBatches(w http.ResponseWriter, r *ht
 		})
 		writeAPI(w, pageData{Items: items, Total: total, Page: page, PageSize: pageSize}, err)
 	case http.MethodPost:
-		params, _, _ := turnQuery(r, 50)
-		if !hasExplicitTurnSelection(params) {
-			writeAPIError(w, http.StatusBadRequest, "select at least one turn filter before creating an export batch")
+		params, _, _ := sessionQuery(r, 50)
+		if !hasExplicitSessionSelection(params) {
+			writeAPIError(w, http.StatusBadRequest, "select at least one session filter before creating an export batch")
 			return
 		}
 		batch, err := model.CreateAPIRequestLogExportBatch(s.db, params, queryBool(r.URL.Query().Get("include_inferred")))
@@ -395,7 +395,7 @@ func (s *requestLogViewerServer) serveExportDownload(w http.ResponseWriter, r *h
 	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), file)
 }
 
-func turnQuery(r *http.Request, defaultPageSize int) (model.APIRequestLogTurnQueryParams, int, int) {
+func sessionQuery(r *http.Request, defaultPageSize int) (model.APIRequestLogTurnQueryParams, int, int) {
 	q := r.URL.Query()
 	page := queryInt(q.Get("p"), 1)
 	pageSize := queryInt(q.Get("page_size"), defaultPageSize)
@@ -409,7 +409,6 @@ func turnQuery(r *http.Request, defaultPageSize int) (model.APIRequestLogTurnQue
 		StartTimestamp:     queryInt64(q.Get("start_timestamp"), 0),
 		EndTimestamp:       queryInt64(q.Get("end_timestamp"), 0),
 		SessionId:          q.Get("session_id"),
-		TurnId:             q.Get("turn_id"),
 		Protocol:           q.Get("protocol"),
 		Protocols:          queryList(q, "protocol"),
 		ModelName:          q.Get("model_name"),
@@ -433,11 +432,10 @@ func turnQuery(r *http.Request, defaultPageSize int) (model.APIRequestLogTurnQue
 	return params, page, pageSize
 }
 
-func hasExplicitTurnSelection(params model.APIRequestLogTurnQueryParams) bool {
+func hasExplicitSessionSelection(params model.APIRequestLogTurnQueryParams) bool {
 	return params.StartTimestamp > 0 ||
 		params.EndTimestamp > 0 ||
 		strings.TrimSpace(params.SessionId) != "" ||
-		strings.TrimSpace(params.TurnId) != "" ||
 		strings.TrimSpace(params.Protocol) != "" ||
 		len(params.Protocols) > 0 ||
 		strings.TrimSpace(params.ModelName) != "" ||

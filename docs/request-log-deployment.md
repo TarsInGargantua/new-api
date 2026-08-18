@@ -5,7 +5,7 @@ This deployment splits request-log storage from the main application database:
 - `logs` remains in the existing main/log database.
 - `api_request_logs`, `api_request_log_items`, and the durable materialization queue use `REQUEST_LOG_SQL_DSN`.
 - The gateway synchronously persists raw parent/item rows; a remote worker materializes session turns afterward.
-- The standalone viewer reads turn data and has narrowly scoped write access to persistent export batch tables.
+- The standalone viewer presents immutable session snapshots and has narrowly scoped write access to persistent export state.
 
 ## Main Service Env
 
@@ -94,13 +94,13 @@ CREATE USER IF NOT EXISTS 'request_log_viewer'@'localhost' IDENTIFIED BY '<stron
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES ON newapi_request_logs.* TO 'newapi_request_log_app'@'%';
 REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_turns TO 'request_log_viewer'@'localhost';
-GRANT UPDATE (exported_version) ON newapi_request_logs.api_request_log_turns TO 'request_log_viewer'@'localhost';
+GRANT UPDATE (exported_version, export_batch_id) ON newapi_request_logs.api_request_log_turns TO 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_turn_requests TO 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_turn_items TO 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_logs TO 'request_log_viewer'@'localhost';
 GRANT SELECT ON newapi_request_logs.api_request_log_items TO 'request_log_viewer'@'localhost';
-GRANT SELECT, INSERT, UPDATE ON newapi_request_logs.api_request_log_export_batches TO 'request_log_viewer'@'localhost';
-GRANT SELECT, INSERT, UPDATE ON newapi_request_logs.api_request_log_export_members TO 'request_log_viewer'@'localhost';
+GRANT SELECT, INSERT, UPDATE, DELETE ON newapi_request_logs.api_request_log_export_batches TO 'request_log_viewer'@'localhost';
+GRANT SELECT, INSERT, UPDATE, DELETE ON newapi_request_logs.api_request_log_export_members TO 'request_log_viewer'@'localhost';
 FLUSH PRIVILEGES;
 ```
 
@@ -110,6 +110,8 @@ Initialize tables:
 REQUEST_LOG_SQL_DSN='newapi_request_log_app:<password>@tcp(127.0.0.1:3306)/newapi_request_logs?charset=utf8mb4&parseTime=true&loc=Local' \
   ./request-log-migrate -init-only
 ```
+
+Existing deployments must rerun this initialization with the application DSN before starting the upgraded Viewer. It adds `api_request_log_turns.export_batch_id`, which freezes each exported session snapshot into its original batch branch. Then apply the updated Viewer grants above.
 
 Verify MySQL memory and lock health independently:
 
@@ -226,17 +228,17 @@ WantedBy=multi-user.target
 Viewer endpoints:
 
 - `GET /api/status`
-- `GET /api/turns?p=1&page_size=100`
-- `GET /api/turns/:id`
+- `GET /api/sessions?p=1&page_size=100`
+- `GET /api/sessions/:id`
 - `GET /api/export-preview`
 - `POST /api/export-batches`
 - `GET /api/export-batches`
 - `GET /api/export-batches/:tag/download`
 - `POST /api/export-batches/:tag/retry`
 
-Turn time filters use `completed_at >= start_timestamp AND completed_at < end_timestamp`. Export batches ignore list pagination, default to exact completed turns, and globally exclude turns claimed by earlier batches. Add `include_inferred=true` only when inferred completed turns are intentionally included. Encrypted reasoning is never exported. The legacy `/api/export.jsonl` endpoint returns `410 Gone`.
+Session time filters use `completed_at >= start_timestamp AND completed_at < end_timestamp`. Export batches ignore list pagination and write one immutable JSONL row per selected session snapshot. Internal materialized records claimed by an earlier batch are excluded globally; later content with the same session ID remains in a new unexported branch and cannot mutate the earlier snapshot. Add `include_inferred=true` only when inferred completed data is intentionally included. Encrypted reasoning is never exported. The legacy `/api/export.jsonl` endpoint returns `410 Gone`.
 
-Resetting a completed historical export releases its source turns for a future export and deletes its JSONL artifact. The batch history and checksum remain visible, but the deleted artifact cannot be downloaded again.
+Resetting a completed historical export releases its source records for a future session export and deletes its JSONL artifact. The batch history and checksum remain visible, but the deleted artifact cannot be downloaded again.
 
 ## Historical Turn Organizer
 

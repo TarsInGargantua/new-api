@@ -63,8 +63,8 @@ func main() {
 	mux.HandleFunc("/api/filter-options", serveFilterOptions)
 	mux.HandleFunc("/api/logs", serveLegacyRequestLogs)
 	mux.HandleFunc("/api/logs/", serveLegacyRequestLogs)
-	mux.HandleFunc("/api/turns", server.serveTurns)
-	mux.HandleFunc("/api/turns/", server.serveTurnDetail)
+	mux.HandleFunc("/api/sessions", server.serveSessions)
+	mux.HandleFunc("/api/sessions/", server.serveSessionDetail)
 	mux.HandleFunc("/api/export-preview", server.serveExportPreview)
 	mux.HandleFunc("/api/export-batches", server.serveExportBatches)
 	mux.HandleFunc("/api/export-batches/", server.serveExportBatchAction)
@@ -88,8 +88,8 @@ func serveIndex(w http.ResponseWriter, r *http.Request) {
 
 func serveStatus(w http.ResponseWriter, r *http.Request) {
 	type viewerStatus struct {
-		HasTurnTable        bool   `json:"has_turn_table"`
-		TurnCount           int64  `json:"turn_count"`
+		HasSessionData      bool   `json:"has_session_data"`
+		SessionCount        int64  `json:"session_count"`
 		RequestLogDBDialect string `json:"request_log_db_dialect,omitempty"`
 	}
 	result := viewerStatus{}
@@ -100,10 +100,10 @@ func serveStatus(w http.ResponseWriter, r *http.Request) {
 	if model.REQUEST_LOG_DB.Dialector != nil {
 		result.RequestLogDBDialect = model.REQUEST_LOG_DB.Dialector.Name()
 	}
-	result.HasTurnTable = model.REQUEST_LOG_DB.Migrator().HasTable(&model.APIRequestLogTurn{})
+	result.HasSessionData = model.REQUEST_LOG_DB.Migrator().HasTable(&model.APIRequestLogTurn{})
 	var err error
-	if result.HasTurnTable {
-		err = model.REQUEST_LOG_DB.Model(&model.APIRequestLogTurn{}).Count(&result.TurnCount).Error
+	if result.HasSessionData {
+		_, result.SessionCount, err = model.GetAPIRequestLogSessions(model.REQUEST_LOG_DB, model.APIRequestLogTurnQueryParams{Num: 1})
 	}
 	writeAPI(w, result, err)
 }
@@ -118,11 +118,11 @@ func serveFilterOptions(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveLegacyRequestLogs(w http.ResponseWriter, r *http.Request) {
-	writeAPIError(w, http.StatusGone, "request-level views are disabled; use /api/turns")
+	writeAPIError(w, http.StatusGone, "request-level views are disabled; use /api/sessions")
 }
 
 func serveJSONL(w http.ResponseWriter, r *http.Request) {
-	writeAPIError(w, http.StatusGone, "request-level export is disabled; create a turn export batch")
+	writeAPIError(w, http.StatusGone, "request-level export is disabled; create a session export batch")
 }
 
 func queryList(values map[string][]string, key string) []string {
@@ -194,11 +194,11 @@ func firstNonEmpty(values ...string) string {
 }
 
 const indexHTML = `<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Turn Log Viewer</title>
+  <title>Session Log Viewer</title>
   <style>
     :root {
       color-scheme: dark;
@@ -1441,11 +1441,11 @@ const indexHTML = `<!doctype html>
       <div class="mark" aria-hidden="true"></div>
       <div class="brand-copy">
         <div class="eyebrow">Request intelligence</div>
-        <strong>Turn Log Viewer</strong>
+        <strong>Session Log Viewer</strong>
       </div>
     </div>
     <nav class="workspace-nav" aria-label="Workspace">
-      <a id="turnNav" class="nav-link active" href="#turns" aria-current="page" title="Turn data"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18M3 9h18M3 15h18"/></svg></span><span class="nav-label">Turn data</span></a>
+      <a id="turnNav" class="nav-link active" href="#sessions" aria-current="page" title="Session data"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18M3 9h18M3 15h18"/></svg></span><span class="nav-label">Session data</span></a>
       <a id="exportNav" class="nav-link" href="#exports" title="Exports"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></span><span class="nav-label">Exports</span></a>
     </nav>
     <div class="topbar-meta">
@@ -1459,7 +1459,7 @@ const indexHTML = `<!doctype html>
     <aside class="turn-list">
       <div class="filters">
         <div class="filter-heading">
-          <strong>Explore turns</strong>
+          <strong>Explore sessions</strong>
           <div class="filter-heading-tools"><button id="advancedToggle" class="advanced-toggle" type="button" aria-expanded="false" aria-controls="advancedFilters">More filters <span id="advancedCount" class="filter-count" hidden></span><span class="toggle-caret" aria-hidden="true"></span></button><button id="clearFilters" class="clear-filters" type="button">Reset</button></div>
         </div>
         <div class="quick-filters">
@@ -1472,7 +1472,6 @@ const indexHTML = `<!doctype html>
             <div class="select-menu" id="userMenu" role="group" aria-label="User options"></div>
           </div>
           <label class="filter-control"><span class="sr-only">Session ID</span><input id="sessionFilter" type="search" placeholder="Session ID"></label>
-          <label class="filter-control"><span class="sr-only">Turn ID</span><input id="turnFilter" type="search" placeholder="Turn ID"></label>
         </div>
         <div id="advancedFilters" class="advanced-filters" hidden>
           <label class="filter-control"><span>Confidence</span><select id="attributionFilter" aria-label="Attribution">
@@ -1481,7 +1480,7 @@ const indexHTML = `<!doctype html>
             <option value="inferred">Inferred</option>
             <option value="unknown">Unknown</option>
           </select></label>
-          <label class="filter-control"><span>Turn state</span><select id="turnStatusFilter" aria-label="Turn status">
+          <label class="filter-control"><span>Session state</span><select id="turnStatusFilter" aria-label="Session status">
             <option value="">All states</option>
             <option value="completed">Completed</option>
             <option value="open">Open</option>
@@ -1501,7 +1500,7 @@ const indexHTML = `<!doctype html>
       </div>
       <div class="list-scroll">
         <table>
-          <thead><tr><th scope="col">Ended</th><th scope="col">Session / turn</th><th scope="col">Model</th><th scope="col">User</th><th scope="col">State</th></tr></thead>
+          <thead><tr><th scope="col">Ended</th><th scope="col">Session</th><th scope="col">Model</th><th scope="col">User</th><th scope="col">State</th></tr></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>
@@ -1515,17 +1514,17 @@ const indexHTML = `<!doctype html>
         </div>
       </div>
     </aside>
-    <section id="detail" class="detail"><div class="empty empty-detail"><div class="empty-orbit" aria-hidden="true"></div><strong>No turn selected</strong></div></section>
+    <section id="detail" class="detail"><div class="empty empty-detail"><div class="empty-orbit" aria-hidden="true"></div><strong>No session selected</strong></div></section>
   </main>
   <section id="exportsView" class="workspace-view exports-view" hidden>
     <div class="export-body">
       <section class="export-overview">
         <div class="export-readiness">
           <div class="section-kicker">Current selection</div>
-          <div id="exportPreview" class="export-preview">Analyzing eligible turns...</div>
+          <div id="exportPreview" class="export-preview">Analyzing eligible sessions...</div>
         </div>
         <div class="export-controls">
-          <label class="toggle"><input id="includeInferred" type="checkbox"><span>Include inferred completed turns</span></label>
+          <label class="toggle"><input id="includeInferred" type="checkbox"><span>Include inferred completed sessions</span></label>
           <button id="createExport" class="create-export" type="button">Create export batch</button>
         </div>
       </section>
@@ -1546,7 +1545,6 @@ const indexHTML = `<!doctype html>
     const clearTimeEl = document.getElementById('clearTime')
     const clearFiltersEl = document.getElementById('clearFilters')
     const sessionFilterEl = document.getElementById('sessionFilter')
-    const turnFilterEl = document.getElementById('turnFilter')
     const attributionFilterEl = document.getElementById('attributionFilter')
     const turnStatusFilterEl = document.getElementById('turnStatusFilter')
     const exportedFilterEl = document.getElementById('exportedFilter')
@@ -1614,12 +1612,12 @@ const indexHTML = `<!doctype html>
     const localizedError = value => String(value || '')
     const detailLoadingHTML = () => [
       '<div class="loading-card" aria-live="polite">',
-      '<div class="loading-copy"><span class="loader"></span><span>Loading turn</span></div>',
+      '<div class="loading-copy"><span class="loader"></span><span>Loading session</span></div>',
       '<div class="loading-lines"><i></i><i></i><i></i></div>',
       '</div>'
     ].join('')
-    const detailErrorHTML = message => '<div class="empty">Failed to load turn: ' + esc(localizedError(message) || 'unknown error') + '</div>'
-    const emptyItemsHTML = () => '<div class="empty">No current-turn items.</div>'
+    const detailErrorHTML = message => '<div class="empty">Failed to load session: ' + esc(localizedError(message) || 'unknown error') + '</div>'
+    const emptyItemsHTML = () => '<div class="empty">No session items.</div>'
     const timestampFromLocalInput = value => {
       if (!value) return 0
       const date = new Date(value)
@@ -1635,12 +1633,10 @@ const indexHTML = `<!doctype html>
       state.selected.model_name.forEach(value => p.append('model_name', value))
       state.selected.username.forEach(value => p.append('username', value))
       const sessionId = sessionFilterEl.value.trim()
-      const turnId = turnFilterEl.value.trim()
       const attribution = attributionFilterEl.value
       const turnStatus = turnStatusFilterEl.value
       const exported = exportedFilterEl.value
       if (sessionId) p.set('session_id', sessionId)
-      if (turnId) p.set('turn_id', turnId)
       if (attribution) p.set('attribution', attribution)
       if (turnStatus) p.set('status', turnStatus)
       if (exported) p.set('exported', exported)
@@ -1757,9 +1753,8 @@ const indexHTML = `<!doctype html>
     }
     async function loadStatus() {
       const data = await api('/api/status')
-      const count = data.turn_count ?? data.count ?? 0
       const dropped = data.queue_dropped_jobs ? ' · ' + String(data.queue_dropped_jobs) + ' queue drops' : ''
-      statusEl.textContent = data.has_turn_table === false ? 'Turn table missing' : String(count) + ' turns · ' + (data.request_log_db_dialect || 'db') + dropped
+      statusEl.textContent = data.has_session_data === false ? 'Session data unavailable' : String(data.session_count || 0) + ' sessions · ' + (data.request_log_db_dialect || 'db') + dropped
     }
     function updatePager() {
       const totalPages = Math.max(1, Math.ceil((state.total || 0) / state.pageSize))
@@ -1773,19 +1768,19 @@ const indexHTML = `<!doctype html>
       nextPageEl.disabled = state.page >= totalPages
     }
     async function loadRows() {
-      const data = await api('/api/turns?' + qs())
+      const data = await api('/api/sessions?' + qs())
       state.total = data.total || 0
       state.page = data.page || state.page
       state.pageSize = data.page_size || state.pageSize
       updatePager()
       if (!data.items || data.items.length === 0) {
-        rowsEl.innerHTML = '<tr><td colspan="5"><div class="empty">No turns.</div></td></tr>'
+        rowsEl.innerHTML = '<tr><td colspan="5"><div class="empty">No sessions.</div></td></tr>'
         return
       }
       rowsEl.innerHTML = data.items.map(row => [
         '<tr data-id="' + esc(row.id) + '" class="' + (row.id === selectedId ? 'selected' : '') + '">',
         '<td><div class="time">' + (row.completed_at ? new Date(row.completed_at * 1000).toLocaleString() : 'Open') + '</div></td>',
-        '<td><div class="model">' + esc(row.session_id || 'unknown') + '</div><div class="subline">#' + esc(row.turn_index || '-') + ' · ' + esc(row.turn_id || '-') + '</div></td>',
+        '<td><div class="model">' + esc(row.session_id || 'unknown') + '</div><div class="subline">' + esc(row.request_count || 0) + ' requests · ' + esc(row.item_count || 0) + ' items</div></td>',
         '<td><div class="model">' + esc(row.model_name || '-') + '</div><div class="subline">' + esc(row.token_name || '') + '</div></td>',
         '<td><div>' + esc(row.username || '-') + '</div><div class="subline">' + esc(row.request_count || 0) + ' requests</div></td>',
         '<td><span class="pill ' + esc(row.completion_status || 'unknown') + '">' + esc(completionStatusLabel(row.completion_status)) + '</span><div class="subline">' + esc(attributionLabel(row.attribution)) + (row.exported ? ' · Exported' : '') + '</div></td>',
@@ -1799,7 +1794,7 @@ const indexHTML = `<!doctype html>
       detailEl.innerHTML = detailLoadingHTML()
       try {
         await loadRows()
-        const log = await api('/api/turns/' + id)
+        const log = await api('/api/sessions/' + id)
         if (requestToken !== detailRequestToken) return
         let collapsedDeveloperCount = 0
         const itemHtml = (log.items || []).map(item => {
@@ -1813,7 +1808,7 @@ const indexHTML = `<!doctype html>
             callId ? '<span class="call-id" title="' + esc(callId) + '"><span class="call-id-label">Call ID</span><code>' + esc(callId) + '</code></span>' : '',
             '</div>',
             '<div class="item-meta">',
-            item.seq !== undefined && item.seq !== null && String(item.seq).trim() !== '' ? '<span class="pill">Seq ' + esc(item.seq) + '</span>' : '',
+            item.sequence !== undefined && item.sequence !== null && String(item.sequence).trim() !== '' ? '<span class="pill">Seq ' + esc(item.sequence) + '</span>' : '',
             item.phase ? '<span class="pill">' + esc(phaseLabel(item.phase)) + '</span>' : '',
             item.message_phase ? '<span class="pill ' + esc(item.message_phase) + '">' + esc(completionStatusLabel(item.message_phase)) + '</span>' : '',
             item.item_status ? '<span class="pill ' + esc(item.item_status) + '">' + esc(completionStatusLabel(item.item_status)) + '</span>' : '',
@@ -1828,7 +1823,7 @@ const indexHTML = `<!doctype html>
         }).join('') || emptyItemsHTML()
         detailEl.innerHTML = [
           '<div class="detail-head">',
-          '<div class="detail-title"><h2>' + esc(log.model_name || '-') + '</h2><div class="request-id">' + esc(log.session_id || 'unknown') + ' / ' + esc(log.turn_id || '-') + '</div></div>',
+          '<div class="detail-title"><h2>' + esc(log.model_name || '-') + '</h2><div class="request-id">' + esc(log.session_id || 'unknown') + '</div></div>',
           '<span class="pill ' + esc(log.completion_status || 'unknown') + '">' + esc(completionStatusLabel(log.completion_status)) + ' · ' + esc(attributionLabel(log.attribution)) + '</span>',
           '</div>',
           '<div class="summary">',
@@ -1848,22 +1843,22 @@ const indexHTML = `<!doctype html>
       const p = qs(false)
       if (Array.from(p.keys()).length === 0) {
         createExportEl.disabled = true
-        exportPreviewEl.innerHTML = '<div class="preview-empty"><strong>No export selection</strong><span>Choose at least one filter in Turn data before creating an export.</span></div>'
+        exportPreviewEl.innerHTML = '<div class="preview-empty"><strong>No export selection</strong><span>Choose at least one filter in Session data before creating an export.</span></div>'
         return
       }
       createExportEl.disabled = true
       p.set('include_inferred', String(includeInferredEl.checked))
       const data = await api('/api/export-preview?' + p)
       const available = Number(data.available_count || 0)
-      let detail = 'Only verified, unexported turns in the current selection will be included.'
+      let detail = 'Each selected session is exported as one immutable snapshot. Later content stays in a new unexported branch.'
       if (data.broken_count) {
         const reasons = []
         if (data.broken_time_count) reasons.push(String(data.broken_time_count) + ' invalid time or status')
         if (data.broken_request_count) reasons.push(String(data.broken_request_count) + ' request count mismatches')
         if (data.broken_item_count) reasons.push(String(data.broken_item_count) + ' item count mismatches')
-        detail = String(data.broken_count) + ' potentially broken completed turns were excluded' + (reasons.length ? ': ' + reasons.join(', ') : '') + '.'
+        detail = String(data.broken_count) + ' potentially broken completed sessions were excluded' + (reasons.length ? ': ' + reasons.join(', ') : '') + '.'
       }
-      exportPreviewEl.innerHTML = '<div class="preview-count"><strong>' + esc(available.toLocaleString()) + '</strong><span>turns ready to export</span></div><div class="preview-detail">' + esc(detail) + '</div>'
+      exportPreviewEl.innerHTML = '<div class="preview-count"><strong>' + esc(available.toLocaleString()) + '</strong><span>sessions ready to export</span></div><div class="preview-detail">' + esc(detail) + '</div>'
       createExportEl.disabled = available === 0
     }
     const beijingTime = value => value ? new Date(value * 1000).toLocaleString('en-CA', { timeZone:'Asia/Shanghai', hour12:false }) + ' Beijing time' : ''
@@ -1878,8 +1873,8 @@ const indexHTML = `<!doctype html>
       const processed = Math.max(0, Math.min(total || Number.MAX_SAFE_INTEGER, Number(batch.processed_rows || 0)))
       const percent = total > 0 ? Math.min(100, Math.round(processed * 100 / total)) : 0
       const label = batch.status === 'pending'
-        ? 'Queued · ' + String(total) + ' turns'
-        : 'Exporting ' + String(processed) + ' / ' + String(total) + ' turns · ' + String(percent) + '%'
+        ? 'Queued · ' + String(total) + ' sessions'
+        : 'Exporting ' + String(processed) + ' / ' + String(total) + ' sessions · ' + String(percent) + '%'
       return '<div class="batch-progress"><span>' + esc(label) + '</span><div class="batch-progress-track" aria-label="' + esc(label) + '"><i class="batch-progress-fill" style="width:' + String(percent) + '%"></i></div></div>'
     }
     function batchActions(batch) {
@@ -1891,7 +1886,7 @@ const indexHTML = `<!doctype html>
         if (batch.integrity_status === 'verified') {
           if (!batch.cleaned_at) actions.push('<button type="button" data-clean="' + esc(batch.tag) + '">Mark cleaned</button>')
         } else if (!batch.reset_at) {
-          actions.push('<button type="button" data-audit="' + esc(batch.tag) + '" title="Recheck exported turns, requests, and items for consistency">Audit</button>')
+          actions.push('<button type="button" data-audit="' + esc(batch.tag) + '" title="Recheck exported sessions, requests, and items for consistency">Audit</button>')
         }
         actions.push('<button type="button" data-delete-history="' + esc(batch.tag) + '">Delete history</button>')
       }
@@ -1903,7 +1898,7 @@ const indexHTML = `<!doctype html>
     function renderBatchRow(batch) {
       return [
         '<div class="batch-row">',
-        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' turns · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · reset ' + esc(beijingTime(batch.reset_at)) + ' (' + esc(batch.reset_rows || 0) + ' released)' : '') + (batch.artifact_deleted_at ? ' · export file deleted' : '') + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(localizedError(batch.integrity_error)) : '') + (batch.error ? ' · ' + esc(localizedError(batch.error)) : '') + '</div>' + batchProgress(batch) + '</div>',
+        '<div><div class="batch-tag">' + esc(batch.tag) + '</div><div class="batch-meta">' + esc(batch.row_count || 0) + ' sessions · integrity: ' + esc(batchIntegrityLabel(batch)) + (batch.reset_at ? ' · reset ' + esc(beijingTime(batch.reset_at)) + ' (' + esc(batch.reset_rows || 0) + ' source records released)' : '') + (batch.artifact_deleted_at ? ' · export file deleted' : '') + (batch.cleaned_at ? ' · cleaned ' + esc(beijingTime(batch.cleaned_at)) : '') + (batch.integrity_error ? ' · ' + esc(localizedError(batch.integrity_error)) : '') + (batch.error ? ' · ' + esc(localizedError(batch.error)) : '') + '</div>' + batchProgress(batch) + '</div>',
         '<span class="pill ' + esc(batch.status || 'pending') + '">' + esc(batchStatusLabel(batch.status)) + '</span>',
         '<div class="batch-actions">' + batchActions(batch) + '</div>',
         '</div>'
@@ -1966,7 +1961,7 @@ const indexHTML = `<!doctype html>
       })
       batchListEl.querySelectorAll('[data-reset]').forEach(button => {
         button.onclick = async () => {
-          if (!window.confirm('Reset this export? The generated file will be deleted, history will be retained, and associated turns will become unexported.')) return
+          if (!window.confirm('Reset this export? The generated file will be deleted, history will be retained, and associated sessions will become unexported.')) return
           button.disabled = true
           exportPreviewEl.textContent = 'Resetting export batch...'
           try {
@@ -1998,7 +1993,7 @@ const indexHTML = `<!doctype html>
       })
       batchListEl.querySelectorAll('[data-delete]').forEach(button => {
         button.onclick = async () => {
-          if (!window.confirm('Delete this cleaned export file and batch record? Original turns will remain exported.')) return
+          if (!window.confirm('Delete this cleaned export file and batch record? Original sessions will remain exported.')) return
           button.disabled = true
           try {
             await api('/api/export-batches/' + encodeURIComponent(button.dataset.delete) + '/delete', { method:'POST' })
@@ -2012,7 +2007,7 @@ const indexHTML = `<!doctype html>
       })
       batchListEl.querySelectorAll('[data-delete-history]').forEach(button => {
         button.onclick = async () => {
-          if (!window.confirm('Delete this history record and any remaining export file? This cannot be undone and will not change the current turn export state.')) return
+          if (!window.confirm('Delete this history record and any remaining export file? This cannot be undone and will not change the current session export state.')) return
           button.disabled = true
           exportPreviewEl.textContent = 'Deleting export history...'
           try {
@@ -2040,7 +2035,7 @@ const indexHTML = `<!doctype html>
       exportNavEl.classList.toggle('active', showingExports)
       turnNavEl.toggleAttribute('aria-current', !showingExports)
       exportNavEl.toggleAttribute('aria-current', showingExports)
-      document.title = showingExports ? 'Exports · Turn Log Viewer' : 'Turn Log Viewer'
+      document.title = showingExports ? 'Exports · Session Log Viewer' : 'Session Log Viewer'
     }
     async function openExports() {
       setWorkspace('exports')
@@ -2072,14 +2067,14 @@ const indexHTML = `<!doctype html>
       const p = qs(false)
       if (Array.from(p.keys()).length === 0) {
         button.disabled = true
-        exportPreviewEl.innerHTML = '<div class="preview-empty"><strong>No export selection</strong><span>Choose at least one filter in Turn data before creating an export.</span></div>'
+        exportPreviewEl.innerHTML = '<div class="preview-empty"><strong>No export selection</strong><span>Choose at least one filter in Session data before creating an export.</span></div>'
         return
       }
       button.disabled = true
       p.set('include_inferred', String(includeInferredEl.checked))
       try {
         const batch = await api('/api/export-batches?' + p, { method:'POST' })
-        exportPreviewEl.textContent = 'Created export batch ' + batch.tag + ' with ' + String(batch.row_count || 0) + ' turns.'
+        exportPreviewEl.textContent = 'Created export batch ' + batch.tag + ' with ' + String(batch.row_count || 0) + ' sessions.'
         await Promise.all([loadBatches(), loadRows(), loadExportPreview()])
       } catch (err) {
         exportPreviewEl.textContent = err.message
@@ -2145,7 +2140,6 @@ const indexHTML = `<!doctype html>
       startTimeEl.value = ''
       endTimeEl.value = ''
       sessionFilterEl.value = ''
-      turnFilterEl.value = ''
       attributionFilterEl.value = ''
       turnStatusFilterEl.value = ''
       exportedFilterEl.value = ''
@@ -2164,7 +2158,6 @@ const indexHTML = `<!doctype html>
       }, 250)
     }
     sessionFilterEl.oninput = applyTextFilters
-    turnFilterEl.oninput = applyTextFilters
     attributionFilterEl.onchange = () => {
       state.page = 1
       updateAdvancedFilterCount()
