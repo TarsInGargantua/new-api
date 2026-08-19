@@ -35,14 +35,6 @@ const (
 
 const apiRequestLogExportTurnOrder = apiRequestLogTurnsTable + ".owner_fingerprint ASC, " + apiRequestLogTurnsTable + ".session_id ASC, " + apiRequestLogTurnsTable + ".turn_index ASC, " + apiRequestLogTurnsTable + ".started_at ASC, " + apiRequestLogTurnsTable + ".id ASC"
 
-type apiRequestLogExportTurnCursor struct {
-	OwnerFingerprint string
-	SessionId        string
-	TurnIndex        int
-	StartedAt        int64
-	Id               int64
-}
-
 var (
 	ErrAPIRequestLogExportBatchNotClaimable = errors.New("export batch is not claimable")
 	ErrAPIRequestLogExportBatchLeaseLost    = errors.New("export batch lease is no longer owned")
@@ -201,29 +193,20 @@ func PreviewAPIRequestLogExport(db *gorm.DB, params APIRequestLogTurnQueryParams
 	}
 	preview := &APIRequestLogExportPreview{}
 	grouped := buildAPIRequestLogExportPreviewSessionQuery(db, params, includeInferred)
-	counts := []struct {
-		target *int64
-		where  string
-	}{
-		{&preview.MatchedCount, ""},
-		{&preview.BrokenCount, "broken_count > 0"},
-		{&preview.BrokenTimeCount, "broken_time_count > 0"},
-		{&preview.BrokenRequestCount, "broken_request_count > 0"},
-		{&preview.BrokenItemCount, "broken_item_count > 0"},
-		{&preview.SafeMatchedCount, "broken_count = 0"},
-		{&preview.AvailableCount, "broken_count = 0 AND export_branch = 0"},
-		{&preview.AlreadyExportedCount, "broken_count = 0 AND export_branch <> 0"},
-		{&preview.ExactCount, "broken_count = 0 AND export_branch = 0 AND exact_count > 0"},
-		{&preview.InferredCount, "broken_count = 0 AND export_branch = 0 AND inferred_count > 0"},
-	}
-	for _, count := range counts {
-		query := db.Table("(?) AS preview_sessions", grouped)
-		if count.where != "" {
-			query = query.Where(count.where)
-		}
-		if err := query.Count(count.target).Error; err != nil {
-			return nil, err
-		}
+	selectSQL := strings.Join([]string{
+		"COUNT(*) AS matched_count",
+		"COALESCE(SUM(CASE WHEN broken_count > 0 THEN 1 ELSE 0 END), 0) AS broken_count",
+		"COALESCE(SUM(CASE WHEN broken_time_count > 0 THEN 1 ELSE 0 END), 0) AS broken_time_count",
+		"COALESCE(SUM(CASE WHEN broken_request_count > 0 THEN 1 ELSE 0 END), 0) AS broken_request_count",
+		"COALESCE(SUM(CASE WHEN broken_item_count > 0 THEN 1 ELSE 0 END), 0) AS broken_item_count",
+		"COALESCE(SUM(CASE WHEN broken_count = 0 THEN 1 ELSE 0 END), 0) AS safe_matched_count",
+		"COALESCE(SUM(CASE WHEN broken_count = 0 AND export_branch = 0 THEN 1 ELSE 0 END), 0) AS available_count",
+		"COALESCE(SUM(CASE WHEN broken_count = 0 AND export_branch <> 0 THEN 1 ELSE 0 END), 0) AS already_exported_count",
+		"COALESCE(SUM(CASE WHEN broken_count = 0 AND export_branch = 0 AND exact_count > 0 THEN 1 ELSE 0 END), 0) AS exact_count",
+		"COALESCE(SUM(CASE WHEN broken_count = 0 AND export_branch = 0 AND inferred_count > 0 THEN 1 ELSE 0 END), 0) AS inferred_count",
+	}, ", ")
+	if err := db.Table("(?) AS preview_sessions", grouped).Select(selectSQL).Scan(preview).Error; err != nil {
+		return nil, err
 	}
 	return preview, nil
 }
@@ -259,50 +242,29 @@ func CreateAPIRequestLogExportBatch(db *gorm.DB, params APIRequestLogTurnQueryPa
 		if err := tx.Create(batch).Error; err != nil {
 			return err
 		}
-		claimQuery := buildAPIRequestLogExportSessionClaimQuery(tx, params, includeInferred)
-		if err := claimQuery.Session(&gorm.Session{}).
-			Select("COALESCE(MAX(" + apiRequestLogTurnsTable + ".id), 0)").
-			Scan(&batch.CutoffTurnId).Error; err != nil {
+		var candidateTurnIds []int64
+		if err := buildAPIRequestLogExportSessionClaimQuery(tx, params, includeInferred).
+			Order(apiRequestLogExportTurnOrder).
+			Pluck(apiRequestLogTurnsTable+".id", &candidateTurnIds).Error; err != nil {
 			return err
+		}
+		for _, turnId := range candidateTurnIds {
+			if turnId > batch.CutoffTurnId {
+				batch.CutoffTurnId = turnId
+			}
 		}
 		if err := tx.Model(&APIRequestLogExportBatch{}).
 			Where("id = ?", batch.Id).
 			Update("cutoff_turn_id", batch.CutoffTurnId).Error; err != nil {
 			return err
 		}
-		var cursor apiRequestLogExportTurnCursor
 		var sequence int64
-		for batch.CutoffTurnId > 0 {
-			var turnIds []int64
-			query := buildAPIRequestLogExportSessionClaimQuery(tx, params, includeInferred).
-				Where(apiRequestLogTurnsTable+".id <= ?", batch.CutoffTurnId).
-				Order(apiRequestLogExportTurnOrder).
-				Limit(apiRequestLogExportClaimSize)
-			if cursor.Id > 0 {
-				query = query.Where("("+
-					apiRequestLogTurnsTable+".owner_fingerprint > ? OR "+
-					"("+apiRequestLogTurnsTable+".owner_fingerprint = ? AND ("+
-					apiRequestLogTurnsTable+".session_id > ? OR "+
-					"("+apiRequestLogTurnsTable+".session_id = ? AND ("+
-					apiRequestLogTurnsTable+".turn_index > ? OR ("+
-					apiRequestLogTurnsTable+".turn_index = ? AND ("+
-					apiRequestLogTurnsTable+".started_at > ? OR ("+
-					apiRequestLogTurnsTable+".started_at = ? AND "+apiRequestLogTurnsTable+".id > ?))))))))",
-					cursor.OwnerFingerprint, cursor.OwnerFingerprint, cursor.SessionId, cursor.SessionId, cursor.TurnIndex, cursor.TurnIndex,
-					cursor.StartedAt, cursor.StartedAt, cursor.Id)
+		for start := 0; start < len(candidateTurnIds); start += apiRequestLogExportClaimSize {
+			end := start + apiRequestLogExportClaimSize
+			if end > len(candidateTurnIds) {
+				end = len(candidateTurnIds)
 			}
-			if err := query.Pluck(apiRequestLogTurnsTable+".id", &turnIds).Error; err != nil {
-				return err
-			}
-			if len(turnIds) == 0 {
-				break
-			}
-			var lastTurn APIRequestLogTurn
-			if err := tx.Where("id = ?", turnIds[len(turnIds)-1]).First(&lastTurn).Error; err != nil {
-				return err
-			}
-			cursor = apiRequestLogExportTurnCursor{OwnerFingerprint: lastTurn.OwnerFingerprint, SessionId: lastTurn.SessionId, TurnIndex: lastTurn.TurnIndex, StartedAt: lastTurn.StartedAt, Id: lastTurn.Id}
-			lockedTurnIds, err := lockAPIRequestLogExportTurnIds(tx, batch.Id, includeInferred, batch.CutoffTurnId, turnIds)
+			lockedTurnIds, err := lockAPIRequestLogExportTurnIds(tx, batch.Id, includeInferred, batch.CutoffTurnId, candidateTurnIds[start:end])
 			if err != nil {
 				return err
 			}

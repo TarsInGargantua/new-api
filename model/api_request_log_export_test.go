@@ -13,7 +13,31 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
+
+type apiRequestLogExportSQLCapture struct {
+	lines []string
+}
+
+func (capture *apiRequestLogExportSQLCapture) Printf(format string, args ...interface{}) {
+	capture.lines = append(capture.lines, fmt.Sprintf(format, args...))
+}
+
+func (capture *apiRequestLogExportSQLCapture) countContaining(needle string) int {
+	count := 0
+	for _, line := range capture.lines {
+		if strings.Contains(strings.ToLower(line), strings.ToLower(needle)) {
+			count++
+		}
+	}
+	return count
+}
+
+func captureAPIRequestLogExportSQL(db *gorm.DB) (*gorm.DB, *apiRequestLogExportSQLCapture) {
+	capture := &apiRequestLogExportSQLCapture{}
+	return db.Session(&gorm.Session{Logger: logger.New(capture, logger.Config{LogLevel: logger.Info})}), capture
+}
 
 func TestAPIRequestLogSessionGroupQuerySupportsMySQLFullGroupBy(t *testing.T) {
 	db, err := gorm.Open(mysql.New(mysql.Config{
@@ -77,8 +101,10 @@ func TestAPIRequestLogExportBatchClaimsFullFilterWithoutDuplicates(t *testing.T)
 	createAPIRequestLogExportTestTurn(t, db, "session-5", "turn-5", APIRequestLogTurnStatusOpen, APIRequestLogTurnAttributionExact, 180)
 
 	filter := APIRequestLogTurnQueryParams{StartTimestamp: 100, EndTimestamp: 201, ModelName: "gpt-export", StartIdx: 1, Num: 1}
-	preview, err := PreviewAPIRequestLogExport(db, filter, false)
+	previewDB, previewSQL := captureAPIRequestLogExportSQL(db)
+	preview, err := PreviewAPIRequestLogExport(previewDB, filter, false)
 	require.NoError(t, err)
+	require.Equal(t, 1, previewSQL.countContaining("preview_sessions"), "preview counts must share one grouped query")
 	require.Equal(t, int64(2), preview.MatchedCount)
 	require.Equal(t, int64(2), preview.AvailableCount)
 	require.Equal(t, int64(2), preview.ExactCount)
@@ -176,8 +202,10 @@ func TestAPIRequestLogExportBatchOrdersSessionTurnsAcrossClaimPages(t *testing.T
 		}).Error)
 	}
 
-	batch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{SessionId: "session-ordered"}, false)
+	claimDB, claimSQL := captureAPIRequestLogExportSQL(db)
+	batch, err := CreateAPIRequestLogExportBatch(claimDB, APIRequestLogTurnQueryParams{SessionId: "session-ordered"}, false)
 	require.NoError(t, err)
+	require.Equal(t, 1, claimSQL.countContaining("safe_sessions"), "safe sessions must be computed once for the full batch")
 	require.Equal(t, int64(1), batch.RowCount, "all internal records belong to one exported session")
 
 	var members []APIRequestLogExportMember
