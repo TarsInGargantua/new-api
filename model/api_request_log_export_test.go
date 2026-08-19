@@ -11,8 +11,67 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
+
+type apiRequestLogExportSQLCapture struct {
+	lines []string
+}
+
+func (capture *apiRequestLogExportSQLCapture) Printf(format string, args ...interface{}) {
+	capture.lines = append(capture.lines, fmt.Sprintf(format, args...))
+}
+
+func (capture *apiRequestLogExportSQLCapture) countContaining(needle string) int {
+	count := 0
+	for _, line := range capture.lines {
+		if strings.Contains(strings.ToLower(line), strings.ToLower(needle)) {
+			count++
+		}
+	}
+	return count
+}
+
+func captureAPIRequestLogExportSQL(db *gorm.DB) (*gorm.DB, *apiRequestLogExportSQLCapture) {
+	capture := &apiRequestLogExportSQLCapture{}
+	return db.Session(&gorm.Session{Logger: logger.New(capture, logger.Config{LogLevel: logger.Info})}), capture
+}
+
+func TestAPIRequestLogSessionGroupQuerySupportsMySQLFullGroupBy(t *testing.T) {
+	db, err := gorm.Open(mysql.New(mysql.Config{
+		DSN:                       "gorm:gorm@tcp(127.0.0.1:3306)/gorm?charset=utf8mb4&parseTime=True&loc=Local",
+		SkipInitializeWithVersion: true,
+	}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	require.NoError(t, err)
+
+	sql := db.ToSQL(func(tx *gorm.DB) *gorm.DB {
+		var rows []apiRequestLogSessionAggregateRow
+		return buildAPIRequestLogSessionGroupQuery(tx, APIRequestLogTurnQueryParams{}).Find(&rows)
+	})
+
+	require.Contains(t, sql, "api_request_log_turns.export_batch_id AS export_batch_id")
+	require.Contains(t, sql, "GROUP BY `api_request_log_turns`.`owner_fingerprint`,`api_request_log_turns`.`session_id`,`api_request_log_turns`.`export_batch_id`")
+	require.NotContains(t, sql, "session_branch_member")
+}
+
+func TestBackfillAPIRequestLogSessionBranches(t *testing.T) {
+	db := setupAPIRequestLogTurnTestDB(t)
+	batch := APIRequestLogExportBatch{Tag: "legacy-branch", Status: APIRequestLogExportBatchStatusCompleted}
+	require.NoError(t, db.Create(&batch).Error)
+	withMember := createAPIRequestLogExportTestTurn(t, db, "legacy-session", "member-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 100)
+	withoutMember := createAPIRequestLogExportTestTurn(t, db, "legacy-session", "orphan-turn", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 200)
+	require.NoError(t, db.Model(&APIRequestLogTurn{}).Where("id IN ?", []int64{withMember.Id, withoutMember.Id}).Update("exported_version", 1).Error)
+	require.NoError(t, db.Create(&APIRequestLogExportMember{BatchId: batch.Id, TurnRecordId: withMember.Id, Sequence: 1}).Error)
+
+	require.NoError(t, BackfillAPIRequestLogSessionBranches(db))
+
+	require.NoError(t, db.First(&withMember, withMember.Id).Error)
+	require.Equal(t, batch.Id, withMember.ExportBatchId)
+	require.NoError(t, db.First(&withoutMember, withoutMember.Id).Error)
+	require.Equal(t, int64(-1), withoutMember.ExportBatchId)
+}
 
 func createAPIRequestLogExportTestTurn(t *testing.T, db *gorm.DB, sessionId, turnId, status, attribution string, completedAt int64) APIRequestLogTurn {
 	t.Helper()
@@ -42,8 +101,10 @@ func TestAPIRequestLogExportBatchClaimsFullFilterWithoutDuplicates(t *testing.T)
 	createAPIRequestLogExportTestTurn(t, db, "session-5", "turn-5", APIRequestLogTurnStatusOpen, APIRequestLogTurnAttributionExact, 180)
 
 	filter := APIRequestLogTurnQueryParams{StartTimestamp: 100, EndTimestamp: 201, ModelName: "gpt-export", StartIdx: 1, Num: 1}
-	preview, err := PreviewAPIRequestLogExport(db, filter, false)
+	previewDB, previewSQL := captureAPIRequestLogExportSQL(db)
+	preview, err := PreviewAPIRequestLogExport(previewDB, filter, false)
 	require.NoError(t, err)
+	require.Equal(t, 1, previewSQL.countContaining("preview_sessions"), "preview counts must share one grouped query")
 	require.Equal(t, int64(2), preview.MatchedCount)
 	require.Equal(t, int64(2), preview.AvailableCount)
 	require.Equal(t, int64(2), preview.ExactCount)
@@ -51,7 +112,7 @@ func TestAPIRequestLogExportBatchClaimsFullFilterWithoutDuplicates(t *testing.T)
 
 	batch, err := CreateAPIRequestLogExportBatch(db, filter, false)
 	require.NoError(t, err)
-	require.Regexp(t, regexp.MustCompile(`^turn-export-\d{8}-\d{4}-\d{6}-[0-9a-f]{6}$`), batch.Tag)
+	require.Regexp(t, regexp.MustCompile(`^session-export-\d{8}-\d{4}-\d{6}-[0-9a-f]{6}$`), batch.Tag)
 	require.Equal(t, APIRequestLogExportBatchStatusPending, batch.Status)
 	require.Equal(t, int64(2), batch.RowCount, "list pagination must not limit a batch")
 	require.Equal(t, second.Id, batch.CutoffTurnId)
@@ -82,12 +143,12 @@ func TestAPIRequestLogExportBatchClaimsFullFilterWithoutDuplicates(t *testing.T)
 	require.NoError(t, db.Where("batch_id = ?", inferredBatch.Id).First(&inferredMember).Error)
 	require.Equal(t, inferred.Id, inferredMember.TurnRecordId)
 
-	page, err := GetAPIRequestLogExportBatchTurnPage(db, batch.Id, 0, 1)
+	page, err := GetAPIRequestLogExportBatchSessionPage(db, batch.Id, 0, 1)
 	require.NoError(t, err)
 	require.Len(t, page.Items, 1)
 	require.True(t, page.HasMore)
 	require.Positive(t, page.NextSequence)
-	nextPage, err := GetAPIRequestLogExportBatchTurnPage(db, batch.Id, page.NextSequence, 10)
+	nextPage, err := GetAPIRequestLogExportBatchSessionPage(db, batch.Id, page.NextSequence, 10)
 	require.NoError(t, err)
 	require.Len(t, nextPage.Items, 1)
 	require.False(t, nextPage.HasMore)
@@ -141,9 +202,11 @@ func TestAPIRequestLogExportBatchOrdersSessionTurnsAcrossClaimPages(t *testing.T
 		}).Error)
 	}
 
-	batch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{SessionId: "session-ordered"}, false)
+	claimDB, claimSQL := captureAPIRequestLogExportSQL(db)
+	batch, err := CreateAPIRequestLogExportBatch(claimDB, APIRequestLogTurnQueryParams{SessionId: "session-ordered"}, false)
 	require.NoError(t, err)
-	require.Equal(t, int64(turnCount), batch.RowCount)
+	require.Equal(t, 1, claimSQL.countContaining("safe_sessions"), "safe sessions must be computed once for the full batch")
+	require.Equal(t, int64(1), batch.RowCount, "all internal records belong to one exported session")
 
 	var members []APIRequestLogExportMember
 	require.NoError(t, db.Where("batch_id = ?", batch.Id).Order("sequence ASC").Find(&members).Error)
@@ -154,6 +217,73 @@ func TestAPIRequestLogExportBatchOrdersSessionTurnsAcrossClaimPages(t *testing.T
 		require.Equal(t, index+1, turn.TurnIndex)
 		require.Equal(t, int64(index+1), member.Sequence)
 	}
+	page, err := GetAPIRequestLogExportBatchSessionPage(db, batch.Id, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	require.Len(t, page.Items[0].Session.InternalTurns, turnCount)
+}
+
+func TestAPIRequestLogSessionExportFreezesSnapshotAndBranchesLaterContent(t *testing.T) {
+	db := setupAPIRequestLogTurnTestDB(t)
+	first := createAPIRequestLogExportTestTurn(t, db, "branch-session", "branch-record-1", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 100)
+	second := createAPIRequestLogExportTestTurn(t, db, "branch-session", "branch-record-2", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 200)
+
+	firstBatch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{SessionId: "branch-session"}, false)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), firstBatch.RowCount)
+	firstPage, err := GetAPIRequestLogExportBatchSessionPage(db, firstBatch.Id, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, firstPage.Items, 1)
+	require.Len(t, firstPage.Items[0].Session.InternalTurns, 2)
+	require.Equal(t, []int64{first.Id, second.Id}, []int64{
+		firstPage.Items[0].Session.InternalTurns[0].Id,
+		firstPage.Items[0].Session.InternalTurns[1].Id,
+	})
+
+	third := createAPIRequestLogExportTestTurn(t, db, "branch-session", "branch-record-3", APIRequestLogTurnStatusCompleted, APIRequestLogTurnAttributionExact, 300)
+	sessions, total, err := GetAPIRequestLogSessions(db, APIRequestLogTurnQueryParams{SessionId: "branch-session", Num: 10})
+	require.NoError(t, err)
+	require.Equal(t, int64(2), total)
+	require.Len(t, sessions, 2)
+	var exported, unexported *APIRequestLogSessionListItem
+	for _, session := range sessions {
+		if session.Exported {
+			exported = session
+		} else {
+			unexported = session
+		}
+	}
+	require.NotNil(t, exported)
+	require.NotNil(t, unexported)
+	require.Equal(t, 2, exported.RequestCount)
+	require.Equal(t, 1, unexported.RequestCount)
+	require.Equal(t, third.Id, unexported.Id)
+
+	frozenDetail, err := GetAPIRequestLogSessionByAnchorId(db, exported.Id)
+	require.NoError(t, err)
+	require.Len(t, frozenDetail.InternalTurns, 2)
+	newDetail, err := GetAPIRequestLogSessionByAnchorId(db, unexported.Id)
+	require.NoError(t, err)
+	require.Len(t, newDetail.InternalTurns, 1)
+	require.Equal(t, third.Id, newDetail.InternalTurns[0].Id)
+
+	firstPageAfterLaterContent, err := GetAPIRequestLogExportBatchSessionPage(db, firstBatch.Id, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, firstPageAfterLaterContent.Items, 1)
+	require.Len(t, firstPageAfterLaterContent.Items[0].Session.InternalTurns, 2, "later content must not mutate the first snapshot")
+
+	preview, err := PreviewAPIRequestLogExport(db, APIRequestLogTurnQueryParams{SessionId: "branch-session"}, false)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), preview.AvailableCount)
+	require.Equal(t, int64(1), preview.AlreadyExportedCount)
+	secondBatch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{SessionId: "branch-session"}, false)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), secondBatch.RowCount)
+	secondPage, err := GetAPIRequestLogExportBatchSessionPage(db, secondBatch.Id, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, secondPage.Items, 1)
+	require.Len(t, secondPage.Items[0].Session.InternalTurns, 1)
+	require.Equal(t, third.Id, secondPage.Items[0].Session.InternalTurns[0].Id)
 }
 
 func TestAPIRequestLogExportConcurrentBatchesGloballyClaimTurnOnce(t *testing.T) {
@@ -192,7 +322,7 @@ func TestAPIRequestLogExportConcurrentBatchesGloballyClaimTurnOnce(t *testing.T)
 	}
 	require.Len(t, rowCounts, 2)
 	sort.Slice(rowCounts, func(i, j int) bool { return rowCounts[i] < rowCounts[j] })
-	require.Equal(t, []int64{0, 8}, rowCounts)
+	require.Equal(t, []int64{0, 1}, rowCounts)
 
 	var memberCount int64
 	require.NoError(t, db.Model(&APIRequestLogExportMember{}).Count(&memberCount).Error)
@@ -256,7 +386,7 @@ func TestAPIRequestLogExportUsesBeijingRangeTagAndRequiresCleanedMarkerForDeleti
 	}
 	tag, err := newAPIRequestLogExportTag(time.Date(2026, time.July, 18, 1, 2, 3, 0, time.UTC), filter)
 	require.NoError(t, err)
-	require.Regexp(t, regexp.MustCompile(`^turn-export-20260701-0718-\d{6}-[0-9a-f]{6}$`), tag)
+	require.Regexp(t, regexp.MustCompile(`^session-export-20260701-0718-\d{6}-[0-9a-f]{6}$`), tag)
 
 	batch, err := CreateAPIRequestLogExportBatch(db, APIRequestLogTurnQueryParams{SessionId: turn.SessionId}, false)
 	require.NoError(t, err)
@@ -321,6 +451,9 @@ func TestForceDeleteAPIRequestLogExportBatchKeepsTurnExportState(t *testing.T) {
 	require.NoError(t, err)
 	_, err = MarkAPIRequestLogExportBatchCompleted(db, batch.Tag, building.BuildOwner, "/tmp/export-force-delete.jsonl", strings.Repeat("a", 64), batch.RowCount)
 	require.NoError(t, err)
+	// Simulate a batch created before export_batch_id was stored directly on
+	// the internal rows. Deleting history must preserve its session branch.
+	require.NoError(t, db.Model(&APIRequestLogTurn{}).Where("id = ?", turn.Id).Update("export_batch_id", 0).Error)
 
 	deleted, err := ForceDeleteAPIRequestLogExportBatch(db, batch.Tag)
 	require.NoError(t, err)
@@ -333,6 +466,7 @@ func TestForceDeleteAPIRequestLogExportBatchKeepsTurnExportState(t *testing.T) {
 	var storedTurn APIRequestLogTurn
 	require.NoError(t, db.First(&storedTurn, turn.Id).Error)
 	require.Positive(t, storedTurn.ExportedVersion)
+	require.Equal(t, batch.Id, storedTurn.ExportBatchId)
 }
 
 func TestAPIRequestLogExportBatchLeaseTakeoverAndRetryPreserveMembers(t *testing.T) {

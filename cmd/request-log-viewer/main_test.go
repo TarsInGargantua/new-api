@@ -3,11 +3,11 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +40,7 @@ func setupRequestLogViewerTest(t *testing.T) (*requestLogViewerServer, *gorm.DB)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(worker.Close)
 	return &requestLogViewerServer{db: db, exports: worker}, db
 }
 
@@ -80,7 +81,7 @@ func TestRequestLogViewerIndexUsesEnglishExportLabels(t *testing.T) {
 		t.Fatalf("unexpected index status: %d", recorder.Code)
 	}
 	body := recorder.Body.String()
-	for _, expected := range []string{"Turn Log Viewer", "Export history", "Audit", "Mark cleaned", "Reset export state", "Delete history", "Reset this export?", "Collapsed · click to expand", "No export selection"} {
+	for _, expected := range []string{"Session Log Viewer", "Session data", "Export history", "Audit", "Mark cleaned", "Reset export state", "Delete history", "Reset this export?", "Collapsed · click to expand", "No export selection"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("missing English viewer label %q", expected)
 		}
@@ -96,6 +97,11 @@ func TestRequestLogViewerIndexUsesEnglishExportLabels(t *testing.T) {
 			t.Fatalf("found legacy Chinese viewer label %q", unexpected)
 		}
 	}
+	for _, unexpected := range []string{"Turn Log Viewer", "Session / turn", "/api/turns"} {
+		if strings.Contains(body, unexpected) {
+			t.Fatalf("found exposed turn-level viewer concept %q", unexpected)
+		}
+	}
 }
 
 func TestRequestLogViewerRequiresExplicitExportSelection(t *testing.T) {
@@ -109,24 +115,24 @@ func TestRequestLogViewerRequiresExplicitExportSelection(t *testing.T) {
 
 	createRecorder := httptest.NewRecorder()
 	server.serveExportBatches(createRecorder, httptest.NewRequest(http.MethodPost, "/api/export-batches", nil))
-	if createRecorder.Code != http.StatusBadRequest || !strings.Contains(createRecorder.Body.String(), "select at least one turn filter") {
+	if createRecorder.Code != http.StatusBadRequest || !strings.Contains(createRecorder.Body.String(), "select at least one session filter") {
 		t.Fatalf("empty export create status=%d body=%s", createRecorder.Code, createRecorder.Body.String())
 	}
 }
 
-func TestRequestLogViewerTurnRoutesAndPersistentExport(t *testing.T) {
+func TestRequestLogViewerSessionRoutesAndPersistentExport(t *testing.T) {
 	server, db := setupRequestLogViewerTest(t)
 	turn := seedRequestLogViewerTurn(t, db)
 
 	listRecorder := httptest.NewRecorder()
-	server.serveTurns(listRecorder, httptest.NewRequest(http.MethodGet, "/api/turns?session_id=session-1", nil))
-	if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), `"turn_id":"turn-1"`) {
-		t.Fatalf("unexpected turn list: status=%d body=%s", listRecorder.Code, listRecorder.Body.String())
+	server.serveSessions(listRecorder, httptest.NewRequest(http.MethodGet, "/api/sessions?session_id=session-1", nil))
+	if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), `"session_id":"session-1"`) || strings.Contains(listRecorder.Body.String(), `"turn_id"`) {
+		t.Fatalf("unexpected session list: status=%d body=%s", listRecorder.Code, listRecorder.Body.String())
 	}
 	detailRecorder := httptest.NewRecorder()
-	server.serveTurnDetail(detailRecorder, httptest.NewRequest(http.MethodGet, "/api/turns/"+strconv.FormatInt(turn.Id, 10), nil))
-	if detailRecorder.Code != http.StatusOK || strings.Contains(detailRecorder.Body.String(), "ciphertext") {
-		t.Fatalf("unexpected turn detail: status=%d body=%s", detailRecorder.Code, detailRecorder.Body.String())
+	server.serveSessionDetail(detailRecorder, httptest.NewRequest(http.MethodGet, "/api/sessions/"+fmt.Sprint(turn.Id), nil))
+	if detailRecorder.Code != http.StatusOK || strings.Contains(detailRecorder.Body.String(), "ciphertext") || strings.Contains(detailRecorder.Body.String(), `"turn_id"`) {
+		t.Fatalf("unexpected session detail: status=%d body=%s", detailRecorder.Code, detailRecorder.Body.String())
 	}
 
 	createRecorder := httptest.NewRecorder()
@@ -177,6 +183,82 @@ func TestRequestLogViewerTurnRoutesAndPersistentExport(t *testing.T) {
 		t.Fatalf("expected no duplicate members, got %+v", secondResponse.Data)
 	}
 	waitForCompletedExport(t, db, secondResponse.Data.Tag)
+}
+
+func TestRequestLogViewerLaterSessionContentCannotMutateExportedArtifact(t *testing.T) {
+	server, db := setupRequestLogViewerTest(t)
+	seedRequestLogViewerTurn(t, db)
+	firstBatch, err := model.CreateAPIRequestLogExportBatch(db, model.APIRequestLogTurnQueryParams{SessionId: "session-1"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.exports.Enqueue(firstBatch.Tag)
+	firstCompleted := waitForCompletedExport(t, db, firstBatch.Tag)
+	firstArtifact := downloadExport(t, server, firstCompleted.Tag)
+
+	log := &model.APIRequestLog{
+		Source: model.APIRequestLogSourceLive, UserId: 1, Username: "alice", TokenId: 2, TokenName: "prod",
+		ModelName: "gpt-turn", CreatedAt: 200, RequestId: "req-later", StatusCode: http.StatusOK,
+		ParseStatus: model.APIRequestLogParseOK, ItemsStatus: model.APIRequestLogItemsOK,
+	}
+	if err := db.Create(log).Error; err != nil {
+		t.Fatal(err)
+	}
+	items := []model.APIRequestLogItem{
+		{LogId: log.Id, Seq: 1, Phase: model.APIRequestLogPhaseInput, ItemType: model.APIRequestLogItemMessage, Role: "user", ContentType: "text", Content: "later question"},
+		{LogId: log.Id, Seq: 2, Phase: model.APIRequestLogPhaseOutput, ItemType: model.APIRequestLogItemMessage, Role: "assistant", ContentType: "text", Content: "later answer"},
+	}
+	if err := db.Create(&items).Error; err != nil {
+		t.Fatal(err)
+	}
+	later, err := model.MaterializeAPIRequestLogTurn(db, log, model.APIRequestLogTurnMeta{
+		SessionId: "session-1", TurnId: "internal-record-2", Protocol: "responses", StartedAt: 200, CompletedAt: 210,
+		CompletionStatus: model.APIRequestLogTurnStatusCompleted, Attribution: model.APIRequestLogTurnAttributionExact,
+		Items: []model.APIRequestLogTurnItemMeta{{Seq: 2, ProviderItemId: "later-message", MessagePhase: "final", ItemStatus: "completed"}},
+	}, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, total, err := model.GetAPIRequestLogSessions(db, model.APIRequestLogTurnQueryParams{SessionId: "session-1", Num: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(sessions) != 2 {
+		t.Fatalf("expected frozen and unexported session branches, total=%d sessions=%+v", total, sessions)
+	}
+	exportedCount := 0
+	unexportedAnchor := int64(0)
+	for _, session := range sessions {
+		if session.Exported {
+			exportedCount++
+		} else {
+			unexportedAnchor = session.Id
+		}
+	}
+	if exportedCount != 1 || unexportedAnchor != later.Id {
+		t.Fatalf("unexpected branch state: exported=%d unexported_anchor=%d later=%d", exportedCount, unexportedAnchor, later.Id)
+	}
+	if current := downloadExport(t, server, firstCompleted.Tag); !bytes.Equal(current, firstArtifact) || bytes.Contains(current, []byte("later question")) {
+		t.Fatalf("first session snapshot changed after later content: %s", current)
+	}
+
+	secondBatch, err := model.CreateAPIRequestLogExportBatch(db, model.APIRequestLogTurnQueryParams{SessionId: "session-1"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondBatch.RowCount != 1 {
+		t.Fatalf("expected one later session branch, got %d", secondBatch.RowCount)
+	}
+	server.exports.Enqueue(secondBatch.Tag)
+	secondCompleted := waitForCompletedExport(t, db, secondBatch.Tag)
+	secondArtifact := downloadExport(t, server, secondCompleted.Tag)
+	if !bytes.Contains(secondArtifact, []byte("later question")) || bytes.Count(secondArtifact, []byte("\n")) != 1 {
+		t.Fatalf("unexpected second session artifact: %s", secondArtifact)
+	}
+	if current := downloadExport(t, server, firstCompleted.Tag); !bytes.Equal(current, firstArtifact) {
+		t.Fatal("first artifact changed after exporting the later branch")
+	}
 }
 
 func TestRequestLogExportReconstructsFirstRequestContextWithoutDuplicatingTurnItems(t *testing.T) {
@@ -255,13 +337,13 @@ func TestRequestLogExportReconstructsFirstRequestContextWithoutDuplicatingTurnIt
 	if err != nil {
 		t.Fatal(err)
 	}
-	if batch.RowCount != 2 {
-		t.Fatalf("expected two exported turns, got %d", batch.RowCount)
+	if batch.RowCount != 1 {
+		t.Fatalf("expected one exported session, got %d", batch.RowCount)
 	}
 	completed := waitForCompletedExport(t, db, batch.Tag)
 	lines := strings.Split(strings.TrimSpace(string(downloadExport(t, server, completed.Tag))), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected two JSONL rows, got %d", len(lines))
+	if len(lines) != 1 {
+		t.Fatalf("expected one JSONL row per session, got %d", len(lines))
 	}
 	type exportedItem struct {
 		Seq             int    `json:"seq"`
@@ -270,34 +352,32 @@ func TestRequestLogExportReconstructsFirstRequestContextWithoutDuplicatingTurnIt
 		ContextSnapshot bool   `json:"context_snapshot"`
 	}
 	type exportedRecord struct {
-		TurnIndex             int            `json:"turn_index"`
-		ContextLoaded         bool           `json:"context_loaded"`
-		ContextComplete       bool           `json:"context_complete"`
-		ContextItemCount      int            `json:"context_item_count"`
-		TurnItemCount         int            `json:"turn_item_count"`
-		DeduplicatedItemCount int            `json:"deduplicated_item_count"`
-		TrainingItemCount     int            `json:"training_item_count"`
-		TrainingItems         []exportedItem `json:"training_items"`
+		SchemaVersion     int            `json:"schema_version"`
+		SessionId         string         `json:"session_id"`
+		Requests          []interface{}  `json:"requests"`
+		ContextLoaded     bool           `json:"context_loaded"`
+		ContextComplete   bool           `json:"context_complete"`
+		ContextItemCount  int            `json:"context_item_count"`
+		TrainingItemCount int            `json:"training_item_count"`
+		TrainingItems     []exportedItem `json:"training_items"`
 	}
-	var records []exportedRecord
-	for _, line := range lines {
-		var record exportedRecord
-		if err := common.Unmarshal([]byte(line), &record); err != nil {
-			t.Fatal(err)
-		}
-		records = append(records, record)
+	var record exportedRecord
+	if err := common.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatal(err)
 	}
-	second := records[1]
-	if records[0].TurnIndex != 1 || second.TurnIndex != 2 {
-		t.Fatalf("export rows are not in turn order: %+v", records)
+	if record.SchemaVersion != model.APIRequestLogExportSchemaVersion || record.SessionId != "context-session" || len(record.Requests) != 2 {
+		t.Fatalf("unexpected session export identity: %+v", record)
 	}
-	if !second.ContextLoaded || !second.ContextComplete || second.ContextItemCount != 4 || second.TurnItemCount != 3 || second.DeduplicatedItemCount != 2 || second.TrainingItemCount != 5 {
-		t.Fatalf("unexpected context audit metadata: %+v", second)
+	if !record.ContextLoaded || !record.ContextComplete || record.ContextItemCount != 4 || record.TrainingItemCount != 5 {
+		t.Fatalf("unexpected context audit metadata: %+v", record)
+	}
+	if strings.Contains(lines[0], `"turn_id"`) || strings.Contains(lines[0], `"turn_index"`) || strings.Contains(lines[0], `"turn_item_count"`) {
+		t.Fatalf("session schema leaked turn-level fields: %s", lines[0])
 	}
 	expectedContent := []string{"shared instructions", "first question", "first answer", "second question", "second answer"}
-	seenSourceItems := make(map[int]bool, len(second.TrainingItems))
+	seenSourceItems := make(map[int]bool, len(record.TrainingItems))
 	currentQuestionCount := 0
-	for index, item := range second.TrainingItems {
+	for index, item := range record.TrainingItems {
 		if item.Seq != index+1 || item.Content != expectedContent[index] {
 			t.Fatalf("unexpected training item %d: %+v", index, item)
 		}
@@ -498,6 +578,7 @@ func TestRequestLogExportWorkersClaimBatchOnceAcrossInstances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(secondWorker.Close)
 	batch, err := model.CreateAPIRequestLogExportBatch(db, model.APIRequestLogTurnQueryParams{ModelName: "gpt-turn"}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -552,7 +633,7 @@ func TestViewerStatusDoesNotReadRawRequestTables(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	serveStatus(recorder, httptest.NewRequest(http.MethodGet, "/api/status", nil))
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"turn_count":1`) {
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"session_count":1`) || strings.Contains(recorder.Body.String(), `"turn_count"`) {
 		t.Fatalf("unexpected viewer status: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }

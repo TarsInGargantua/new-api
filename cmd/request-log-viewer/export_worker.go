@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -34,6 +35,8 @@ type requestLogExportWorker struct {
 	dir   string
 	owner string
 	wake  chan struct{}
+	stop  chan struct{}
+	once  sync.Once
 }
 
 type stagedExportArtifactDeletion struct {
@@ -65,6 +68,7 @@ func newRequestLogExportWorkerWithAutoRun(db *gorm.DB, dir string, autoRun bool)
 		dir:   absDir,
 		owner: owner,
 		wake:  make(chan struct{}, 1),
+		stop:  make(chan struct{}),
 	}
 	if autoRun {
 		go worker.run()
@@ -96,11 +100,20 @@ func (w *requestLogExportWorker) Enqueue(tag string) {
 	}
 }
 
+func (w *requestLogExportWorker) Close() {
+	if w == nil || w.stop == nil {
+		return
+	}
+	w.once.Do(func() { close(w.stop) })
+}
+
 func (w *requestLogExportWorker) run() {
 	ticker := time.NewTicker(requestLogExportPollInterval)
 	defer ticker.Stop()
 	for {
 		select {
+		case <-w.stop:
+			return
 		case <-w.wake:
 		case <-ticker.C:
 		}
@@ -160,6 +173,36 @@ func (w *requestLogExportWorker) buildClaimed(batch *model.APIRequestLogExportBa
 	for {
 		if _, err := model.RenewAPIRequestLogExportBatchLease(w.db, batch.Tag, w.owner, requestLogExportLease); err != nil {
 			return err
+		}
+		if batch.SchemaVersion >= 2 {
+			page, err := model.GetAPIRequestLogExportBatchSessionPage(w.db, batch.Id, sequence, requestLogExportPageSize)
+			if err != nil {
+				return err
+			}
+			for _, member := range page.Items {
+				if err := model.ValidateAPIRequestLogSessionForExport(member.Session); err != nil {
+					return fmt.Errorf("export session %d: %w", member.Sequence, err)
+				}
+				line, err := common.Marshal(trainingSessionJSONLRecord(member.Session))
+				if err != nil {
+					return err
+				}
+				if _, err := buffered.Write(line); err != nil {
+					return err
+				}
+				if err := buffered.WriteByte('\n'); err != nil {
+					return err
+				}
+				rowCount++
+			}
+			if _, err := model.UpdateAPIRequestLogExportBatchProgress(w.db, batch.Tag, w.owner, rowCount); err != nil {
+				return err
+			}
+			sequence = page.NextSequence
+			if !page.HasMore {
+				break
+			}
+			continue
 		}
 		page, err := model.GetAPIRequestLogExportBatchTurnPage(w.db, batch.Id, sequence, requestLogExportPageSize)
 		if err != nil {
@@ -350,7 +393,7 @@ func trainingTurnJSONLRecord(detail *model.APIRequestLogTurnDetail) map[string]i
 	}
 	items, contextItemCount, turnItemCount, deduplicatedItemCount := trainingTurnJSONLItems(detail)
 	return map[string]interface{}{
-		"schema_version":             model.APIRequestLogExportSchemaVersion,
+		"schema_version":             1,
 		"session_id":                 detail.SessionId,
 		"turn_id":                    detail.TurnId,
 		"turn_index":                 detail.TurnIndex,
@@ -376,6 +419,72 @@ func trainingTurnJSONLRecord(detail *model.APIRequestLogTurnDetail) map[string]i
 		"context_omitted_item_count": detail.ContextOmittedItemCount,
 		"turn_item_count":            turnItemCount,
 		"deduplicated_item_count":    deduplicatedItemCount,
+		"training_item_count":        len(items),
+		"training_items":             items,
+	}
+}
+
+func trainingSessionJSONLRecord(detail *model.APIRequestLogSessionDetail) map[string]interface{} {
+	if detail == nil {
+		return map[string]interface{}{}
+	}
+	requests := make([]map[string]interface{}, 0, len(detail.Requests))
+	for _, request := range detail.Requests {
+		requests = append(requests, map[string]interface{}{
+			"sequence":            request.Sequence,
+			"request_id":          request.RequestId,
+			"upstream_request_id": request.UpstreamRequestId,
+			"created_at":          request.CreatedAt,
+			"status_code":         request.StatusCode,
+			"is_stream":           request.IsStream,
+		})
+	}
+	items := make([]map[string]interface{}, 0, len(detail.Items))
+	contextItemCount := 0
+	for _, item := range detail.Items {
+		if item.ContextSnapshot {
+			contextItemCount++
+		}
+		items = append(items, map[string]interface{}{
+			"seq":              item.Sequence,
+			"phase":            item.Phase,
+			"type":             item.ItemType,
+			"role":             item.Role,
+			"content_type":     item.ContentType,
+			"content":          string(item.Content),
+			"tool_call_id":     item.ToolCallId,
+			"name":             item.Name,
+			"source":           item.Source,
+			"source_item_id":   item.SourceItemId,
+			"source_seq":       item.SourceSequence,
+			"context_snapshot": item.ContextSnapshot,
+			"provider_item_id": item.ProviderItemId,
+			"message_phase":    item.MessagePhase,
+			"status":           item.ItemStatus,
+		})
+	}
+	return map[string]interface{}{
+		"schema_version":             model.APIRequestLogExportSchemaVersion,
+		"session_id":                 detail.SessionId,
+		"protocol":                   detail.Protocol,
+		"status":                     detail.CompletionStatus,
+		"attribution":                detail.Attribution,
+		"started_at":                 detail.StartedAt,
+		"ended_at":                   detail.CompletedAt,
+		"user_id":                    detail.UserId,
+		"username":                   detail.Username,
+		"token_id":                   detail.TokenId,
+		"token_name":                 detail.TokenName,
+		"model":                      detail.ModelName,
+		"prompt_tokens":              detail.PromptTokens,
+		"completion_tokens":          detail.CompletionTokens,
+		"token_used":                 detail.TokenUsed,
+		"quota":                      detail.Quota,
+		"requests":                   requests,
+		"context_loaded":             detail.ContextLoaded,
+		"context_complete":           detail.ContextComplete,
+		"context_item_count":         contextItemCount,
+		"context_omitted_item_count": detail.ContextOmittedItemCount,
 		"training_item_count":        len(items),
 		"training_items":             items,
 	}

@@ -86,6 +86,7 @@ type APIRequestLogTurn struct {
 	Quota                  int    `json:"quota" gorm:"default:0"`
 	MaterializationVersion int64  `json:"materialization_version" gorm:"not null;default:0"`
 	ExportedVersion        int64  `json:"exported_version" gorm:"not null;default:0;index"`
+	ExportBatchId          int64  `json:"export_batch_id,omitempty" gorm:"not null;default:0;index"`
 }
 
 func (APIRequestLogTurn) TableName() string { return apiRequestLogTurnsTable }
