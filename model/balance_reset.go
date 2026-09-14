@@ -55,6 +55,33 @@ func EnsureDailyBalance(userID int, now time.Time) error {
 	return resetDailyBalances(DB.Model(&User{}).Where("id = ?", userID), now)
 }
 
+// One-time, explicitly requested normalization for the 2026-09-14 rollout.
+// Persist the claim in the same transaction as the balances, so restarting or
+// starting another replica cannot overwrite subsequent spending again.
+func NormalizeBalancesSeptember2026(now time.Time) error {
+	quota, err := DailyBalanceQuota()
+	if err != nil {
+		return err
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		claim := Option{Key: "migration.balance_normalization_20260914_v1", Value: common.GetUUID()}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&claim).Error; err != nil {
+			return err
+		}
+		var saved Option
+		if err := tx.Where(&Option{Key: claim.Key}).First(&saved).Error; err != nil {
+			return err
+		}
+		// Compare the unique claim rather than RowsAffected, whose no-op upsert
+		// semantics depend on the MySQL client's found-rows configuration.
+		if saved.Value != claim.Value {
+			return nil
+		}
+		return tx.Model(&User{}).Where("LOWER(username) <> ?", "admin").
+			Updates(map[string]interface{}{"quota": quota, "balance_reset_at": BalanceResetDay(now)}).Error
+	})
+}
+
 func ResetOwnBalance(userID int, username string, now time.Time) (int, error) {
 	quota, err := DailyBalanceQuota()
 	if err != nil {

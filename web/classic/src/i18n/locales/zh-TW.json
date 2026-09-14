@@ -7,7 +7,6 @@
     "admin 账号不参与余额重置": "admin 帳號不參與餘額重置",
     "请输入自己的用户名以确认重置": "請輸入自己的使用者名稱以確認重置",
     "确认重置": "確認重置",
-    "余额每天北京时间零点重置为当前显示单位的 100。手动重置会将当前余额覆盖为 100，历史消耗保留。": "餘額每天北京時間零點重置為目前顯示單位的 100。手動重置會將目前餘額覆蓋為 100，歷史消耗保留。",
     " + Web搜索 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}_other": " + Web搜尋 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}",
     " + 图片生成调用 {{symbol}}{{price}} / 1次 * {{ratioType}} {{ratio}}": " + 圖片生成調用 {{symbol}}{{price}} / 1次 * {{ratioType}} {{ratio}}",
     " + 文件搜索 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}_other": " + 檔案搜尋 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}",

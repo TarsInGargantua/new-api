@@ -7,7 +7,6 @@
     "admin 账号不参与余额重置": "The admin account is excluded from balance resets",
     "请输入自己的用户名以确认重置": "Enter your username to confirm the reset",
     "确认重置": "Confirm reset",
-    "余额每天北京时间零点重置为当前显示单位的 100。手动重置会将当前余额覆盖为 100，历史消耗保留。": "Your balance resets to 100 in the current display unit every day at 00:00 Beijing time. Resetting now replaces your remaining balance with 100 and keeps your usage history.",
     " + Web搜索 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}_one": " + Web search {{count}} time / 1K times * {{symbol}}{{price}} * {{ratioType}} {{ratio}}",
     " + Web搜索 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}_other": " + Web search {{count}} times / 1K times * {{symbol}}{{price}} * {{ratioType}} {{ratio}}",
     " + 图片生成调用 {{symbol}}{{price}} / 1次 * {{ratioType}} {{ratio}}": " + Image generation call {{symbol}}{{price}} / 1 time * {{ratioType}} {{ratio}}",

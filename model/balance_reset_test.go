@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"math"
 	"sync"
 	"testing"
@@ -9,7 +10,67 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+func TestNormalizeBalancesOncePreservesAdminAndSpending(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Option{}))
+	users := []User{
+		{Username: "ryan", AffCode: "ryan", Quota: 123, UsedQuota: 456, RequestCount: 7},
+		{Username: "staff", AffCode: "staff", Quota: -10, Role: common.RoleAdminUser},
+		{Username: "admin", AffCode: "admin", Quota: 999},
+		{Username: "ADMIN", AffCode: "ADMIN", Quota: 888},
+	}
+	require.NoError(t, DB.Create(&users).Error)
+	now := time.Now()
+	target, err := DailyBalanceQuota()
+	require.NoError(t, err)
+	require.NoError(t, NormalizeBalancesSeptember2026(now))
+	for i := range users {
+		var actual User
+		require.NoError(t, DB.First(&actual, users[i].Id).Error)
+		if i < 2 {
+			require.Equal(t, target, actual.Quota)
+			require.Equal(t, BalanceResetDay(now), actual.BalanceResetAt)
+		} else {
+			require.Equal(t, users[i].Quota, actual.Quota)
+		}
+		require.Equal(t, users[i].UsedQuota, actual.UsedQuota)
+		require.Equal(t, users[i].RequestCount, actual.RequestCount)
+	}
+	require.NoError(t, DecreaseUserQuota(users[0].Id, 1234, false))
+	require.NoError(t, NormalizeBalancesSeptember2026(now))
+	var ryan User
+	require.NoError(t, DB.First(&ryan, users[0].Id).Error)
+	require.Equal(t, target-1234, ryan.Quota)
+}
+
+func TestNormalizeBalancesFailureRollsBackClaim(t *testing.T) {
+	setupAPIRequestLogTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Option{}))
+	user := User{Username: "ryan", Quota: 12}
+	require.NoError(t, DB.Create(&user).Error)
+	callback := "test:fail_balance_normalization"
+	require.NoError(t, DB.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "users" {
+			tx.AddError(errors.New("simulated balance write failure"))
+		}
+	}))
+	err := NormalizeBalancesSeptember2026(time.Now())
+	require.NoError(t, DB.Callback().Update().Remove(callback))
+	require.Error(t, err)
+	var count int64
+	require.NoError(t, DB.Model(&Option{}).Count(&count).Error)
+	require.Zero(t, count)
+	require.NoError(t, DB.First(&user, user.Id).Error)
+	require.Equal(t, 12, user.Quota)
+	require.NoError(t, NormalizeBalancesSeptember2026(time.Now()))
+	require.NoError(t, DB.First(&user, user.Id).Error)
+	target, err := DailyBalanceQuota()
+	require.NoError(t, err)
+	require.Equal(t, target, user.Quota)
+}
 
 func TestDailyBalanceDisplayUnit(t *testing.T) {
 	settings := operation_setting.GetGeneralSetting()

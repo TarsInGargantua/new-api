@@ -289,6 +289,9 @@ func InitResources() error {
 
 	// Initialize options, should after model.InitDB()
 	model.InitOptionMap()
+	if err = model.NormalizeBalancesSeptember2026(time.Now()); err != nil {
+		return fmt.Errorf("failed to normalize non-admin balances: %w", err)
+	}
 
 	// 清理旧的磁盘缓存文件
 	common.CleanupOldCacheFiles()

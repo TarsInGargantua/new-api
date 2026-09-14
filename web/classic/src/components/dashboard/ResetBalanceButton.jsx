@@ -88,11 +88,6 @@ const ResetBalanceButton = () => {
         closeOnEsc={!pending}
         maskClosable={!pending}
       >
-        <p className='mb-4'>
-          {t(
-            '余额每天北京时间零点重置为当前显示单位的 100。手动重置会将当前余额覆盖为 100，历史消耗保留。',
-          )}
-        </p>
         <label htmlFor='reset-balance-username'>
           {t('请输入自己的用户名以确认重置')}
         </label>

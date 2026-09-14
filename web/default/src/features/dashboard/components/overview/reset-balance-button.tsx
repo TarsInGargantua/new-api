@@ -30,7 +30,6 @@ import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -114,11 +113,6 @@ export function ResetBalanceButton() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t('Reset balance')}</DialogTitle>
-            <DialogDescription>
-              {t(
-                'Your balance resets to 100 in the current display unit every day at 00:00 Beijing time. Resetting now replaces your remaining balance with 100 and keeps your usage history.'
-              )}
-            </DialogDescription>
           </DialogHeader>
           <form
             className='flex flex-col gap-4'

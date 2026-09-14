@@ -7,7 +7,6 @@
     "The admin account is excluded from balance resets": "Le compte admin est exclu des réinitialisations du solde",
     "Enter your username to confirm the reset": "Saisissez votre nom d’utilisateur pour confirmer la réinitialisation",
     "Confirm reset": "Confirmer la réinitialisation",
-    "Your balance resets to 100 in the current display unit every day at 00:00 Beijing time. Resetting now replaces your remaining balance with 100 and keeps your usage history.": "Votre solde est réinitialisé à 100 dans l’unité d’affichage actuelle chaque jour à 00:00, heure de Pékin. Une réinitialisation manuelle remplace le solde restant par 100 et conserve l’historique d’utilisation.",
     "360": "360",
     "1000": "1000",
     "10000": "10000",

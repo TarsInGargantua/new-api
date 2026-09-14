@@ -174,6 +174,17 @@ func TestRyanBalanceResetRelay(t *testing.T) {
 		require.Contains(t, rec.Body.String(), `"success":true`)
 		require.Equal(t, value, balance())
 	}
+	t.Run("one-time rollout normalization preserves subsequent spending", func(t *testing.T) {
+		override(123)
+		require.NoError(t, model.NormalizeBalancesSeptember2026(time.Now()))
+		require.Equal(t, target, balance())
+		require.Equal(t, 200, chat(false).Code)
+		afterSpend := balance()
+		require.Less(t, afterSpend, target)
+		require.NoError(t, model.NormalizeBalancesSeptember2026(time.Now()))
+		require.Equal(t, afterSpend, balance())
+		reset()
+	})
 	t.Run("existing key works and settles", func(t *testing.T) {
 		rec := chat(false)
 		require.Equal(t, 200, rec.Code, rec.Body.String())

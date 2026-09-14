@@ -6,7 +6,6 @@
     "余额已重置": "Đã đặt lại số dư",
     "admin 账号不参与余额重置": "Tài khoản admin không thuộc diện đặt lại số dư",
     "请输入自己的用户名以确认重置": "Nhập tên người dùng của bạn để xác nhận đặt lại",
-    "余额每天北京时间零点重置为当前显示单位的 100。手动重置会将当前余额覆盖为 100，历史消耗保留。": "Số dư được đặt lại thành 100 theo đơn vị hiển thị hiện tại vào 00:00 giờ Bắc Kinh mỗi ngày. Đặt lại thủ công sẽ thay số dư còn lại bằng 100 và giữ nguyên lịch sử sử dụng.",
     " + Web搜索 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}_one": " + Tìm kiếm Web {{count}} lần / 1K lần * {{symbol}}{{price}} * {{ratioType}} {{ratio}}",
     " + Web搜索 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}_other": " + Tìm kiếm Web {{count}} lần / 1K lần * {{symbol}}{{price}} * {{ratioType}} {{ratio}}",
     " + 图片生成调用 {{symbol}}{{price}} / 1次 * {{ratioType}} {{ratio}}": " + Gọi tạo hình ảnh {{symbol}}{{price}} / 1 lần * {{ratioType}} {{ratio}}",
