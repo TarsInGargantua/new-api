@@ -1,5 +1,13 @@
 {
   "translation": {
+    "Reset balance": "Đặt lại số dư",
+    "Username does not match": "Tên người dùng không khớp",
+    "Failed to reset balance": "Không thể đặt lại số dư",
+    "Balance reset successfully": "Đã đặt lại số dư",
+    "The admin account is excluded from balance resets": "Tài khoản admin không thuộc diện đặt lại số dư",
+    "Enter your username to confirm the reset": "Nhập tên người dùng của bạn để xác nhận đặt lại",
+    "Confirm reset": "Xác nhận đặt lại",
+    "Your balance resets to 100 in the current display unit every day at 00:00 Beijing time. Resetting now replaces your remaining balance with 100 and keeps your usage history.": "Số dư được đặt lại thành 100 theo đơn vị hiển thị hiện tại vào 00:00 giờ Bắc Kinh mỗi ngày. Đặt lại thủ công sẽ thay số dư còn lại bằng 100 và giữ nguyên lịch sử sử dụng.",
     "360": "360",
     "1000": "1000",
     "10000": "10000",

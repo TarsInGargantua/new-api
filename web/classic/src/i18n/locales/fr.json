@@ -1,5 +1,13 @@
 {
   "translation": {
+    "重置余额": "Réinitialiser le solde",
+    "用户名不匹配": "Le nom d’utilisateur ne correspond pas",
+    "余额重置失败": "Échec de la réinitialisation du solde",
+    "余额已重置": "Solde réinitialisé",
+    "admin 账号不参与余额重置": "Le compte admin est exclu des réinitialisations du solde",
+    "请输入自己的用户名以确认重置": "Saisissez votre nom d’utilisateur pour confirmer la réinitialisation",
+    "确认重置": "Confirmer la réinitialisation",
+    "余额每天北京时间零点重置为当前显示单位的 100。手动重置会将当前余额覆盖为 100，历史消耗保留。": "Votre solde est réinitialisé à 100 dans l’unité d’affichage actuelle chaque jour à 00:00, heure de Pékin. Une réinitialisation manuelle remplace le solde restant par 100 et conserve l’historique d’utilisation.",
     " + Web搜索 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}_one": " + Recherche Web {{count}} fois / 1K fois * {{symbol}}{{price}} * {{ratioType}} {{ratio}}",
     " + Web搜索 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}_many": " + Recherche Web {{count}} fois / 1K fois * {{symbol}}{{price}} * {{ratioType}} {{ratio}}",
     " + Web搜索 {{count}}次 / 1K 次 * {{symbol}}{{price}} * {{ratioType}} {{ratio}}_other": " + Recherche Web {{count}} fois / 1K fois * {{symbol}}{{price}} * {{ratioType}} {{ratio}}",

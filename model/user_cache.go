@@ -94,10 +94,14 @@ func GetUserCache(userId int) (userCache *UserBase, err error) {
 	// Try getting from Redis first
 	userCache, err = cacheGetUserBase(userId)
 	if err == nil {
-		return userCache, nil
+		userCache.Quota, err = GetUserQuota(userId, true)
+		return userCache, err
 	}
 
 	// If Redis fails, get from DB
+	if err = EnsureDailyBalance(userId, time.Now()); err != nil {
+		return nil, err
+	}
 	fromDB = true
 	user, err = GetUserById(userId, false)
 	if err != nil {

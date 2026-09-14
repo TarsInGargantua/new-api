@@ -1,5 +1,13 @@
 {
   "translation": {
+    "Reset balance": "残高をリセット",
+    "Username does not match": "ユーザー名が一致しません",
+    "Failed to reset balance": "残高のリセットに失敗しました",
+    "Balance reset successfully": "残高をリセットしました",
+    "The admin account is excluded from balance resets": "admin アカウントは残高リセットの対象外です",
+    "Enter your username to confirm the reset": "リセットを確認するために自分のユーザー名を入力してください",
+    "Confirm reset": "リセットを確認",
+    "Your balance resets to 100 in the current display unit every day at 00:00 Beijing time. Resetting now replaces your remaining balance with 100 and keeps your usage history.": "残高は毎日北京時間の午前0時に現在の表示単位で100にリセットされます。手動リセットでは現在の残高が100に置き換わり、利用履歴は保持されます。",
     "360": "360",
     "1000": "1000",
     "10000": "10000",

@@ -18,9 +18,9 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React from 'react';
-import { Card, Avatar, Skeleton, Tag } from '@douyinfe/semi-ui';
+import { Card, Avatar, Skeleton } from '@douyinfe/semi-ui';
 import { VChart } from '@visactor/react-vchart';
-import { useNavigate } from 'react-router-dom';
+import ResetBalanceButton from './ResetBalanceButton';
 import { useTranslation } from 'react-i18next';
 
 const StatsCards = ({
@@ -30,7 +30,6 @@ const StatsCards = ({
   CARD_PROPS,
   CHART_CONFIG,
 }) => {
-  const navigate = useNavigate();
   const { t } = useTranslation();
   return (
     <div className='mb-4'>
@@ -81,17 +80,7 @@ const StatsCards = ({
                     </div>
                   </div>
                   {item.title === t('当前余额') ? (
-                    <Tag
-                      color='white'
-                      shape='circle'
-                      size='large'
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate('/console/topup');
-                      }}
-                    >
-                      {t('充值')}
-                    </Tag>
+                    <ResetBalanceButton />
                   ) : (
                     (loading ||
                       (item.trendData && item.trendData.length > 0)) && (

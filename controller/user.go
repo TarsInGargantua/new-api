@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -499,6 +500,10 @@ func GetAffCode(c *gin.Context) {
 
 func GetSelf(c *gin.Context) {
 	id := c.GetInt("id")
+	if err := model.EnsureDailyBalance(id, time.Now()); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	userRole := c.GetInt("role")
 	user, err := model.GetUserById(id, false)
 	if err != nil {

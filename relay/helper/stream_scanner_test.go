@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,45 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestStreamScannerHandler_ClientDisconnectUnblocksUpstream(t *testing.T) {
+	reader, writer := io.Pipe()
+	c, resp, info := setupStreamTest(t, reader)
+	resp.Body = reader
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+	c.Request = c.Request.WithContext(ctx)
+	firstChunk := make(chan struct{})
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("scanner still running after upstream closed")
+		}
+	})
+	go func() {
+		StreamScannerHandler(c, resp, info, func(_ string, _ *StreamResult) { close(firstChunk) })
+		close(done)
+	}()
+	go func() { _, _ = fmt.Fprint(writer, "data: first\n\n") }()
+	select {
+	case <-firstChunk:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first stream chunk was not delivered")
+	}
+	// The upstream stays open and sends no more bytes. Client cancellation
+	// must interrupt its blocked read rather than wait for the cleanup timeout.
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client disconnect did not unblock the upstream reader")
+	}
+	require.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
+}
 
 func init() {
 	gin.SetMode(gin.TestMode)

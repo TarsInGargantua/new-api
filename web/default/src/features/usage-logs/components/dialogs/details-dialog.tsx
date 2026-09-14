@@ -323,9 +323,9 @@ function ConversationThreadSection(props: {
       {!isLoading && logs.length > 0 && (
         <div className='space-y-2'>
           {logs.map((log) => {
-            const logOther = parseLogOther(log.other)
+            const logOther = parseLogOther(log.other ?? '')
             const logCapture = logOther?.message_capture
-            const summary = logCapture?.answer || log.content || '-'
+            const summary = logCapture?.answer || ('content' in log && log.content) || '-'
             return (
               <div
                 key={`${log.id}-${log.created_at}`}
@@ -333,9 +333,9 @@ function ConversationThreadSection(props: {
               >
                 <div className='text-muted-foreground mb-1 flex items-center justify-between gap-2'>
                   <span>
-                    {new Date(log.created_at * 1000).toLocaleString()}
+                    {log.created_at ? new Date(log.created_at * 1000).toLocaleString() : '-'}
                   </span>
-                  <span>{log.request_id || '-'}</span>
+                  <span>{('request_id' in log && log.request_id) || '-'}</span>
                 </div>
                 {logCapture?.question && (
                   <p className='mb-1 font-medium'>{logCapture.question}</p>

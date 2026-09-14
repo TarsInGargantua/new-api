@@ -1,5 +1,13 @@
 {
   "translation": {
+    "Reset balance": "Сбросить баланс",
+    "Username does not match": "Имя пользователя не совпадает",
+    "Failed to reset balance": "Не удалось сбросить баланс",
+    "Balance reset successfully": "Баланс сброшен",
+    "The admin account is excluded from balance resets": "Баланс учётной записи admin не сбрасывается",
+    "Enter your username to confirm the reset": "Введите своё имя пользователя для подтверждения сброса",
+    "Confirm reset": "Подтвердить сброс",
+    "Your balance resets to 100 in the current display unit every day at 00:00 Beijing time. Resetting now replaces your remaining balance with 100 and keeps your usage history.": "Баланс ежедневно сбрасывается до 100 в текущих единицах отображения в 00:00 по пекинскому времени. Ручной сброс заменит текущий остаток на 100 и сохранит историю использования.",
     "360": "360",
     "1000": "1000",
     "10000": "10000",
