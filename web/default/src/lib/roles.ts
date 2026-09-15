@@ -19,7 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import { t } from 'i18next'
 
 export const ROLE = {
-  GUEST: 0, // 后续如果需要用到这个角色那就再加，同语先留一下
+  GUEST: 0,
+  TEST: 2,
   USER: 1,
   ADMIN: 10,
   SUPER_ADMIN: 100,
@@ -34,6 +35,7 @@ const ROLE_LABEL_KEYS: Record<RoleValue, string> = {
   [ROLE.ADMIN]: 'Admin',
   [ROLE.USER]: 'User',
   [ROLE.GUEST]: 'Guest',
+  [ROLE.TEST]: 'test',
 }
 
 export function getRoleLabelKey(role?: number): string {

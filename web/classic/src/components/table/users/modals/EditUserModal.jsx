@@ -21,6 +21,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   API,
+  isRoot,
   showError,
   showSuccess,
   renderQuota,
@@ -81,6 +82,7 @@ const EditUserModal = (props) => {
 
   const getInitValues = () => ({
     username: '',
+    role: 0,
     display_name: '',
     password: '',
     github_id: '',
@@ -170,7 +172,11 @@ const EditUserModal = (props) => {
   const adjustQuota = async () => {
     const quotaVal = parseInt(adjustQuotaLocal) || 0;
     if (quotaVal <= 0 && adjustMode !== 'override') return;
-    if (adjustMode === 'override' && (adjustQuotaLocal === '' || adjustQuotaLocal == null)) return;
+    if (
+      adjustMode === 'override' &&
+      (adjustQuotaLocal === '' || adjustQuotaLocal == null)
+    )
+      return;
     setAdjustLoading(true);
     try {
       const res = await API.post('/api/user/manage', {
@@ -314,6 +320,27 @@ const EditUserModal = (props) => {
                       />
                     </Col>
 
+                    {userId && (
+                      <Col span={24}>
+                        <Form.Select
+                          field='role'
+                          label={t('角色')}
+                          disabled={inputs?.role === 100}
+                          optionList={[
+                            { label: t('游客'), value: 0 },
+                            { label: t('普通用户'), value: 1 },
+                            { label: t('test'), value: 2 },
+                            ...(isRoot() || inputs?.role === 10
+                              ? [{ label: t('管理员'), value: 10 }]
+                              : []),
+                            ...(inputs?.role === 100
+                              ? [{ label: t('超级管理员'), value: 100 }]
+                              : []),
+                          ]}
+                          style={{ width: '100%' }}
+                        />
+                      </Col>
+                    )}
                     <Col span={24}>
                       <Form.Input
                         field='display_name'
@@ -401,7 +428,10 @@ const EditUserModal = (props) => {
                             ? `▾ ${t('收起原生额度输入')}`
                             : `▸ ${t('使用原生额度输入')}`}
                         </div>
-                        <div style={{ display: showQuotaInput ? 'block' : 'none' }} className='mt-2'>
+                        <div
+                          style={{ display: showQuotaInput ? 'block' : 'none' }}
+                          className='mt-2'
+                        >
                           <Form.InputNumber
                             field='quota'
                             label={t('额度')}
@@ -539,7 +569,10 @@ const EditUserModal = (props) => {
             ? `▾ ${t('收起原生额度输入')}`
             : `▸ ${t('使用原生额度输入')}`}
         </div>
-        <div style={{ display: showAdjustQuotaRaw ? 'block' : 'none' }} className='mt-2'>
+        <div
+          style={{ display: showAdjustQuotaRaw ? 'block' : 'none' }}
+          className='mt-2'
+        >
           <div className='mb-1'>
             <Text size='small'>{t('额度')}</Text>
           </div>

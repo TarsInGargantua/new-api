@@ -224,7 +224,7 @@ func LinuxdoOAuth(c *gin.Context) {
 			if linuxdoUser.TrustLevel >= common.LinuxDOMinimumTrustLevel {
 				user.Username = "linuxdo_" + strconv.Itoa(model.GetMaxUserId()+1)
 				user.DisplayName = linuxdoUser.Name
-				user.Role = common.RoleCommonUser
+				user.Role = common.RoleGuestUser
 				user.Status = common.UserStatusEnabled
 
 				affCode := session.Get("aff")

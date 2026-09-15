@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React, { useState, useRef } from 'react';
-import { API, showError, showSuccess } from '../../../../helpers';
+import { API, isRoot, showError, showSuccess } from '../../../../helpers';
 import { useIsMobile } from '../../../../hooks/common/useIsMobile';
 import {
   Button,
@@ -46,6 +46,7 @@ const AddUserModal = (props) => {
 
   const getInitValues = () => ({
     username: '',
+    role: 0,
     display_name: '',
     password: '',
     remark: '',
@@ -145,6 +146,22 @@ const AddUserModal = (props) => {
                       placeholder={t('请输入用户名')}
                       rules={[{ required: true, message: t('请输入用户名') }]}
                       showClear
+                    />
+                  </Col>
+                  <Col span={24}>
+                    <Form.Select
+                      field='role'
+                      label={t('角色')}
+                      disabled={false}
+                      optionList={[
+                        { label: t('游客'), value: 0 },
+                        { label: t('普通用户'), value: 1 },
+                        { label: t('test'), value: 2 },
+                        ...(isRoot()
+                          ? [{ label: t('管理员'), value: 10 }]
+                          : []),
+                      ]}
+                      style={{ width: '100%' }}
                     />
                   </Col>
                   <Col span={24}>

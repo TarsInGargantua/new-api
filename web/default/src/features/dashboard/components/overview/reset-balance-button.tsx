@@ -87,15 +87,13 @@ export function ResetBalanceButton() {
     onError: handleServerError,
   })
 
-  const excluded = user?.username.toLowerCase() === 'admin'
+  const excluded = !user || ![1, 10, 100].includes(user.role)
   return (
     <>
       <Button
         disabled={!user || excluded}
         title={
-          excluded
-            ? t('The admin account is excluded from balance resets')
-            : undefined
+          excluded ? t('This role is excluded from balance resets') : undefined
         }
         onClick={() => {
           form.reset()

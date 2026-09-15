@@ -28,7 +28,7 @@ type User struct {
 	Password         string         `json:"password" gorm:"not null;" validate:"min=8,max=20"`
 	OriginalPassword string         `json:"original_password" gorm:"-:all"` // this field is only for Password change verification, don't save it to database!
 	DisplayName      string         `json:"display_name" gorm:"index" validate:"max=20"`
-	Role             int            `json:"role" gorm:"type:int;default:1"`   // admin, common
+	Role             int            `json:"role" gorm:"type:int;default:0"`   // guest, common, test, admin, root
 	Status           int            `json:"status" gorm:"type:int;default:1"` // enabled, disabled
 	Email            string         `json:"email" gorm:"index" validate:"max=50"`
 	GitHubId         string         `json:"github_id" gorm:"column:github_id;index"`
@@ -462,7 +462,7 @@ func (user *User) Insert(inviterId int) error {
 		RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("新用户初始额度 %s", logger.LogQuota(user.Quota)))
 	}
 	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
-		if common.QuotaForInvitee > 0 {
+		if common.QuotaForInvitee > 0 && CanResetBalance(user.Role) {
 			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
 			RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", logger.LogQuota(common.QuotaForInvitee)))
 		}
@@ -525,7 +525,7 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 		RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("新用户初始额度 %s", logger.LogQuota(user.Quota)))
 	}
 	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
-		if common.QuotaForInvitee > 0 {
+		if common.QuotaForInvitee > 0 && CanResetBalance(user.Role) {
 			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
 			RecordLog(user.Id, LogTypeSystem, fmt.Sprintf("使用邀请码赠送 %s", logger.LogQuota(common.QuotaForInvitee)))
 		}
@@ -546,8 +546,8 @@ func (user *User) Update(updatePassword bool) error {
 	}
 	newUser := *user
 	DB.First(&user, user.Id)
-	// Profile updates must not restore a balance or reset date from a stale snapshot.
-	if err = DB.Model(user).Omit("quota", "balance_reset_at").Updates(newUser).Error; err != nil {
+	// Profile updates must not restore a balance, reset date, or role from a stale snapshot.
+	if err = DB.Model(user).Omit("quota", "balance_reset_at", "role").Updates(newUser).Error; err != nil {
 		return err
 	}
 
@@ -570,6 +570,7 @@ func (user *User) Edit(updatePassword bool) error {
 		"display_name": newUser.DisplayName,
 		"group":        newUser.Group,
 		"remark":       newUser.Remark,
+		"role":         newUser.Role,
 	}
 	if updatePassword {
 		updates["password"] = newUser.Password

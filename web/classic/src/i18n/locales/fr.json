@@ -3724,6 +3724,9 @@
     "用量": "Utilisation",
     "全部时间": "Toute la période",
     "训练条目": "Éléments d’entraînement",
-    "未解析到训练条目": "Aucun élément d’entraînement analysé"
+    "未解析到训练条目": "Aucun élément d’entraînement analysé",
+    "当前角色不参与余额重置": "Ce rôle ne permet pas la réinitialisation du solde",
+    "test": "test",
+    "游客": "Invité"
   }
 }

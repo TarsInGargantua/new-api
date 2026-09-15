@@ -3869,6 +3869,9 @@
     "用量": "Usage",
     "全部时间": "All time",
     "训练条目": "Training Items",
-    "未解析到训练条目": "No training items parsed"
+    "未解析到训练条目": "No training items parsed",
+    "当前角色不参与余额重置": "This role is excluded from balance resets",
+    "test": "test",
+    "游客": "Guest"
   }
 }

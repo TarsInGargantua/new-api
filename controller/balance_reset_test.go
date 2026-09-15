@@ -27,8 +27,8 @@ func TestResetOwnBalanceAuthenticatedAccountOnly(t *testing.T) {
 	model.DB, model.LOG_DB = db, db
 	t.Cleanup(func() { model.DB, model.LOG_DB = oldDB, oldLogDB })
 	users := []model.User{
-		{Id: 1, Username: "alice", AffCode: "alice", Quota: 5, BalanceResetAt: model.BalanceResetDay(time.Now())},
-		{Id: 2, Username: "bob", AffCode: "bob", Quota: 6},
+		{Role: common.RoleCommonUser, Id: 1, Username: "alice", AffCode: "alice", Quota: 5, BalanceResetAt: model.BalanceResetDay(time.Now())},
+		{Role: common.RoleCommonUser, Id: 2, Username: "bob", AffCode: "bob", Quota: 6},
 		{Id: 3, Username: "admin", AffCode: "admin", Quota: 7},
 	}
 	require.NoError(t, db.Create(&users).Error)
@@ -40,7 +40,7 @@ func TestResetOwnBalanceAuthenticatedAccountOnly(t *testing.T) {
 	}{
 		{"missing confirmation", 1, `{}`, http.StatusBadRequest},
 		{"wrong username", 1, `{"username":"bob"}`, http.StatusBadRequest},
-		{"admin excluded", 3, `{"username":"admin"}`, http.StatusBadRequest},
+		{"guest excluded regardless of username", 3, `{"username":"admin"}`, http.StatusBadRequest},
 		{"reset own account despite forged id", 1, `{"username":"alice","user_id":2}`, http.StatusOK},
 	} {
 		t.Run(test.name, func(t *testing.T) {

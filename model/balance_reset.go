@@ -3,7 +3,6 @@ package model
 import (
 	"errors"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -15,7 +14,16 @@ import (
 // The policy follows Beijing midnight, independently of the host's timezone.
 var balanceResetLocation = time.FixedZone("Asia/Shanghai", 8*60*60)
 
-var ErrBalanceResetAdmin = errors.New("admin account is excluded from balance resets")
+var ErrBalanceResetRole = errors.New("this role is excluded from balance resets")
+
+func CanResetBalance(role int) bool {
+	return role == common.RoleCommonUser || role == common.RoleAdminUser || role == common.RoleRootUser
+}
+
+func balanceResetRoles() []int {
+	return []int{common.RoleCommonUser, common.RoleAdminUser, common.RoleRootUser}
+}
+
 var ErrBalanceResetUsername = errors.New("username confirmation does not match")
 
 func BalanceResetDay(now time.Time) int64 {
@@ -41,7 +49,7 @@ func resetDailyBalances(query *gorm.DB, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	return query.Where("LOWER(username) <> ? AND balance_reset_at < ?", "admin", BalanceResetDay(now)).
+	return query.Where("role IN ? AND balance_reset_at < ?", balanceResetRoles(), BalanceResetDay(now)).
 		Updates(map[string]interface{}{"quota": quota, "balance_reset_at": BalanceResetDay(now)}).Error
 }
 
@@ -77,7 +85,7 @@ func NormalizeBalancesSeptember2026(now time.Time) error {
 		if saved.Value != claim.Value {
 			return nil
 		}
-		return tx.Model(&User{}).Where("LOWER(username) <> ?", "admin").
+		return tx.Model(&User{}).Where("role IN ?", balanceResetRoles()).
 			Updates(map[string]interface{}{"quota": quota, "balance_reset_at": BalanceResetDay(now)}).Error
 	})
 }
@@ -98,17 +106,17 @@ func ResetOwnBalance(userID int, username string, now time.Time) (int, error) {
 			}
 		}
 		var user User
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "username").First(&user, userID).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "username", "role").First(&user, userID).Error; err != nil {
 			return err
 		}
-		if strings.EqualFold(user.Username, "admin") {
-			return ErrBalanceResetAdmin
+		if !CanResetBalance(user.Role) {
+			return ErrBalanceResetRole
 		}
 		if username != user.Username {
 			return ErrBalanceResetUsername
 		}
 		// The authenticated ID, never a client-supplied ID, selects the account.
-		result := tx.Model(&User{}).Where("id = ? AND username = ? AND LOWER(username) <> ?", userID, username, "admin").
+		result := tx.Model(&User{}).Where("id = ? AND username = ? AND role IN ?", userID, username, balanceResetRoles()).
 			Updates(map[string]interface{}{"quota": quota, "balance_reset_at": BalanceResetDay(now)})
 		return result.Error
 	})
@@ -130,8 +138,12 @@ func changeUserBalance(userID int, delta int, now time.Time) error {
 
 // New accounts start with today's allowance before their first dashboard visit.
 func (user *User) initializeDailyBalance() error {
-	user.Quota = common.QuotaForNewUser
-	if strings.EqualFold(user.Username, "admin") {
+	if !common.IsValidateRole(user.Role) {
+		return errors.New("invalid user role")
+	}
+	user.Quota = 0
+	user.BalanceResetAt = 0
+	if !CanResetBalance(user.Role) {
 		return nil
 	}
 	quota, err := DailyBalanceQuota()

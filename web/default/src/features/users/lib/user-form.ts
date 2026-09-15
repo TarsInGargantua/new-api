@@ -45,7 +45,7 @@ export const USER_FORM_DEFAULT_VALUES: UserFormValues = {
   username: '',
   display_name: '',
   password: '',
-  role: 1, // Default to common user
+  role: 0, // New users default to guests
   quota_dollars: 0,
   group: DEFAULT_GROUP,
   remark: '',
@@ -70,9 +70,10 @@ export function transformFormDataToPayload(
 
   // For create: only send required fields
   if (userId === undefined) {
-    payload.role = data.role || 1 // Default to common user
+    payload.role = data.role ?? 0 // Preserve the guest role (zero)
   } else {
     // For update: quota is adjusted atomically via /api/user/manage, not sent here
+    payload.role = data.role
     payload.group = data.group
     payload.remark = data.remark || undefined
     payload.id = userId

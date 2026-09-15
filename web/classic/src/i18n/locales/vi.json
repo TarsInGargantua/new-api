@@ -4254,6 +4254,9 @@
     "用量": "Mức dùng",
     "全部时间": "Toàn bộ thời gian",
     "训练条目": "Mục huấn luyện",
-    "未解析到训练条目": "Chưa phân tích được mục huấn luyện"
+    "未解析到训练条目": "Chưa phân tích được mục huấn luyện",
+    "当前角色不参与余额重置": "Vai trò này không được đặt lại số dư",
+    "test": "test",
+    "游客": "Khách"
   }
 }

@@ -13,14 +13,14 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestNormalizeBalancesOncePreservesAdminAndSpending(t *testing.T) {
+func TestNormalizeBalancesOncePreservesExcludedRolesAndSpending(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
 	require.NoError(t, DB.AutoMigrate(&Option{}))
 	users := []User{
-		{Username: "ryan", AffCode: "ryan", Quota: 123, UsedQuota: 456, RequestCount: 7},
-		{Username: "staff", AffCode: "staff", Quota: -10, Role: common.RoleAdminUser},
-		{Username: "admin", AffCode: "admin", Quota: 999},
-		{Username: "ADMIN", AffCode: "ADMIN", Quota: 888},
+		{Role: common.RoleCommonUser, Username: "ryan", AffCode: "ryan", Quota: 123, UsedQuota: 456, RequestCount: 7},
+		{Role: common.RoleAdminUser, Username: "staff", AffCode: "staff", Quota: -10},
+		{Role: common.RoleGuestUser, Username: "admin", AffCode: "admin", Quota: 999},
+		{Role: common.RoleTestUser, Username: "ADMIN", AffCode: "ADMIN", Quota: 888},
 	}
 	require.NoError(t, DB.Create(&users).Error)
 	now := time.Now()
@@ -49,7 +49,7 @@ func TestNormalizeBalancesOncePreservesAdminAndSpending(t *testing.T) {
 func TestNormalizeBalancesFailureRollsBackClaim(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
 	require.NoError(t, DB.AutoMigrate(&Option{}))
-	user := User{Username: "ryan", Quota: 12}
+	user := User{Role: common.RoleCommonUser, Username: "ryan", Quota: 12}
 	require.NoError(t, DB.Create(&user).Error)
 	callback := "test:fail_balance_normalization"
 	require.NoError(t, DB.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {
@@ -99,9 +99,9 @@ func TestBalanceResetMidnightAndIdempotence(t *testing.T) {
 	quota, err := DailyBalanceQuota()
 	require.NoError(t, err)
 	users := []User{
-		{Username: "alice", Quota: quota + 1000, UsedQuota: 700, RequestCount: 9},
-		{Username: "admin", Quota: 12345},
-		{Username: "bob", Quota: -20, Role: common.RoleAdminUser},
+		{Role: common.RoleCommonUser, Username: "alice", Quota: quota + 1000, UsedQuota: 700, RequestCount: 9},
+		{Role: common.RoleGuestUser, Username: "admin", Quota: 12345},
+		{Role: common.RoleAdminUser, Username: "bob", Quota: -20},
 	}
 	for i := range users {
 		users[i].AffCode = users[i].Username
@@ -135,7 +135,7 @@ func TestBalanceResetMidnightAndIdempotence(t *testing.T) {
 func TestBalanceResetUsernameAndManualRepeat(t *testing.T) {
 	setupAPIRequestLogTestDB(t)
 	now := time.Now()
-	users := []User{{Username: "ryan", Quota: 12}, {Username: "other", Quota: 13}, {Username: "ADMIN", Quota: 14}}
+	users := []User{{Role: common.RoleCommonUser, Username: "ryan", Quota: 12}, {Role: common.RoleCommonUser, Username: "other", Quota: 13}, {Role: common.RoleTestUser, Username: "ADMIN", Quota: 14}}
 	for i := range users {
 		users[i].AffCode = users[i].Username
 	}
@@ -145,7 +145,7 @@ func TestBalanceResetUsernameAndManualRepeat(t *testing.T) {
 	_, err = ResetOwnBalance(users[0].Id, "RYAN", now)
 	require.ErrorIs(t, err, ErrBalanceResetUsername)
 	_, err = ResetOwnBalance(users[2].Id, "ADMIN", now)
-	require.ErrorIs(t, err, ErrBalanceResetAdmin)
+	require.ErrorIs(t, err, ErrBalanceResetRole)
 	quota, err := ResetOwnBalance(users[0].Id, "ryan", now)
 	require.NoError(t, err)
 	require.NoError(t, changeUserBalance(users[0].Id, -123, now))
@@ -168,7 +168,7 @@ func TestBalanceResetConcurrentSpendingAndBatchMode(t *testing.T) {
 	oldBatch := common.BatchUpdateEnabled
 	common.BatchUpdateEnabled = true
 	t.Cleanup(func() { common.BatchUpdateEnabled = oldBatch })
-	user := User{Username: "alice", Quota: 1}
+	user := User{Role: common.RoleCommonUser, Username: "alice", Quota: 1}
 	require.NoError(t, DB.Create(&user).Error)
 	var wg sync.WaitGroup
 	errors := make(chan error, 40)
@@ -197,7 +197,7 @@ func TestBalanceResetSurvivesStaleProfileUpdate(t *testing.T) {
 	oldRedis := common.RedisEnabled
 	common.RedisEnabled = false
 	t.Cleanup(func() { common.RedisEnabled = oldRedis })
-	user := User{Username: "alice", Quota: 123, BalanceResetAt: BalanceResetDay(time.Now().Add(-24 * time.Hour))}
+	user := User{Role: common.RoleCommonUser, Username: "alice", Quota: 123, BalanceResetAt: BalanceResetDay(time.Now().Add(-24 * time.Hour))}
 	require.NoError(t, DB.Create(&user).Error)
 	quota, err := ResetOwnBalance(user.Id, "alice", time.Now())
 	require.NoError(t, err)
@@ -211,14 +211,14 @@ func TestBalanceResetSurvivesStaleProfileUpdate(t *testing.T) {
 }
 
 func TestDailyBalanceNewAccountInitialization(t *testing.T) {
-	user := User{Username: "alice"}
+	user := User{Role: common.RoleCommonUser, Username: "alice"}
 	require.NoError(t, user.initializeDailyBalance())
 	quota, err := DailyBalanceQuota()
 	require.NoError(t, err)
 	require.Equal(t, quota, user.Quota)
 	require.Equal(t, BalanceResetDay(time.Now()), user.BalanceResetAt)
-	admin := User{Username: "admin"}
+	admin := User{Role: common.RoleGuestUser, Username: "admin"}
 	require.NoError(t, admin.initializeDailyBalance())
-	require.Equal(t, common.QuotaForNewUser, admin.Quota)
+	require.Zero(t, admin.Quota)
 	require.Zero(t, admin.BalanceResetAt)
 }

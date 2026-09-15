@@ -120,6 +120,15 @@ func authHelper(c *gin.Context, minRole int) {
 		c.Abort()
 		return
 	}
+	// Role edits must revoke administrative access even for existing sessions.
+	if minRole >= common.RoleAdminUser {
+		currentUser, err := model.GetUserById(apiUserId, false)
+		if err != nil {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		role, status, username = currentUser.Role, currentUser.Status, currentUser.Username
+	}
 	if status.(int) == common.UserStatusDisabled {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -169,7 +178,7 @@ func TryUserAuth() func(c *gin.Context) {
 
 func UserAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		authHelper(c, common.RoleCommonUser)
+		authHelper(c, common.RoleGuestUser)
 	}
 }
 

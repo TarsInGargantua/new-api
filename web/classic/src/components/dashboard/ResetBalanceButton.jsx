@@ -29,7 +29,7 @@ const ResetBalanceButton = () => {
   const [username, setUsername] = useState('');
   const [pending, setPending] = useState(false);
   const user = userState?.user;
-  const excluded = user?.username?.toLowerCase() === 'admin';
+  const excluded = !user || ![1, 10, 100].includes(user.role);
 
   const resetBalance = async () => {
     if (pending || !user || username !== user.username) return;
@@ -61,7 +61,7 @@ const ResetBalanceButton = () => {
         theme='borderless'
         size='small'
         disabled={!user || excluded}
-        title={excluded ? t('admin 账号不参与余额重置') : undefined}
+        title={excluded ? t('当前角色不参与余额重置') : undefined}
         onClick={(event) => {
           event.stopPropagation();
           setUsername('');

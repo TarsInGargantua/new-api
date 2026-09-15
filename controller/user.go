@@ -182,7 +182,7 @@ func Register(c *gin.Context) {
 		Password:    user.Password,
 		DisplayName: user.Username,
 		InviterId:   inviterId,
-		Role:        common.RoleCommonUser, // 明确设置角色为普通用户
+		Role:        common.RoleGuestUser, // 新注册用户默认是游客
 	}
 	if common.EmailVerificationEnabled {
 		cleanUser.Email = user.Email
@@ -676,8 +676,12 @@ func GetUserModels(c *gin.Context) {
 }
 
 func UpdateUser(c *gin.Context) {
-	var updatedUser model.User
-	err := json.NewDecoder(c.Request.Body).Decode(&updatedUser)
+	var request struct {
+		model.User
+		Role *int `json:"role"`
+	}
+	err := common.DecodeJson(c.Request.Body, &request)
+	updatedUser := request.User
 	if err != nil || updatedUser.Id == 0 {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
@@ -692,6 +696,14 @@ func UpdateUser(c *gin.Context) {
 	originUser, err := model.GetUserById(updatedUser.Id, false)
 	if err != nil {
 		common.ApiError(c, err)
+		return
+	}
+	updatedUser.Role = originUser.Role
+	if request.Role != nil {
+		updatedUser.Role = *request.Role
+	}
+	if !common.IsValidateRole(updatedUser.Role) || (originUser.Role == common.RoleRootUser && updatedUser.Role != originUser.Role) {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
 	myRole := c.GetInt("role")
@@ -953,7 +965,7 @@ func CreateUser(c *gin.Context) {
 		user.DisplayName = user.Username
 	}
 	myRole := c.GetInt("role")
-	if user.Role >= myRole {
+	if !common.IsValidateRole(user.Role) || user.Role >= myRole {
 		common.ApiErrorI18n(c, i18n.MsgUserCannotCreateHigherLevel)
 		return
 	}
@@ -1101,6 +1113,12 @@ func ManageUser(c *gin.Context) {
 		return
 	}
 
+	if req.Action == "promote" || req.Action == "demote" {
+		if err := model.DB.Model(&model.User{}).Where("id = ?", user.Id).Update("role", user.Role).Error; err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 	if err := user.Update(false); err != nil {
 		common.ApiError(c, err)
 		return

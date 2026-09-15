@@ -19,10 +19,10 @@ func ResetOwnBalance(c *gin.Context) {
 		return
 	}
 	quota, err := model.ResetOwnBalance(c.GetInt("id"), request.Username, time.Now())
-	if errors.Is(err, model.ErrBalanceResetAdmin) || errors.Is(err, model.ErrBalanceResetUsername) {
+	if errors.Is(err, model.ErrBalanceResetRole) || errors.Is(err, model.ErrBalanceResetUsername) {
 		message := "用户名不匹配，请输入自己的用户名"
-		if errors.Is(err, model.ErrBalanceResetAdmin) {
-			message = "admin 账号不参与余额重置"
+		if errors.Is(err, model.ErrBalanceResetRole) {
+			message = "当前角色不参与余额重置"
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": message})
 		return

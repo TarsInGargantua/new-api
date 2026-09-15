@@ -139,7 +139,7 @@ func GitHubOAuth(c *gin.Context) {
 				user.DisplayName = "GitHub User"
 			}
 			user.Email = githubUser.Email
-			user.Role = common.RoleCommonUser
+			user.Role = common.RoleGuestUser
 			user.Status = common.UserStatusEnabled
 			affCode := session.Get("aff")
 			inviterId := 0

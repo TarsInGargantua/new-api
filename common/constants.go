@@ -216,12 +216,13 @@ const (
 const (
 	RoleGuestUser  = 0
 	RoleCommonUser = 1
+	RoleTestUser   = 2
 	RoleAdminUser  = 10
 	RoleRootUser   = 100
 )
 
 func IsValidateRole(role int) bool {
-	return role == RoleGuestUser || role == RoleCommonUser || role == RoleAdminUser || role == RoleRootUser
+	return role == RoleGuestUser || role == RoleTestUser || role == RoleCommonUser || role == RoleAdminUser || role == RoleRootUser
 }
 
 var (

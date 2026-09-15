@@ -146,6 +146,7 @@ func TestRyanBalanceResetRelay(t *testing.T) {
 	engine.Use(gin.Recovery(), sessions.Sessions("test-session", cookie.NewStore([]byte("local-only-test-secret-32-bytes!!"))))
 	engine.POST("/api/user/self/reset_balance", middleware.UserAuth(), controller.ResetOwnBalance)
 	engine.POST("/api/user/manage", middleware.AdminAuth(), controller.ManageUser)
+	engine.PUT("/api/user/", middleware.AdminAuth(), controller.UpdateUser)
 	SetRelayRouter(engine)
 	request := func(method, path, body, auth string, id int) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -447,6 +448,30 @@ func TestRyanBalanceResetRelay(t *testing.T) {
 			require.Equal(t, 200, chat(false).Code)
 		})
 	}
+	t.Run("guest and test cannot reset but funded keys still relay", func(t *testing.T) {
+		for _, role := range []int{common.RoleGuestUser, common.RoleTestUser} {
+			rec := request("PUT", "/api/user/", fmt.Sprintf(`{"id":101,"username":"ryan","display_name":"ryan","group":"default","role":%d}`, role), adminAccess, 102)
+			require.Contains(t, rec.Body.String(), `"success":true`)
+			override(0)
+			require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", 101).Update("balance_reset_at", 0).Error)
+			require.Equal(t, 403, chat(false).Code)
+			rec = request("POST", "/api/user/self/reset_balance", `{"username":"ryan"}`, access, 101)
+			require.Equal(t, 400, rec.Code)
+			require.Zero(t, balance())
+			override(target)
+			require.Equal(t, 200, chat(false).Code)
+			require.Equal(t, 200, chat(true).Code)
+			require.Less(t, balance(), target)
+		}
+		rec := request("PUT", "/api/user/", `{"id":101,"username":"ryan","display_name":"ryan","group":"default","role":1}`, adminAccess, 102)
+		require.Contains(t, rec.Body.String(), `"success":true`)
+		reset()
+	})
+	t.Run("admin username now participates as super administrator", func(t *testing.T) {
+		rec := request("POST", "/api/user/self/reset_balance", `{"username":"admin"}`, adminAccess, 102)
+		require.Equal(t, 200, rec.Code)
+		require.Contains(t, rec.Body.String(), `"success":true`)
+	})
 	t.Run("account token and admin preserved", func(t *testing.T) {
 		var current model.Token
 		require.NoError(t, model.DB.First(&current, token.Id).Error)
@@ -455,7 +480,7 @@ func TestRyanBalanceResetRelay(t *testing.T) {
 		require.Equal(t, token.Group, current.Group)
 		require.Equal(t, token.UnlimitedQuota, current.UnlimitedQuota)
 		require.NoError(t, model.DB.First(&admin, 102).Error)
-		require.Equal(t, 123456, admin.Quota)
+		require.Equal(t, target, admin.Quota)
 		var count int64
 		require.NoError(t, model.DB.Model(&model.Log{}).Where("user_id = ? AND type = ?", 101, model.LogTypeConsume).Count(&count).Error)
 		require.Zero(t, count)

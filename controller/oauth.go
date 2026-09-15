@@ -259,7 +259,7 @@ func findOrCreateOAuthUser(c *gin.Context, provider oauth.Provider, oauthUser *o
 	if oauthUser.Email != "" {
 		user.Email = oauthUser.Email
 	}
-	user.Role = common.RoleCommonUser
+	user.Role = common.RoleGuestUser
 	user.Status = common.UserStatusEnabled
 
 	// Handle affiliate code
