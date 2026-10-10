@@ -567,6 +567,13 @@ func closeDB(db *gorm.DB) error {
 }
 
 func CloseDB() error {
+	for _, db := range []*gorm.DB{apiRequestLogEnqueueDB, apiRequestLogDeliveryDB} {
+		if db != nil {
+			if err := closeDB(db); err != nil {
+				return err
+			}
+		}
+	}
 	if REQUEST_LOG_DB != nil && REQUEST_LOG_DB != DB && REQUEST_LOG_DB != LOG_DB {
 		err := closeDB(REQUEST_LOG_DB)
 		if err != nil {

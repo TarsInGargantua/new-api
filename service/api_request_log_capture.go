@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -110,6 +111,11 @@ func StartAPIRequestLogCapture(c *gin.Context) {
 	if c == nil || c.Writer == nil || !common.APIRequestLogEnabled {
 		return
 	}
+	if model.APIRequestLogCapturePaused() {
+		c.Set("api_request_log_capture_paused", true)
+		common.SetContextKey(c, constant.ContextKeyAPIRequestLogDeferConsumeSync, true)
+		return
+	}
 	if common.IsCallLogExcludedUsername(c.GetString("username")) {
 		return
 	}
@@ -173,6 +179,9 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 	if c == nil || c.Request == nil || !common.APIRequestLogEnabled {
 		return
 	}
+	if model.SkipUnavailableAPIRequestLogCapture() || c.GetBool("api_request_log_capture_paused") {
+		return
+	}
 	if common.IsCallLogExcludedUsername(c.GetString("username")) {
 		return
 	}
@@ -228,7 +237,9 @@ func recordAPIRequestLog(c *gin.Context, relayInfo *relaycommon.RelayInfo, relay
 	}
 	log.TurnMeta = apiRequestLogMaterializationMeta(log, itemBuild)
 	if err := model.CreateAPIRequestLog(log); err != nil {
-		logger.LogError(c, "failed to record api request log: "+err.Error())
+		if !errors.Is(err, model.ErrAPIRequestLogCapturePaused) {
+			logger.LogError(c, "failed to record api request log: "+err.Error())
+		}
 		return
 	}
 	if usageLog != nil {
