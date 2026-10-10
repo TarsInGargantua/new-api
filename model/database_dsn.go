@@ -13,6 +13,7 @@ var databaseDSNEnvKeys = []string{
 	"MYSQL_DSN",
 	"MYSQL_URL",
 	"MYSQL_URI",
+	"MYSQL_CONNECTION_STRING",
 	"DATABASE_URL",
 }
 
