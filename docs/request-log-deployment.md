@@ -19,9 +19,9 @@ API_REQUEST_LOG_ASYNC_WRITE=false
 API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE=false
 API_REQUEST_LOG_DEFERRED_MATERIALIZATION=true
 API_REQUEST_LOG_OUTBOX_ENABLED=true
-API_REQUEST_LOG_OUTBOX_WORKERS=8
-API_REQUEST_LOG_OUTBOX_BATCH_SIZE=8
-API_REQUEST_LOG_OUTBOX_POLL_INTERVAL_MS=200
+API_REQUEST_LOG_OUTBOX_WORKERS=1
+API_REQUEST_LOG_OUTBOX_BATCH_SIZE=1
+API_REQUEST_LOG_OUTBOX_POLL_INTERVAL_MS=1000
 API_REQUEST_LOG_OUTBOX_LEASE_SECONDS=900
 API_REQUEST_LOG_ITEM_BATCH_SIZE=200
 API_REQUEST_LOG_ITEM_BATCH_BYTES=8388608
@@ -34,6 +34,9 @@ CALL_LOG_EXCLUDED_USERNAMES=ryan
 REQUEST_LOG_SQL_MAX_IDLE_CONNS=2
 REQUEST_LOG_SQL_MAX_OPEN_CONNS=8
 REQUEST_LOG_SQL_MAX_LIFETIME=300
+SQL_MAX_OPEN_CONNS=40
+SQL_MAX_IDLE_CONNS=5
+SQL_MAX_LIFETIME=300
 REQUEST_LOG_SQL_DSN=newapi_request_log_app:<password>@tcp(<REMOTE_PUBLIC_HOST>:3306)/newapi_request_logs?charset=utf8mb4&parseTime=true&loc=Local
 ```
 
@@ -45,7 +48,10 @@ For high-concurrency or very large requests:
 
 - Keep `API_REQUEST_LOG_ASYNC_WRITE=false` for durable raw capture. `CreateAPIRequestLog` returns only after the parent, parsed items, and durable materialization job are persisted.
 - Keep `API_REQUEST_LOG_DEFERRED_MATERIALIZATION=true` so request goroutines never wait on session/turn aggregation locks. In this mode, `items_status=ok` means raw items are durable; use the materialization queue status to verify turn completion.
-- `API_REQUEST_LOG_OUTBOX_ENABLED=true` writes the complete request-log payload to the primary database before returning to the caller. The outbox workers replay it to the dedicated request-log database. Keep the worker count aligned with the remote database connection budget; increasing it does not help a stalled or overloaded remote database.
+- `API_REQUEST_LOG_OUTBOX_ENABLED=true` writes the complete request-log payload to the primary database before returning to the caller while delivery is healthy. The outbox uses separate connection pools (two enqueue connections and one delivery connection), never the relay's business pool. Enqueue waits at most 500 ms; queue operations have a two-second deadline. A local enqueue failure is reported and the relay response remains unchanged; that request's raw backup may be unavailable.
+- Delivery checks the remote database before claiming local jobs. A shared circuit breaker backs off from 8 seconds to five minutes after failures. New raw-content capture pauses while delivery is unhealthy, including startup until the first successful delivery check. This prevents an unreachable backup server from growing the primary database until its disk is full. **Requests during this pause have no raw-content backup.** Existing durable outbox jobs are retained for retry; normal billing/usage logging continues. `capture_paused`, `skipped_since_start`, `enqueue_failures_since_start`, and `retry_at` in the outbox status expose degradation.
+- Remote database setup is lazy, so an unavailable backup endpoint cannot prevent the gateway from starting. Remote delivery has a 60-second deadline. Delivery batches are serialized in each gateway process; increasing worker count does not increase delivery concurrency. Keep batches small for large payloads.
+- Budget `SQL_MAX_OPEN_CONNS` across every application replica sharing MySQL, plus three outbox connections per gateway and headroom for management. Do not use the default 1000-connection application pool with a small shared database. Monitor disk free space on the **primary cloud host** as well as the backup host.
 - `API_REQUEST_LOG_OUTBOX_BATCH_SIZE` controls how many durable jobs each worker claims per poll. `API_REQUEST_LOG_ITEM_BATCH_SIZE` and `API_REQUEST_LOG_ITEM_BATCH_BYTES` control the remote item INSERT batches; the byte limit prevents a single large request from exceeding MySQL packet limits.
 - Read-only model discovery requests (`GET /v1/models`, `GET /v1/models/:model`, `GET /v1beta/models`, and `GET /v1beta/openai/models`) bypass request-log capture so a remote log-database slowdown cannot block client startup. Inference requests continue to be captured.
 - The in-process item queue is volatile and can lose pending items on a crash or restart. It is enabled only when both `API_REQUEST_LOG_ASYNC_WRITE=true` and `API_REQUEST_LOG_ALLOW_VOLATILE_ASYNC_WRITE=true` explicitly accept that risk. Do not enable it for the current production deployment.

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -44,17 +45,21 @@ type apiRequestLogOutboxPayload struct {
 }
 
 type APIRequestLogOutboxStatus struct {
-	Enabled                  bool  `json:"enabled"`
-	Workers                  int   `json:"workers"`
-	BatchSize                int   `json:"batch_size"`
-	Pending                  int64 `json:"pending"`
-	Processing               int64 `json:"processing"`
-	OldestPendingAt          int64 `json:"oldest_pending_at,omitempty"`
-	OldestPendingAgeSecs     int64 `json:"oldest_pending_age_seconds,omitempty"`
-	NewestPendingAt          int64 `json:"newest_pending_at,omitempty"`
-	LastErrorAt              int64 `json:"last_error_at,omitempty"`
-	SyncedSinceStart         int64 `json:"synced_since_start"`
-	FailedAttemptsSinceStart int64 `json:"failed_attempts_since_start"`
+	CapturePaused             bool  `json:"capture_paused"`
+	SkippedSinceStart         int64 `json:"skipped_since_start"`
+	RetryAt                   int64 `json:"retry_at,omitempty"`
+	EnqueueFailuresSinceStart int64 `json:"enqueue_failures_since_start"`
+	Enabled                   bool  `json:"enabled"`
+	Workers                   int   `json:"workers"`
+	BatchSize                 int   `json:"batch_size"`
+	Pending                   int64 `json:"pending"`
+	Processing                int64 `json:"processing"`
+	OldestPendingAt           int64 `json:"oldest_pending_at,omitempty"`
+	OldestPendingAgeSecs      int64 `json:"oldest_pending_age_seconds,omitempty"`
+	NewestPendingAt           int64 `json:"newest_pending_at,omitempty"`
+	LastErrorAt               int64 `json:"last_error_at,omitempty"`
+	SyncedSinceStart          int64 `json:"synced_since_start"`
+	FailedAttemptsSinceStart  int64 `json:"failed_attempts_since_start"`
 }
 
 type apiRequestLogOutboxTimestamp struct {
@@ -71,24 +76,30 @@ var apiRequestLogOutboxFailedAttempts int64
 var apiRequestLogOutboxLastErrorAt int64
 
 func EnsureAPIRequestLogOutboxTable() error {
-	if DB == nil {
+	db := requestLogEnqueueDB()
+	if db == nil {
 		return errors.New("primary database is not initialized for request-log outbox")
 	}
 	apiRequestLogOutboxEnsureMu.Lock()
 	defer apiRequestLogOutboxEnsureMu.Unlock()
-	if apiRequestLogOutboxEnsuredDB == DB {
+	if apiRequestLogOutboxEnsuredDB == db {
 		return nil
 	}
-	if err := DB.AutoMigrate(&APIRequestLogOutbox{}); err != nil {
+	ctx, cancel := requestLogLocalContext()
+	defer cancel()
+	if err := db.WithContext(ctx).AutoMigrate(&APIRequestLogOutbox{}); err != nil {
 		return err
 	}
-	apiRequestLogOutboxEnsuredDB = DB
+	apiRequestLogOutboxEnsuredDB = db
 	return nil
 }
 
 func enqueueAPIRequestLogOutbox(log *APIRequestLog) error {
 	if log == nil {
 		return nil
+	}
+	if SkipUnavailableAPIRequestLogCapture() {
+		return ErrAPIRequestLogCapturePaused
 	}
 	if err := EnsureAPIRequestLogOutboxTable(); err != nil {
 		return err
@@ -101,13 +112,19 @@ func enqueueAPIRequestLogOutbox(log *APIRequestLog) error {
 		return fmt.Errorf("marshal request-log outbox payload: %w", err)
 	}
 	now := common.GetTimestamp()
-	return DB.Create(&APIRequestLogOutbox{
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err = requestLogEnqueueDB().WithContext(ctx).Create(&APIRequestLogOutbox{
 		CreatedAt:   now,
 		AvailableAt: now,
 		RequestId:   log.RequestId,
 		UsageLogId:  log.UsageLogId,
 		Payload:     APIRequestLogBody(payload),
 	}).Error
+	if err != nil {
+		atomic.AddInt64(&apiRequestLogOutboxEnqueueFailures, 1)
+	}
+	return err
 }
 
 func cloneAPIRequestLogTurnMeta(meta *APIRequestLogTurnMeta) *APIRequestLogTurnMeta {
@@ -146,9 +163,7 @@ func apiRequestLogOutboxWorker() {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
-		if err := syncAPIRequestLogOutboxBatch(); err != nil {
-			setAPIRequestLogLastWriteError(err)
-		}
+		runAPIRequestLogOutboxWorkerBatch()
 		<-ticker.C
 	}
 }
@@ -161,31 +176,52 @@ func syncAPIRequestLogOutboxBatch() error {
 	if batchSize < 1 {
 		batchSize = 1
 	}
-	jobs, err := claimAPIRequestLogOutboxBatch(DB, common.GetTimestamp(), batchSize)
+	db := requestLogDeliveryDB()
+	// Check the destination before touching the primary queue. A failed tunnel
+	// must not cause endless queue scans and row updates on the business DB.
+	remotePool, err := requestLogDB().DB()
 	if err != nil {
 		return err
 	}
-	var firstErr error
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	err = remotePool.PingContext(probeCtx)
+	probeCancel()
+	if err != nil {
+		return err
+	}
+	jobs, err := claimAPIRequestLogOutboxBatch(db, common.GetTimestamp(), batchSize)
+	if err != nil {
+		return err
+	}
 	for i := range jobs {
-		if err := syncAPIRequestLogOutboxJob(DB, &jobs[i]); err != nil && firstErr == nil {
-			firstErr = err
+		if err := syncAPIRequestLogOutboxJob(db, &jobs[i]); err != nil {
+			// Unprocessed jobs remain durable; their leases expire for retry.
+			return err
 		}
 	}
-	return firstErr
+	return nil
 }
 
 func claimAPIRequestLogOutboxBatch(db *gorm.DB, now int64, batchSize int) ([]APIRequestLogOutbox, error) {
 	if db == nil || batchSize < 1 {
 		return nil, nil
 	}
+	ctx, cancel := requestLogLocalContext()
+	defer cancel()
+	db = db.WithContext(ctx)
 	var candidates []APIRequestLogOutbox
-	if err := db.Where("available_at <= ? AND lease_until < ?", now, now).
+	if err := db.Select("id", "attempts").Where("available_at <= ? AND lease_until < ?", now, now).
 		Order("id asc").Limit(batchSize).Find(&candidates).Error; err != nil {
 		return nil, err
 	}
 	leaseSeconds := common.APIRequestLogOutboxLeaseSeconds
 	if leaseSeconds < 30 {
 		leaseSeconds = apiRequestLogOutboxDefaultLeaseSeconds
+	}
+	// Jobs in a claimed batch are delivered sequentially with a 60s deadline.
+	// The last job must still own its lease when delivery finishes.
+	if minimum := batchSize*60 + 30; leaseSeconds < minimum {
+		leaseSeconds = minimum
 	}
 	leaseUntil := now + int64(leaseSeconds)
 	claimed := make([]APIRequestLogOutbox, 0, len(candidates))
@@ -204,6 +240,10 @@ func claimAPIRequestLogOutboxBatch(db *gorm.DB, now int64, batchSize int) ([]API
 		}
 		candidate.LeaseUntil = leaseUntil
 		candidate.Attempts++
+		// Fetch the large payload only after owning the lease.
+		if err := db.First(&candidate, candidate.Id).Error; err != nil {
+			return nil, err
+		}
 		claimed = append(claimed, candidate)
 	}
 	return claimed, nil
@@ -218,10 +258,16 @@ func syncAPIRequestLogOutboxJob(db *gorm.DB, job *APIRequestLogOutbox) error {
 		return releaseAPIRequestLogOutboxJob(db, job, fmt.Errorf("decode request-log outbox payload: %w", err))
 	}
 	payload.Log.TurnMeta = payload.TurnMeta
-	if err := createOrUpdateAPIRequestLog(&payload.Log); err != nil {
+	remoteCtx, remoteCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	err := createOrUpdateAPIRequestLogOnDB(requestLogDB().WithContext(remoteCtx), &payload.Log, materializeAPIRequestLogTurnForWrite)
+	remoteCancel()
+	if err != nil {
 		return releaseAPIRequestLogOutboxJob(db, job, err)
 	}
-	if err := db.Delete(&APIRequestLogOutbox{}, job.Id).Error; err != nil {
+	ctx, cancel := requestLogLocalContext()
+	defer cancel()
+	if err := db.WithContext(ctx).Where("id = ? AND lease_until = ? AND attempts = ?", job.Id, job.LeaseUntil, job.Attempts).
+		Delete(&APIRequestLogOutbox{}).Error; err != nil {
 		return fmt.Errorf("ack request-log outbox job %d: %w", job.Id, err)
 	}
 	atomic.AddInt64(&apiRequestLogOutboxSynced, 1)
@@ -241,7 +287,10 @@ func releaseAPIRequestLogOutboxJob(db *gorm.DB, job *APIRequestLogOutbox, cause 
 	if len(message) > 4096 {
 		message = message[:4096]
 	}
-	result := db.Model(&APIRequestLogOutbox{}).Where("id = ?", job.Id).Updates(map[string]interface{}{
+	ctx, cancel := requestLogLocalContext()
+	defer cancel()
+	result := db.WithContext(ctx).Model(&APIRequestLogOutbox{}).
+		Where("id = ? AND lease_until = ? AND attempts = ?", job.Id, job.LeaseUntil, job.Attempts).Updates(map[string]interface{}{
 		"lease_until":  0,
 		"available_at": now + int64(delay/time.Second),
 		"last_error":   message,
@@ -268,11 +317,15 @@ func apiRequestLogOutboxRetryDelay(attempts int) time.Duration {
 
 func GetAPIRequestLogOutboxStatus() (APIRequestLogOutboxStatus, error) {
 	status := APIRequestLogOutboxStatus{
-		Enabled:                  common.APIRequestLogOutboxEnabled,
-		Workers:                  common.APIRequestLogOutboxWorkers,
-		BatchSize:                common.APIRequestLogOutboxBatchSize,
-		SyncedSinceStart:         atomic.LoadInt64(&apiRequestLogOutboxSynced),
-		FailedAttemptsSinceStart: atomic.LoadInt64(&apiRequestLogOutboxFailedAttempts),
+		CapturePaused:             APIRequestLogCapturePaused(),
+		SkippedSinceStart:         atomic.LoadInt64(&apiRequestLogOutboxSkipped),
+		RetryAt:                   atomic.LoadInt64(&apiRequestLogOutboxRetryAt) / int64(time.Second),
+		EnqueueFailuresSinceStart: atomic.LoadInt64(&apiRequestLogOutboxEnqueueFailures),
+		Enabled:                   common.APIRequestLogOutboxEnabled,
+		Workers:                   common.APIRequestLogOutboxWorkers,
+		BatchSize:                 common.APIRequestLogOutboxBatchSize,
+		SyncedSinceStart:          atomic.LoadInt64(&apiRequestLogOutboxSynced),
+		FailedAttemptsSinceStart:  atomic.LoadInt64(&apiRequestLogOutboxFailedAttempts),
 	}
 	if !status.Enabled {
 		return status, nil
@@ -280,15 +333,18 @@ func GetAPIRequestLogOutboxStatus() (APIRequestLogOutboxStatus, error) {
 	if DB == nil {
 		return status, errors.New("primary database is not initialized for request-log outbox")
 	}
+	ctx, cancel := requestLogLocalContext()
+	defer cancel()
+	db := requestLogDeliveryDB().WithContext(ctx)
 	now := common.GetTimestamp()
-	if err := DB.Model(&APIRequestLogOutbox{}).Where("lease_until >= ?", now).Count(&status.Processing).Error; err != nil {
+	if err := db.Model(&APIRequestLogOutbox{}).Where("lease_until >= ?", now).Count(&status.Processing).Error; err != nil {
 		return status, err
 	}
-	if err := DB.Model(&APIRequestLogOutbox{}).Where("lease_until < ?", now).Count(&status.Pending).Error; err != nil {
+	if err := db.Model(&APIRequestLogOutbox{}).Where("lease_until < ?", now).Count(&status.Pending).Error; err != nil {
 		return status, err
 	}
 	var oldest apiRequestLogOutboxTimestamp
-	result := DB.Model(&APIRequestLogOutbox{}).
+	result := db.Model(&APIRequestLogOutbox{}).
 		Select("id, created_at").Where("lease_until < ?", now).
 		Order("created_at asc, id asc").Limit(1).Find(&oldest)
 	if result.Error != nil {
@@ -301,7 +357,7 @@ func GetAPIRequestLogOutboxStatus() (APIRequestLogOutboxStatus, error) {
 		}
 	}
 	var newest apiRequestLogOutboxTimestamp
-	result = DB.Model(&APIRequestLogOutbox{}).
+	result = db.Model(&APIRequestLogOutbox{}).
 		Select("id, created_at").Order("id desc").Limit(1).Find(&newest)
 	if result.Error != nil {
 		return status, result.Error
@@ -314,6 +370,11 @@ func GetAPIRequestLogOutboxStatus() (APIRequestLogOutboxStatus, error) {
 }
 
 func resetAPIRequestLogOutboxWorkersForTest() {
+	atomic.StoreInt64(&apiRequestLogOutboxRetryAt, 0)
+	atomic.StoreInt64(&apiRequestLogOutboxEnqueueFailures, 0)
+	atomic.StoreInt32(&apiRequestLogDeliveryUnhealthy, 0)
+	atomic.StoreInt64(&apiRequestLogOutboxSkipped, 0)
+	apiRequestLogOutboxFailures = 0
 	apiRequestLogOutboxWorkerMu.Lock()
 	apiRequestLogOutboxWorkersStarted = false
 	apiRequestLogOutboxWorkerMu.Unlock()

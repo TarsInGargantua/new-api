@@ -14,9 +14,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 
 	"github.com/gin-gonic/gin"
-	"github.com/glebarez/sqlite"
-	"gorm.io/driver/mysql"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
@@ -265,6 +262,9 @@ func InitRequestLogDB() error {
 	sqlDB.SetMaxOpenConns(poolConfig.MaxOpenConns)
 	sqlDB.SetConnMaxLifetime(poolConfig.MaxLifetime)
 	if common.APIRequestLogOutboxEnabled {
+		if err := initAPIRequestLogOutboxPools(); err != nil {
+			return err
+		}
 		if err := EnsureAPIRequestLogOutboxTable(); err != nil {
 			return err
 		}
@@ -273,6 +273,7 @@ func InitRequestLogDB() error {
 	// The durable outbox must let the gateway start even while the remote log
 	// database is unavailable. Its worker will retry delivery after startup.
 	if common.APIRequestLogOutboxEnabled {
+		atomic.StoreInt32(&apiRequestLogDeliveryUnhealthy, 1)
 		startAPIRequestLogOutboxWorkers()
 		return nil
 	}
@@ -330,16 +331,7 @@ func requestLogConnectionPoolConfigFromEnv() requestLogConnectionPoolConfig {
 
 func chooseDedicatedRequestLogDB() (*gorm.DB, error) {
 	dsn := resolveConfiguredDSN("REQUEST_LOG_SQL_DSN")
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		return gorm.Open(postgres.New(postgres.Config{
-			DSN:                  dsn,
-			PreferSimpleProtocol: true,
-		}), &gorm.Config{PrepareStmt: true})
-	}
-	if strings.HasPrefix(dsn, "local") {
-		return gorm.Open(sqlite.Open(common.SQLitePath), &gorm.Config{PrepareStmt: true})
-	}
-	return gorm.Open(mysql.Open(ensureMySQLDSNDefaults(dsn)), &gorm.Config{PrepareStmt: true})
+	return openIsolatedRequestLogDB(dsn)
 }
 
 func requestLogDB() *gorm.DB {
@@ -397,7 +389,9 @@ func CreateAPIRequestLog(log *APIRequestLog) error {
 	normalizeAPIRequestLog(log)
 	if common.APIRequestLogOutboxEnabled {
 		err := enqueueAPIRequestLogOutbox(log)
-		setAPIRequestLogLastWriteError(err)
+		if err != nil && !errors.Is(err, ErrAPIRequestLogCapturePaused) {
+			setAPIRequestLogLastWriteError(err)
+		}
 		return err
 	}
 	if err := EnsureAPIRequestLogTable(); err != nil {
@@ -415,7 +409,10 @@ func createOrUpdateAPIRequestLog(log *APIRequestLog) error {
 type apiRequestLogTurnMaterializer func(*gorm.DB, *APIRequestLog, []APIRequestLogItem) error
 
 func createOrUpdateAPIRequestLogWithMaterializer(log *APIRequestLog, materialize apiRequestLogTurnMaterializer) error {
-	db := requestLogDB()
+	return createOrUpdateAPIRequestLogOnDB(requestLogDB(), log, materialize)
+}
+
+func createOrUpdateAPIRequestLogOnDB(db *gorm.DB, log *APIRequestLog, materialize apiRequestLogTurnMaterializer) error {
 	items := log.Items
 	log.Items = nil
 	hasItems := len(items) > 0
